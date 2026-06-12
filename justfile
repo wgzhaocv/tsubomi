@@ -1,7 +1,7 @@
 default:
     @just --list
 
-# run backend + frontend together; Ctrl-C stops both
+# バックエンド + フロントエンドを同時起動。Ctrl-C で両方止まる
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -10,58 +10,74 @@ dev:
     (cd web && bun run dev) &
     wait
 
-# run the axum server on http://localhost:8080
+# axum サーバを http://localhost:9090 で起動
 dev-server:
     cargo run -p tsubomi-server
 
-# run the web dev server (http://localhost:5173, proxies /api -> :8080)
+# web dev サーバを起動(http://localhost:5173、/api → :9090 にプロキシ)
 dev-web:
     cd web && bun run dev
 
-# run the CLI, e.g. `just cli hello` or `just cli health`
+# tbm CLI を実行。例:`just cli health` / `just cli login`
 cli *args:
     cargo run -p tsubomi-cli -- {{args}}
 
-# install web dependencies
+# 管制面 postgres を起動(インフラ層。香橙派でも同じファイル)
+db-up:
+    docker compose -f infra/docker-compose.yml up -d
+
+# 管制面 postgres を停止(データは volume に残る)
+db-down:
+    docker compose -f infra/docker-compose.yml down
+
+# 管制面 DB に psql で入る
+db-psql:
+    docker exec -it tsubomi-pg-platform psql -U tsubomi -d tsubomi_platform
+
+# web の依存をインストール
 web-install:
     cd web && bun install
 
-# release build: server + cli binaries, plus the production web bundle
+# リリースビルド:server + cli バイナリ + 本番 web バンドル
 build:
     cargo build --release
     cd web && bun run build
 
-# run all rust tests
+# Rust のテストを全部実行
 test:
     cargo test --workspace
 
-# format rust + web
+# Rust + web のフォーマット
 fmt:
     cargo fmt --all
     cd web && bun run fmt
 
-# typecheck rust + clippy + web lint
+# 型チェック + clippy + web lint
 check:
     cargo check --workspace
     cargo clippy --workspace -- -D warnings
     cd web && bun run lint
 
-# build the all-in-one image: rust server + built SPA, served on one port
+# オールインワンイメージをビルド:rust サーバ + ビルド済み SPA を 1 ポートで配信
 docker-build:
     docker build -t tsubomi-server:latest .
 
-# build + run the whole app in docker, detached, on http://localhost:8080
+# アプリ全体を docker でビルド + 起動(detached、http://localhost:9090)
 up:
     docker compose up --build -d
 
-# stop + remove the docker app
+# docker アプリを停止 + 削除
 down:
     docker compose down
 
-# follow server logs
+# サーバログを追う
 logs:
     docker compose logs -f server
 
-# build the release CLI binary -> target/release/tsubomi
+# リリース CLI バイナリをビルド -> target/release/tbm
 release-cli:
     cargo build --release -p tsubomi-cli
+
+# CLI を 4 ターゲットでビルドして香橙派へリリース公開
+release-cli-publish:
+    chmod +x scripts/release-cli.sh && scripts/release-cli.sh

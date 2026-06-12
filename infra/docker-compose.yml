@@ -1,0 +1,30 @@
+# tsubomi インフラ層 — IaC(このファイル)が管理し、プラットフォーム自身は触らない。
+# プラットフォーム自身の Postgres をプラットフォームが起動することはできない
+# (鶏と卵)ため、ここにあるものは
+# `docker compose -f infra/docker-compose.yml up -d` で立てる。
+#
+# 同じファイルが dev の Mac でも本番ホスト(香橙派 arm64 / 将来の x86_64 機)
+# でも動く(postgres イメージは multi-arch)。
+# 後のフェーズで追加:traefik, registry, pg-tenant, pgbouncer, valkey。
+services:
+  pg-platform:
+    # 管制面メタデータ専用。loopback にバインド:bridge ネットワーク上の
+    # ユーザコンテナはホストの 127.0.0.1 に到達できないので、このインスタンスは
+    # テナントのワークロードから物理的に隔離される(tech-design §1)。
+    image: postgres:18
+    container_name: tsubomi-pg-platform
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tsubomi
+      POSTGRES_PASSWORD: ${PG_PLATFORM_PASSWORD:-tsubomi_dev}
+      POSTGRES_DB: tsubomi_platform
+    ports:
+      # 5434:5432/5433 はローカルの他プロジェクトに取られがちなので。
+      - "127.0.0.1:5434:5432"
+    volumes:
+      # postgres:18 イメージは PGDATA を /var/lib/postgresql/18/docker に置く。
+      # バージョン非依存の親ディレクトリをマウントするのが upstream 推奨。
+      - pg_platform_data:/var/lib/postgresql
+
+volumes:
+  pg_platform_data:

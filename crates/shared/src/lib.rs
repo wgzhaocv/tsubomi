@@ -1,19 +1,117 @@
-//! Types shared between the tsubomi server and CLI.
+//! tsubomi サーバと tbm CLI が共有する型・定数・暗号プリミティブ。
 //!
-//! Defining request/response shapes once here keeps the HTTP contract in sync:
-//! the server serializes these, the CLI deserializes the same structs.
+//! リクエスト/レスポンスの形やプロトコル定数をここで一度だけ定義することで、
+//! サーバと CLI の契約が同期し続ける(片方だけ変えてズレる事故を構造的に防ぐ)。
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-/// Response body for `GET /api/health`.
+// ============ OAuth / PKCE プロトコル定数(サーバと CLI の合意点)============
+
+/// tbm CLI の OAuth client_id。サーバは検証側、CLI は申告側として同じ値を使う。
+pub const OAUTH_CLIENT_ID: &str = "tbm-cli";
+/// CLI ログインがブラウザで開く SPA ルート。
+pub const OAUTH_AUTHORIZE_PATH: &str = "/oauth/authorize";
+/// 認可後にコードを表示する SPA ルート(redirect_uri の固定部分)。
+pub const OAUTH_CALLBACK_PATH: &str = "/oauth/code/callback";
+/// code → token 交換のエンドポイント。
+pub const OAUTH_TOKEN_PATH: &str = "/api/oauth/token";
+/// PKCE 認可コードのプレフィックス。
+pub const AUTHCODE_PREFIX: &str = "tbmc_";
+/// CLI トークン平文のプレフィックス(GitHub 流のリーク検出マーカー)。
+pub const CLI_TOKEN_PREFIX: &str = "tbm_";
+
+/// インストーラ(install.sh)がシェル rc に書く PATH ブロックの目印。
+/// `tbm uninstall` がこれを手がかりにブロックを丸ごと取り除く。
+/// ★ シェルスクリプトは Rust の const を import できないため、
+///   crates/server/scripts/install.sh に同じ文字列がインライン展開されている。
+///   ここを変えるときは install.sh も必ず揃えること(揃わないと uninstall が
+///   rc の掃除に静かに失敗する)。
+pub const PATH_MARKER_BEGIN: &str = ">>> tbm cli >>>";
+pub const PATH_MARKER_END: &str = "<<< tbm cli <<<";
+
+// ============ 暗号プリミティブ ============
+
+/// 乱数 `n_bytes` バイトを base64-url-safe-no-pad で文字列化する。
+/// セッショントークン・CLI トークン・authcode・CSRF state・PKCE verifier の
+/// 生成は全部これを通る(実装が 1 箇所なら強度変更も 1 箇所で済む)。
+pub fn random_b64(n_bytes: usize) -> String {
+    let mut bytes = vec![0u8; n_bytes];
+    rand::rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// sha256 の hex 表現。トークン類の保存用ハッシュ(DB には平文を残さない)。
+pub fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// PKCE S256:`base64url(sha256(verifier))`(RFC 7636)。
+/// サーバ(検証側)と CLI(生成側)が同じ実装を共有する。
+pub fn pkce_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+// ============ API レスポンス型 ============
+
+/// `GET /api/health` のレスポンスボディ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Health {
     pub status: String,
     pub version: String,
 }
 
-/// Response body for `GET /api/hello`.
+/// `GET /api/auth/me` のレスポンスボディ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Greeting {
-    pub message: String,
+pub struct Me {
+    pub user_id: String,
+    pub email: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// `"user"` か `"owner"`。
+    pub role: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 7636 Appendix B のテストベクタ。実装が 1 箇所になったので
+    /// このテストも 1 箇所だけで足りる。
+    #[test]
+    fn pkce_challenge_rfc7636() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+        assert_eq!(pkce_challenge(verifier), expected);
+    }
+
+    #[test]
+    fn random_b64_shape() {
+        // 32 bytes → ceil(32 * 4/3) = 43 文字、パディング無し。毎回違う値。
+        let a = random_b64(32);
+        let b = random_b64(32);
+        assert_eq!(a.len(), 43);
+        assert_ne!(a, b);
+        assert_eq!(random_b64(16).len(), 22);
+    }
+
+    #[test]
+    fn sha256_hex_is_lowercase_hex() {
+        let h = sha256_hex("tbm_test");
+        assert_eq!(h.len(), 64);
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+        assert_eq!(sha256_hex("tbm_test"), h); // 安定
+    }
 }

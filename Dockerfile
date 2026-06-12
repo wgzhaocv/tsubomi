@@ -1,8 +1,9 @@
-# ---- web: build the SPA bundle with bun ----
+# ---- web:bun で SPA バンドルをビルド ----
 FROM oven/bun:1 AS web-builder
 WORKDIR /web
-# vite-plus (`vp`) builds an HTTPS client at startup; without system CA certs
-# it panics ("No CA certificates were loaded"). The slim bun image ships none.
+# vite-plus(`vp`)は起動時に HTTPS クライアントを作る。システムの CA 証明書が
+# 無いと panic する("No CA certificates were loaded")。slim の bun イメージには
+# 入っていないので追加する。
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY web/package.json web/bun.lock ./
@@ -10,10 +11,10 @@ RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
 
-# ---- rust: build the server binary ----
-# jemalloc-sys compiles jemalloc from C, so the builder needs a C toolchain
-# (build-essential = gcc + make). `--bin tsubomi-server` only compiles the
-# server's dependency graph, skipping the CLI's reqwest/aws-lc.
+# ---- rust:サーババイナリをビルド ----
+# jemalloc-sys は jemalloc を C からコンパイルするので、ビルダーには C
+# ツールチェーン(build-essential = gcc + make)が要る。`--bin tsubomi-server`
+# はサーバの依存グラフだけをコンパイルし、CLI 側の依存をスキップする。
 FROM rust:1.95-slim-trixie AS rust-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -21,9 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
+COPY migrations ./migrations
 RUN cargo build --release --bin tsubomi-server
 
-# ---- runtime ----
+# ---- ランタイム ----
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -31,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/tsubomi-server /usr/local/bin/tsubomi-server
 COPY --from=web-builder /web/dist /app/web/dist
-EXPOSE 8080
-# Server serves the SPA from web/dist (TSUBOMI_WEB_DIR default, relative to /app)
-# and the API under /api on 0.0.0.0:8080.
+EXPOSE 9090
+# サーバは web/dist から SPA を配信し(TSUBOMI_WEB_DIR デフォルト、/app 相対)、
+# /api を 0.0.0.0:9090 で受ける(8080 は amber が使う)。
 CMD ["tsubomi-server"]

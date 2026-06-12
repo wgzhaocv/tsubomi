@@ -17,9 +17,10 @@ export default defineConfig({
     },
   },
   server: {
-    // Forward API calls to the axum server so the SPA stays same-origin in dev.
+    // API 呼び出しを axum サーバへ転送し、dev でも SPA を same-origin に保つ。
+    // 9090:8080 は amber が使う(衝突回避)。
     proxy: {
-      "/api": "http://localhost:8080",
+      "/api": "http://localhost:9090",
     },
   },
 });
