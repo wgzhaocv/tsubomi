@@ -1,0 +1,8 @@
+services:
+  server:
+    build: .
+    image: tsubomi-server:latest
+    container_name: tsubomi-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
