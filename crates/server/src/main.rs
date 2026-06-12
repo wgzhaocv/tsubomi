@@ -1,3 +1,9 @@
+// jemalloc as the global allocator, ahead of the memory-intensive backend work
+// to come. Under multithreaded allocation churn it fragments far less than
+// glibc malloc and returns freed memory to the OS more readily.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod config;
 mod routes;
 

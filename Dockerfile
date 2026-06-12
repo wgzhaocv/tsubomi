@@ -11,10 +11,13 @@ COPY web/ ./
 RUN bun run build
 
 # ---- rust: build the server binary ----
-# tsubomi-server is pure Rust (axum/tokio/serde, rustls — no C deps), so the
-# slim image needs no build-essential/pkg-config. `--bin tsubomi-server` only
-# compiles the server's dependency graph, skipping the CLI's reqwest/aws-lc.
+# jemalloc-sys compiles jemalloc from C, so the builder needs a C toolchain
+# (build-essential = gcc + make). `--bin tsubomi-server` only compiles the
+# server's dependency graph, skipping the CLI's reqwest/aws-lc.
 FROM rust:1.95-slim-trixie AS rust-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
