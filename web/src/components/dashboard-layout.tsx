@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { LogOut, Menu, X } from "lucide-react";
-import { Link, NavLink, Navigate, Outlet } from "react-router";
+import { ChevronRight, LogOut, Menu, X } from "lucide-react";
+import { Link, NavLink, Navigate, Outlet, useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { useLogout, useMeQuery } from "@/lib/auth";
@@ -19,7 +19,7 @@ function FullPageLoading() {
   return (
     <div className="flex min-h-dvh items-center justify-center p-8">
       <div className="flex flex-col items-center gap-3">
-        <div className="size-10 animate-spin rounded-full border-4 border-[#d4c9b4] border-t-[#19c8b9]" />
+        <div className="size-10 animate-spin rounded-full border-4 border-[#d4c9b4] border-t-primary" />
         <p className="text-sm font-bold text-muted-foreground">読み込み中…</p>
       </div>
     </div>
@@ -42,7 +42,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         className="flex items-center gap-2.5 px-6 py-5 outline-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
       >
         <img src="/logo.png" alt="" className="h-9 w-auto shrink-0" />
-        <span className="text-2xl font-extrabold tracking-tight text-foreground">つぼみ</span>
+        <span className="flex min-w-0 flex-col leading-tight">
+          <span className="text-2xl font-extrabold tracking-tight text-foreground">つぼみ</span>
+          <span className="truncate text-[11px] font-bold text-muted-foreground">
+            社内 PaaS プラットフォーム
+          </span>
+        </span>
       </NavLink>
 
       {/* リソースのナビ。RESOURCES 設定から生成(順序もそこで決まる)。 */}
@@ -166,22 +171,45 @@ function MobileNav() {
   );
 }
 
-// md 未満の上部バー(ハンバーガー + ブランド)。
+// 現在地ラベルを RESOURCES / index から導く(モバイルのパンくず用)。index は null。
+function useCurrentLabel(): string | null {
+  const { pathname } = useLocation();
+  if (pathname === "/") return null;
+  const match = RESOURCES.find((r) => pathname === r.path || pathname.startsWith(`${r.path}/`));
+  return match?.label ?? null;
+}
+
+// md 未満の上部バー(ハンバーガー + パンくず)。現在地を示し、メニューはドロワーで開く。
 function MobileTopBar() {
   const openNav = useUiStore((s) => s.openNav);
+  const current = useCurrentLabel();
   return (
-    <header className="sticky top-0 z-30 flex items-center gap-3 border-b-2 border-[#e8e2d6] bg-card px-4 py-3 md:hidden">
+    <header className="sticky top-0 z-30 flex items-center gap-2 border-b-2 border-[#e8e2d6] bg-card px-4 py-3 md:hidden">
       <Button
         type="text"
         aria-label="メニューを開く"
         icon={<Menu className="size-5" />}
         onClick={openNav}
-        className="size-9 rounded-full px-0"
+        className="size-9 shrink-0 rounded-full px-0"
       />
-      <Link to="/" className="flex items-center gap-2 outline-none">
-        <img src="/logo.png" alt="" className="h-7 w-auto" />
-        <span className="text-lg font-extrabold tracking-tight text-foreground">つぼみ</span>
-      </Link>
+      {/* パンくず:ブランド(→ はじめに)+ 現在地 */}
+      <nav aria-label="パンくず" className="flex min-w-0 items-center gap-1.5">
+        <Link to="/" className="flex shrink-0 items-center gap-2 outline-none">
+          <img src="/logo.png" alt="" className="h-7 w-auto" />
+          <span className="text-lg font-extrabold tracking-tight text-foreground">つぼみ</span>
+        </Link>
+        {current && (
+          <>
+            <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span
+              className="min-w-0 truncate text-sm font-bold text-foreground"
+              aria-current="page"
+            >
+              {current}
+            </span>
+          </>
+        )}
+      </nav>
     </header>
   );
 }
