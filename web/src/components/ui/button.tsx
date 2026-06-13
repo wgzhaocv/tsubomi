@@ -35,7 +35,7 @@ export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonE
 // focus は outline で表現する(原典どおり)。ring(box-shadow)だと 3D 影の
 // box-shadow と衝突して消えるため使わない。
 const BASE =
-  "relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 border-2 border-transparent font-semibold leading-none tracking-[0.02em] whitespace-nowrap shadow-[0_2px_4px_0_rgba(61,52,40,0.06)] transition-all duration-250 ease-in-out outline-none select-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:[outline-offset:2px] [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4";
+  "relative inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 border-2 border-transparent font-semibold leading-none tracking-[0.02em] whitespace-nowrap shadow-[0_2px_4px_0_rgba(61,52,40,0.06)] transition-all duration-250 ease-in-out outline-none select-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4";
 
 const SIZE: Record<ButtonSize, string> = {
   // small:32px / radius16、large:48px / radius24、middle:45px / 丸薬形(base の rounded-full)

@@ -37,6 +37,46 @@ Google OAuth クライアント:Google Cloud Console で作成(種別:Web applic
 `http://localhost:5173/api/auth/google/callback`。ログインは
 `TSUBOMI_ALLOWED_HD` の Workspace ドメインに制限される(サーバ側 `hd` 検証)。
 
+## デプロイ
+
+単機運用・ホスト直走り。サーバは **host ネットワーク**で動き `:9090` をホストに出す
+(前段に reverse proxy を置く想定)。設定はホスト毎の **`.env.production`**(git 管理外。
+`TSUBOMI_IMAGE` と `PG_PLATFORM_PASSWORD` もここに書く)。host ネットなので
+`DATABASE_URL=127.0.0.1:5434` が dev / 本番で共通のまま通る。`just` が無いマシン
+(Windows 等)でも下段の生コマンドだけで完結する。
+
+イメージは初日から **両アーキ対応**(arm64 = 香橙派 / amd64 = x86_64 VPS)。
+
+### A. レジストリ経由(リモート VPS 推奨・ビルド不要・OS 非依存)
+
+ビルド機で multi-arch イメージを作ってレジストリへ push:
+
+```bash
+docker login docker.io
+REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
+# just 無し: REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 bash scripts/release-image.sh
+# 単一アーキで高速化: PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
+```
+
+VPS 側は `compose.prod.yml` と `.env.production` を置いて起動するだけ:
+
+```bash
+docker login docker.io   # 公開イメージなら不要
+docker compose --env-file .env.production -f compose.prod.yml up -d
+```
+
+`compose.prod.yml` が管制面 pg(loopback バインドで隔離)+ server を一括起動する。
+停止は `docker compose -f compose.prod.yml down`。
+
+### B. ローカルビルド(ソースのあるホスト。例:香橙派 arm64)
+
+```bash
+just deploy   # 管制面 pg 起動 → サーバを build + 起動(.env.production を使用)
+# just 無し:
+#   docker compose --env-file .env.production -f infra/docker-compose.yml up -d
+#   docker compose --env-file .env.production up --build -d
+```
+
 ## tbm CLI
 
 インストール(配布物はサーバが配信。ドメインは自動注入される):
