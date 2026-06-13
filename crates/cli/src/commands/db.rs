@@ -18,13 +18,25 @@ pub enum DbCmd {
     /// 一覧
     List,
     /// 外部接続文字列を表示(= パスワードそのもの。git に commit しない / 共有しない)
-    Url { name: String },
+    Url {
+        /// 対象データベースの表示名(`tbm db list` で確認)
+        name: String,
+    },
     /// パスワードを再生成(古い接続文字列は即座に失効)
-    Rotate { name: String },
+    Rotate {
+        /// rotate するデータベースの表示名(`tbm db list` で確認)
+        name: String,
+    },
     /// 削除(ゴミ箱へ。3 日間は復元可能)
-    Delete { name: String },
+    Delete {
+        /// 削除するデータベースの表示名(`tbm db list` で確認)
+        name: String,
+    },
     /// psql で接続(パスワードを露出せず接続。要 psql)
-    Connect { name: String },
+    Connect {
+        /// 接続するデータベースの表示名(`tbm db list` で確認)
+        name: String,
+    },
 }
 
 pub async fn run(
