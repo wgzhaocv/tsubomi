@@ -1,44 +1,73 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router";
+
+import { PageMeta } from "@/components/page-meta";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 
 // tbm CLI のインストール手順ページ(プレースホルダ品質)。
 // コマンド中のドメインは window.location.origin から組むので、
 // どのデプロイ先でもこのページはそのまま正しい。
+
+// 文章中のインライン・コード(tbm login 等)の共通スタイル。
+function Code({ children }: { children: ReactNode }) {
+  return (
+    <code className="rounded-md bg-card/80 px-1.5 py-0.5 text-[0.85em] font-bold text-foreground">
+      {children}
+    </code>
+  );
+}
+
 function CommandCard({ title, note, command }: { title: string; note: string; command: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="w-full max-w-2xl rounded-lg border p-4">
-      <div className="mb-1 flex items-center justify-between">
-        <h2 className="font-medium">{title}</h2>
-        <button
-          onClick={() => {
-            void navigator.clipboard.writeText(command).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
-            });
-          }}
-          className="rounded-md border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
-        >
-          {copied ? "コピーしました ✓" : "コピー"}
-        </button>
-      </div>
-      <p className="mb-2 text-xs text-muted-foreground">{note}</p>
-      <code className="block overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs whitespace-pre">
-        {command}
-      </code>
-    </div>
+    <Card className="w-full max-w-2xl">
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardAction>
+          <Button
+            type="default"
+            size="small"
+            onClick={() => {
+              void navigator.clipboard.writeText(command).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? "コピーしました ✓" : "コピー"}
+          </Button>
+        </CardAction>
+        <CardDescription>{note}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <code className="block overflow-x-auto rounded-xl bg-secondary px-3 py-2.5 text-xs whitespace-pre text-foreground/90">
+          {command}
+        </code>
+      </CardContent>
+    </Card>
   );
 }
 
 export default function CliInstall() {
   const origin = window.location.origin;
   return (
-    <main className="flex min-h-dvh flex-col items-center gap-5 bg-background p-8 text-foreground">
-      <h1 className="text-2xl font-semibold">tbm CLI のインストール</h1>
-      <p className="text-sm text-muted-foreground">
-        インストール後は <code>tbm login</code> で認証します。アンインストールは{" "}
-        <code>tbm uninstall</code>(設定・PATH・本体まで残留物ゼロで消えます)。
-      </p>
+    <main className="flex min-h-dvh flex-col items-center gap-5 p-8 text-foreground">
+      <PageMeta title="tbm CLI のインストール" description="tbm CLI のインストール手順" />
+      <div className="flex max-w-2xl flex-col items-center gap-2 text-center">
+        <h1 className="text-3xl font-extrabold tracking-tight">tbm CLI のインストール</h1>
+        <p className="text-sm font-medium text-foreground/75">
+          インストール後は <Code>tbm login</Code> で認証します。アンインストールは{" "}
+          <Code>tbm uninstall</Code>(設定・PATH・本体まで残留物ゼロで消えます)。
+        </p>
+      </div>
 
       <CommandCard
         title="macOS / Linux"
@@ -56,14 +85,15 @@ export default function CliInstall() {
         command={`curl -fsSL ${origin}/install.bat -o %TEMP%\\tbm-install.bat && %TEMP%\\tbm-install.bat`}
       />
 
-      <p className="text-xs text-muted-foreground">
-        対応プラットフォーム:macOS(Apple Silicon)/ Linux(x86_64・arm64)/ Windows(x86_64)。
-        更新は <code>tbm update</code>(新版があればコマンド実行後に通知が出ます)。
+      <p className="max-w-2xl text-center text-xs font-medium text-foreground/70">
+        対応プラットフォーム:macOS(Apple Silicon)/ Linux(x86_64・arm64)/ Windows(x86_64)。更新は{" "}
+        <Code>tbm update</Code>
+        (新版があればコマンド実行後に通知が出ます)。
       </p>
 
-      <Link to="/" className="text-sm text-muted-foreground underline-offset-4 hover:underline">
-        ← 戻る
-      </Link>
+      <Button asChild type="text" size="small">
+        <Link to="/">← 戻る</Link>
+      </Button>
     </main>
   );
 }

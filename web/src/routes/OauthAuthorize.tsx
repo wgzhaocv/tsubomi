@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { PageMeta } from "@/components/page-meta";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { fetchMe, type Me } from "@/lib/auth";
 
 // PKCE ステップ 2:`tbm login` がこのページを開く。ログイン済みユーザが
@@ -45,40 +48,51 @@ export default function OauthAuthorize() {
   }
 
   return (
-    <main className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-background p-8 text-foreground">
-      <h1 className="text-2xl font-semibold">tbm CLI 認可</h1>
+    <main className="flex min-h-dvh flex-col items-center justify-center gap-6 p-8 text-foreground">
+      <PageMeta title="tbm CLI 認可" />
+      <h1 className="text-3xl font-extrabold tracking-tight">tbm CLI 認可</h1>
 
-      {loading && <p className="text-muted-foreground">…</p>}
-      {error && <p className="max-w-md text-sm text-red-500">{error}</p>}
+      <Card className="w-full max-w-md">
+        <CardContent className="flex flex-col items-center gap-4">
+          {loading && <p className="text-muted-foreground">…</p>}
+          {error && (
+            <p className="w-full text-center text-sm wrap-break-word text-destructive">{error}</p>
+          )}
 
-      {!loading && !me && (
-        <div className="flex flex-col items-center gap-3">
-          <p className="text-sm text-muted-foreground">
-            先にログインしてから、もう一度 <code>tbm login</code> を実行してください。
-          </p>
-          <a
-            href="/api/auth/google/start"
-            className="rounded-md bg-primary px-4 py-2 text-primary-foreground transition hover:opacity-90"
-          >
-            Sign in with Google
-          </a>
-        </div>
-      )}
+          {!loading && !me && (
+            <>
+              <p className="text-center text-sm text-muted-foreground">
+                先にログインしてから、もう一度{" "}
+                <code className="rounded-md bg-card/80 px-1.5 py-0.5 text-[0.85em] font-bold text-foreground">
+                  tbm login
+                </code>{" "}
+                を実行してください。
+              </p>
+              <Button asChild type="primary" block>
+                <a href="/api/auth/google/start">Google でログイン</a>
+              </Button>
+            </>
+          )}
 
-      {me && (
-        <div className="flex flex-col items-center gap-4">
-          <p className="text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">{me.email}</span> として
-            tbm CLI({params.get("hint") ?? "cli"})にアクセスを許可しますか?
-          </p>
-          <button
-            onClick={() => void approve()}
-            className="rounded-md bg-primary px-6 py-2 text-primary-foreground transition hover:opacity-90"
-          >
-            許可する
-          </button>
-        </div>
-      )}
+          {me && (
+            <>
+              <p className="text-center text-sm text-muted-foreground">
+                <span className="font-bold text-foreground">{me.email}</span> として tbm CLI(
+                {params.get("hint") ?? "cli"})に アクセスを許可しますか?
+              </p>
+              <Button
+                type="primary"
+                block
+                onClick={() => {
+                  void approve();
+                }}
+              >
+                許可する
+              </Button>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </main>
   );
 }

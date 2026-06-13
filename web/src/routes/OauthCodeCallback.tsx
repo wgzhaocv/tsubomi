@@ -1,6 +1,10 @@
 import { useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { PageMeta } from "@/components/page-meta";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+
 // PKCE ステップ 3:待機中の `tbm login` プロンプトに貼り付けるための
 // ワンタイムコードを表示する。
 export default function OauthCodeCallback() {
@@ -9,24 +13,39 @@ export default function OauthCodeCallback() {
   const code = params.get("code") ?? "";
 
   return (
-    <main className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-background p-8 text-foreground">
-      <h1 className="text-2xl font-semibold">コードをコピー</h1>
-      <p className="text-sm text-muted-foreground">
-        ターミナルの <code>paste code:</code> に貼り付けてください(10分間有効、1回限り)。
-      </p>
-      <code className="max-w-full break-all rounded-md border bg-muted px-4 py-3 text-sm">
-        {code || "(code がありません)"}
-      </code>
-      {code && (
-        <button
-          onClick={() => {
-            void navigator.clipboard.writeText(code).then(() => setCopied(true));
-          }}
-          className="rounded-md bg-primary px-6 py-2 text-primary-foreground transition hover:opacity-90"
-        >
-          {copied ? "コピーしました ✓" : "コピー"}
-        </button>
-      )}
+    <main className="flex min-h-dvh flex-col items-center justify-center gap-6 p-8 text-foreground">
+      <PageMeta title="コードをコピー" />
+      <h1 className="text-3xl font-extrabold tracking-tight">コードをコピー</h1>
+
+      <Card className="w-full max-w-md">
+        <CardContent className="flex flex-col items-center gap-4">
+          <p className="text-center text-sm text-muted-foreground">
+            ターミナルの{" "}
+            <code className="rounded-md bg-card/80 px-1.5 py-0.5 text-[0.85em] font-bold text-foreground">
+              paste code:
+            </code>{" "}
+            に貼り付けてください(10分間有効、1回限り)。
+          </p>
+
+          <code className="w-full rounded-xl bg-secondary px-4 py-3 text-center text-sm font-bold break-all text-foreground">
+            {code || "(code がありません)"}
+          </code>
+
+          {code && (
+            <Button
+              block
+              type={copied ? "default" : "primary"}
+              onClick={() => {
+                void navigator.clipboard.writeText(code).then(() => {
+                  setCopied(true);
+                });
+              }}
+            >
+              {copied ? "コピーしました ✓" : "コピー"}
+            </Button>
+          )}
+        </CardContent>
+      </Card>
     </main>
   );
 }

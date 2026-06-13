@@ -1,13 +1,23 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
-@custom-variant dark (&:is(.dark *));
+/* つぼみ — どうぶつの森(Animal Crossing)風テーマ。
+   設計トークンは animal-island-ui(guokaigdg) の skill/SKILL.md を移植。
+   原典の Noto Sans SC は本 UI が日本語のため Noto Sans JP に差し替えた。
+   主色=ミント、文字=暖色ブラウン(純黒・冷灰は禁止)、角は丸み
+   (カード/ダイアログは丸み、ボタン/入力は丸薬形 rounded-full を別途指定)。
+   暗色モードは原典に無いため当面は用意しない(亮色暖調のみ)。 */
 
 @theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
+  --font-sans:
+    "Nunito Variable", "Noto Sans JP Variable", -apple-system, "Hiragino Kaku Gothic ProN",
+    "Hiragino Sans", "Yu Gothic", sans-serif;
+
+  --radius-sm: calc(var(--radius) - 6px);
+  --radius-md: calc(var(--radius) - 3px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -23,91 +33,56 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.21 0.006 285.885);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.705 0.015 286.067);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.21 0.006 285.885);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.705 0.015 286.067);
-}
+  /* 丸み:カード/ダイアログの基準(18px)。ボタン/入力は丸薬形を別途指定。 */
+  --radius: 1.125rem;
 
-.dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.92 0.004 286.32);
-  --primary-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.552 0.016 285.938);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.552 0.016 285.938);
+  /* 背景・面 */
+  --background: #f8f8f0; /* クリーム */
+  --foreground: #794f27; /* 主文字:暖色ブラウン */
+  --card: rgb(247, 243, 223); /* カード面:原典 animal-island-ui の Card と同じ暖クリーム */
+  --card-foreground: #725d42; /* カード本文:本文ブラウン(見出しの #794f27 より少し淡い) */
+  --popover: rgb(247, 243, 223);
+  --popover-foreground: #725d42;
+
+  /* 主色:ミント(hover/active は立体表現で利用) */
+  --primary: #19c8b9;
+  --primary-hover: #3dd4c6;
+  --primary-active: #11a89b;
+  --primary-foreground: #ffffff;
+
+  /* 副次・ミュート */
+  --secondary: #f0e8d8;
+  --secondary-foreground: #794f27;
+  --muted: #f0ece2;
+  --muted-foreground: #8a7b66;
+
+  /* アクセント:淡ミント(hover 背景など) */
+  --accent: #e6f9f6;
+  --accent-foreground: #11a89b;
+
+  /* 状態色 */
+  --destructive: #e05a5a;
+  --destructive-hover: #e87171;
+  --destructive-foreground: #ffffff;
+  --success: #6fba2c;
+
+  /* 罫線・入力・フォーカス */
+  --border: #c4b89e;
+  --border-hover: #a89878;
+  --input: #c4b89e;
+  --ring: #ffcc00; /* フォーカス黄 */
+
+  /* どうぶつの森風の影トークン */
+  --shadow-pop: #bdaea0; /* 立体ボタンの底影 */
+  --shadow-input: #d4c9b4; /* 入力の底影 */
 }
 
 @layer base {
@@ -115,6 +90,563 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply text-foreground font-sans;
+    font-weight: 500; /* 本文 500。見出し/ボタンは 600–700 を各所で指定 */
+    letter-spacing: 0.01em;
+  }
+  /* 背景壁紙は body 直下ではなく「固定の全画面レイヤー」に描く。
+     width:100vw / height:100lvh の fixed なので、スクロールバーの増減で寸法が
+     変わらず、タイル柄が横にずれない。z-index:-1 で内容の後ろに敷き、モーダルの
+     暗幕(fixed inset-0)はこの上に出るので右端に隙間も出ない。固定要素は
+     スクロール領域に寄与しないため 100vw でも横スクロールバーは出ない。
+     画像:animal-island-ui 公式 docs の content_bg_pc.jpg(淡緑+三角)。 */
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh; /* lvh 非対応ブラウザ向けフォールバック */
+    height: 100lvh; /* 大きいビューポート(モバイルのバー格納時もカバー) */
+    z-index: -1;
+    pointer-events: none;
+    background-color: #87c9a1;
+    background-image: url(/bg-content.jpg);
+    background-position: center;
+    background-repeat: repeat;
+    background-size: auto;
+  }
+}
+
+/* どうぶつの森風アニメーション(Dialog/Card 等で利用) */
+@keyframes animal-zoom-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes ac-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+/* loading ボタンの斜めストライプ流れ(原典 animal-btn-loading)。 */
+@keyframes animal-btn-loading {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: -28.28px 0;
+  }
+}
+
+/* Modal マスク等のフェードイン。 */
+@keyframes animal-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* Checkbox チェック時の放射スプラッシュ(原典 animal-cbx-splash)。 */
+@keyframes animal-cbx-splash {
+  40% {
+    background: #19c8b9;
+    box-shadow:
+      0 -18px 0 -8px #19c8b9,
+      16px -8px 0 -8px #19c8b9,
+      16px 8px 0 -8px #19c8b9,
+      0 18px 0 -8px #19c8b9,
+      -16px 8px 0 -8px #19c8b9,
+      -16px -8px 0 -8px #19c8b9;
+  }
+  100% {
+    background: #19c8b9;
+    box-shadow:
+      0 -36px 0 -10px transparent,
+      32px -16px 0 -10px transparent,
+      32px 16px 0 -10px transparent,
+      0 36px 0 -10px transparent,
+      -32px 16px 0 -10px transparent,
+      -32px -16px 0 -10px transparent;
+  }
+}
+
+/* Radio 選択時の放射スプラッシュ。 */
+@keyframes animal-radio-splash {
+  40% {
+    background: #19c8b9;
+    box-shadow:
+      0 -18px 0 -8px #19c8b9,
+      16px -8px 0 -8px #19c8b9,
+      16px 8px 0 -8px #19c8b9,
+      0 18px 0 -8px #19c8b9,
+      -16px 8px 0 -8px #19c8b9,
+      -16px -8px 0 -8px #19c8b9;
+  }
+  100% {
+    background: #19c8b9;
+    box-shadow:
+      0 -36px 0 -10px transparent,
+      32px -16px 0 -10px transparent,
+      32px 16px 0 -10px transparent,
+      0 36px 0 -10px transparent,
+      -32px 16px 0 -10px transparent,
+      -32px -16px 0 -10px transparent;
+  }
+}
+
+/* Tabs:葉っぱ揺れ + タブ内容フェード。 */
+@keyframes animal-leaf-wiggle {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-10deg);
+  }
+  75% {
+    transform: rotate(10deg);
+  }
+}
+@keyframes animal-tab-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Time:フェードアップ + コロン点滅。 */
+@keyframes animal-time-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes animal-time-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Select:選択時のカーソル滑り込み。 */
+@keyframes tbm-select-cursor-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-20px) rotate(-15deg);
+  }
+  60% {
+    opacity: 1;
+    transform: translateY(-50%) translateX(5px) rotate(5deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) rotate(0deg);
+  }
+}
+
+/* ============================================
+   Title — どうぶつの森風リボン(飘带)
+   燕尾(clip-path) + 折角(border 三角) + 正面主体。原典
+   animal-island-ui title.module.less を 1:1 で移植。font-size は
+   title.tsx が inline で注入(SIZE_MAP)、em 単位が追従する。
+   ============================================ */
+.tbm-ribbon {
+  --rf: #27d039; /* front 正面 */
+  --rb: #20992a; /* back  燕尾 */
+  --rk: #115017; /* fold  折角 */
+  --rt: #fff; /* text  文字 */
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-weight: 900;
+  line-height: 1;
+  height: 2em;
+  padding: 0 1.6em;
+  color: var(--rt);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  user-select: none;
+  filter: drop-shadow(0 0.08em 0.12em rgba(0, 0, 0, 0.05));
+}
+.tbm-ribbon-text {
+  position: relative;
+  z-index: 4;
+  font-size: inherit;
+  display: inline-flex;
+  align-items: center;
+  height: 2em;
+  padding-top: 0.11em;
+  color: var(--rt);
+  text-shadow: 0 0.04em 0.08em rgba(0, 0, 0, 0.05);
+}
+.tbm-ribbon-back {
+  position: absolute;
+  font-size: inherit;
+  bottom: -0.4em;
+  width: 1.7em;
+  height: 1.7em;
+  background: var(--rb);
+  z-index: 1;
+}
+.tbm-ribbon-back-left {
+  left: -0.6em;
+  border-radius: 0.08em 0 0 0.08em;
+  clip-path: polygon(100% 0%, 100% 100%, 0% 100%, 30% 50%, 0% 0%);
+}
+.tbm-ribbon-back-right {
+  right: -0.6em;
+  border-radius: 0 0.08em 0.08em 0;
+  clip-path: polygon(0% 0%, 100% 0%, 70% 50%, 100% 100%, 0% 100%);
+}
+.tbm-ribbon-fold {
+  position: absolute;
+  font-size: inherit;
+  top: calc(100% - 0.04em);
+  width: 0;
+  height: 0;
+  border-style: solid;
+  z-index: 2;
+}
+.tbm-ribbon-fold-left {
+  left: 0.15em;
+  top: calc(100% - 0.05em);
+  border-width: 0 0.95em 0.45em 0;
+  border-color: transparent var(--rk) transparent transparent;
+  transform-origin: top left;
+}
+.tbm-ribbon-fold-right {
+  right: 0.16em;
+  top: calc(100% - 0.05em);
+  border-width: 0 0 0.45em 0.95em;
+  border-color: transparent transparent transparent var(--rk);
+}
+.tbm-ribbon-front {
+  position: absolute;
+  font-size: inherit;
+  inset: 0 0.1em;
+  background: var(--rf);
+  border-radius: 0.2em;
+  z-index: 3;
+  transform: perspective(11.5em) rotateX(3deg);
+  box-shadow: inset 0 -0.06em 0 rgba(0, 0, 0, 0.05);
+  pointer-events: none;
+}
+/* 色板(Card と同名)。各色は 4 層の CSS 変数を上書き。 */
+.tbm-ribbon-app-pink {
+  --rf: #f8a6b2;
+  --rb: #e06880;
+  --rk: #a03060;
+  --rt: #fff;
+}
+.tbm-ribbon-purple {
+  --rf: #b77dee;
+  --rb: #9050d0;
+  --rk: #5a1a9a;
+  --rt: #fff;
+}
+.tbm-ribbon-app-blue {
+  --rf: #889df0;
+  --rb: #5068d8;
+  --rk: #2030a0;
+  --rt: #fff;
+}
+.tbm-ribbon-app-yellow {
+  --rf: #f7cd67;
+  --rb: #d4a030;
+  --rk: #8a6010;
+  --rt: #725d42;
+}
+.tbm-ribbon-app-orange {
+  --rf: #e59266;
+  --rb: #c06a30;
+  --rk: #7a3a10;
+  --rt: #fff;
+}
+.tbm-ribbon-app-teal {
+  --rf: #82d5bb;
+  --rb: #40a880;
+  --rk: #186048;
+  --rt: #fff;
+}
+.tbm-ribbon-app-green {
+  --rf: #8ac68a;
+  --rb: #509050;
+  --rk: #205020;
+  --rt: #fff;
+}
+.tbm-ribbon-app-red {
+  --rf: #fc736d;
+  --rb: #d43030;
+  --rk: #900010;
+  --rt: #fff;
+}
+.tbm-ribbon-lime-green {
+  --rf: #d1da49;
+  --rb: #90a010;
+  --rk: #485800;
+  --rt: #3d5a1a;
+}
+.tbm-ribbon-yellow-green {
+  --rf: #ecdf52;
+  --rb: #c0b010;
+  --rk: #706800;
+  --rt: #725d42;
+}
+.tbm-ribbon-brown {
+  --rf: #9a835a;
+  --rb: #705830;
+  --rk: #3a2810;
+  --rt: #fff;
+}
+.tbm-ribbon-warm-peach-pink {
+  --rf: #e18c6f;
+  --rb: #b85a30;
+  --rk: #6a2a10;
+  --rt: #fff;
+}
+
+/* ============================================
+   Tooltip — 矢印(default ::after)/しっぽ(island)の幾何。
+   tooltip-bg=rgb(247,243,223)、border=#c4b89e/2px、arrow=8px、
+   island-arrow=10px、dot=14px を厳密に踏襲。
+   ============================================ */
+.tbm-tooltip-arrow::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: rgb(247, 243, 223);
+  border-radius: 2px;
+}
+.tbm-tooltip-borderless::after {
+  border: none !important;
+}
+.tbm-tooltip-arrow-top::after {
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+}
+.tbm-tooltip-arrow-top_start::after {
+  bottom: -5px;
+  left: 16px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-arrow-top_end::after {
+  bottom: -5px;
+  right: 16px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-bordered.tbm-tooltip-arrow-top::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-top_start::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-top_end::after {
+  border-right: 2px solid #c4b89e;
+  border-bottom: 2px solid #c4b89e;
+}
+.tbm-tooltip-arrow-bottom::after {
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+}
+.tbm-tooltip-arrow-bottom_start::after {
+  top: -5px;
+  left: 16px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-arrow-bottom_end::after {
+  top: -5px;
+  right: 16px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-bordered.tbm-tooltip-arrow-bottom::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-bottom_start::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-bottom_end::after {
+  border-top: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+.tbm-tooltip-arrow-left::after {
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+}
+.tbm-tooltip-arrow-left_start::after {
+  right: -5px;
+  top: 12px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-arrow-left_end::after {
+  right: -5px;
+  bottom: 12px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-bordered.tbm-tooltip-arrow-left::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-left_start::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-left_end::after {
+  border-top: 2px solid #c4b89e;
+  border-right: 2px solid #c4b89e;
+}
+.tbm-tooltip-arrow-right::after {
+  left: -5px;
+  top: 50%;
+  transform: translateY(-50%) rotate(45deg);
+}
+.tbm-tooltip-arrow-right_start::after {
+  left: -5px;
+  top: 12px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-arrow-right_end::after {
+  left: -5px;
+  bottom: 12px;
+  transform: rotate(45deg);
+}
+.tbm-tooltip-bordered.tbm-tooltip-arrow-right::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-right_start::after,
+.tbm-tooltip-bordered.tbm-tooltip-arrow-right_end::after {
+  border-bottom: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-dot {
+  width: 14px;
+  height: 14px;
+  background: rgb(247, 243, 223);
+  border-radius: 50%;
+}
+.tbm-tooltip-tail-diamond {
+  width: 10px;
+  height: 10px;
+  background: rgb(247, 243, 223);
+  border-radius: 2px;
+}
+.tbm-tooltip-tail-top {
+  bottom: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.tbm-tooltip-tail-top_start {
+  bottom: -5px;
+  left: 20px;
+}
+.tbm-tooltip-tail-top_end {
+  bottom: -5px;
+  right: 20px;
+}
+.tbm-tooltip-tail-bottom {
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+.tbm-tooltip-tail-bottom_start {
+  top: -5px;
+  left: 20px;
+}
+.tbm-tooltip-tail-bottom_end {
+  top: -5px;
+  right: 20px;
+}
+.tbm-tooltip-tail-left {
+  right: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.tbm-tooltip-tail-left_start {
+  right: -5px;
+  top: 16px;
+}
+.tbm-tooltip-tail-left_end {
+  right: -5px;
+  bottom: 16px;
+}
+.tbm-tooltip-tail-right {
+  left: -5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.tbm-tooltip-tail-right_start {
+  left: -5px;
+  top: 16px;
+}
+.tbm-tooltip-tail-right_end {
+  left: -5px;
+  bottom: 16px;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-top {
+  transform: translateX(-50%) rotate(45deg);
+  border-right: 2px solid #c4b89e;
+  border-bottom: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-top_start,
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-top_end {
+  transform: rotate(45deg);
+  border-right: 2px solid #c4b89e;
+  border-bottom: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-bottom {
+  transform: translateX(-50%) rotate(45deg);
+  border-top: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-bottom_start,
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-bottom_end {
+  transform: rotate(45deg);
+  border-top: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-left {
+  transform: translateY(-50%) rotate(45deg);
+  border-top: 2px solid #c4b89e;
+  border-right: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-left_start,
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-left_end {
+  transform: rotate(45deg);
+  border-top: 2px solid #c4b89e;
+  border-right: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-right {
+  transform: translateY(-50%) rotate(45deg);
+  border-bottom: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-right_start,
+.tbm-tooltip-tail-diamond.tbm-tooltip-tail-right_end {
+  transform: rotate(45deg);
+  border-bottom: 2px solid #c4b89e;
+  border-left: 2px solid #c4b89e;
+}
+
+/* prefers-reduced-motion:OS が「視差効果を減らす」設定のとき、装飾アニメーション
+   (loading ストライプ / splash / 葉の揺れ / フェード / zoom / 点滅 / カーソル滑り込み
+   等)とトランジションをほぼ無効化する。Typewriter は JS 側で全文即時表示に切替。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
