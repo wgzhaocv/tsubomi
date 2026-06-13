@@ -26,17 +26,27 @@ COPY migrations ./migrations
 RUN cargo build --release --bin tsubomi-server
 
 # ---- ランタイム ----
-# ベースを postgres:18 にする理由:M1 のバックアップ / ゴミ箱が pg_dump / psql を
-# 使う。これらは **サーバ(pg-tenant / pg-platform = 18)と同じメジャー版**でないと
-# 動かない(古い pg_dump は新しいサーバを dump 不可)。postgres:18 イメージは
-# pg_dump/psql 18 + libpq + ca-certificates を最初から備え、arm64/amd64 両対応。
-# 自前サーバを動かすので postgres の entrypoint は無効化する。
-FROM postgres:18
+# debian-slim に PGDG の postgresql-client-18 だけを足す。M1 のバックアップ /
+# ゴミ箱が使う pg_dump / psql は **サーバ(pg-tenant / pg-platform = 18)と同じ
+# メジャー版**でないと動かない(古い pg_dump は新しいサーバを dump 不可)。
+# postgres:18 を丸ごと背負う(≈469MB)より小さく(≈180MB)、能力は同一
+# (pg_dump/psql 18 + libpq + ca-certificates)。arm64/amd64 両対応。
+FROM debian:trixie-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && apt-get purge -y --auto-remove curl \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/tsubomi-server /usr/local/bin/tsubomi-server
 COPY --from=web-builder /web/dist /app/web/dist
 EXPOSE 9090
 # サーバは web/dist から SPA を配信し(TSUBOMI_WEB_DIR デフォルト、/app 相対)、
 # /api を 0.0.0.0:9090 で受ける(8080 は amber が使う)。
-ENTRYPOINT []
 CMD ["tsubomi-server"]
