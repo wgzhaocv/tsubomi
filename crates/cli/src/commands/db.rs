@@ -128,7 +128,13 @@ async fn resolve_id(
     let dbs = api::db_list(c, server_url, token).await?;
     match dbs.iter().find(|d: &&DatabaseDto| d.display_name == name) {
         Some(db) => Ok(db.id.to_string()),
-        None => bail!("データベース '{name}' が見つかりません(`tbm db list` で確認)"),
+        // クライアント側解決の「見つからない」も安定コードを付ける(AI が
+        // not_found を文字列照合せず機械分岐できるように)。
+        None => Err(api::ApiError {
+            code: "not_found",
+            message: format!("データベース '{name}' が見つかりません(`tbm db list` で確認)"),
+        }
+        .into()),
     }
 }
 

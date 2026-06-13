@@ -117,6 +117,15 @@ fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> Stri
 
 // ===== ハンドラ =====
 
+/// sqlx の UNIQUE 制約違反(23505)を Conflict(409)へ変換し、それ以外は Sqlx(500)
+/// のまま返す。重複(同名)を「内部エラー」に潰さず、原因の分かる 4xx にするため。
+fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> AppError {
+    match &e {
+        sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict(conflict_msg.into()),
+        _ => AppError::Sqlx(e),
+    }
+}
+
 /// `POST /api/databases`:DB 作成。
 pub async fn create(
     auth: AuthCtx,
@@ -124,6 +133,23 @@ pub async fn create(
     Json(req): Json<CreateDatabaseReq>,
 ) -> AppResult<(StatusCode, Json<DatabaseDto>)> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+
+    // 同名チェックを tenant DDL の前に行い、無駄な CREATE/DROP DATABASE を避ける。
+    // UNIQUE (user_id, kind, display_name) はゴミ箱内(deleted_at)も含むので
+    // ここも全行を見る。競合(同時 create)は insert_rows の UNIQUE が最終ガード。
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'database' AND display_name = $2)",
+    )
+    .bind(auth.user_id)
+    .bind(&display_name)
+    .fetch_one(&state.db)
+    .await?;
+    if exists {
+        return Err(AppError::Conflict(format!(
+            "データベース名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+        )));
+    }
+
     let names = DbNames::generate();
     let app_pw = tenant::gen_password();
     let human_pw = tenant::gen_password();
@@ -207,7 +233,8 @@ async fn insert_rows(
     .bind(display_name)
     .bind(anon_seq)
     .fetch_one(&mut *tx)
-    .await?;
+    .await
+    .map_err(|e| map_unique(e, format!("データベース名 '{display_name}' は既に使われています")))?;
 
     sqlx::query("INSERT INTO database_details (resource_id, pg_dbname) VALUES ($1, $2)")
         .bind(id)
@@ -282,7 +309,8 @@ pub async fn rename(
     .bind(id)
     .bind(auth.user_id)
     .fetch_optional(&state.db)
-    .await?;
+    .await
+    .map_err(|e| map_unique(e, format!("データベース名 '{display_name}' は既に使われています")))?;
 
     let row = row.ok_or(AppError::NotFound)?;
     audit(

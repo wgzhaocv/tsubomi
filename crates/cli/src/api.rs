@@ -18,14 +18,14 @@ impl std::fmt::Display for ApiError {
 }
 impl std::error::Error for ApiError {}
 
-/// HTTP ステータス → 安定コード。
+/// HTTP ステータス → 安定コード(AI が機械分岐できるよう text とは別に持つ)。
 fn code_for(status: reqwest::StatusCode) -> &'static str {
     match status.as_u16() {
         401 => "unauthorized",
         403 => "forbidden",
         404 => "not_found",
         409 => "conflict",
-        400 => "bad_request",
+        400 | 422 => "validation",
         _ => "server_error",
     }
 }
