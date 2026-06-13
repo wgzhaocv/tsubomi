@@ -1,4 +1,3 @@
-import { ArrowRight } from "lucide-react";
 import { Link } from "react-router";
 
 import { Code, InstallSteps } from "@/components/install-steps";
@@ -19,7 +18,7 @@ function StepBadge({ n }: { n: number }) {
 }
 
 // 管理画面の入口(はじめに)。ログイン直後に最初に見える画面。
-// つぼみは CLI 中心なので、まず tbm のインストールへ誘導する。
+// web / CLI どちらからでも操作できるが、CLI を使う人向けに導入手順も置く。
 // 利用者名はサーバ状態 → useMeQuery を直接読む(props で受け取らない)。
 export default function Welcome() {
   const { data: me } = useMeQuery();
@@ -30,16 +29,16 @@ export default function Welcome() {
       <PageMeta title="はじめに" />
 
       <header className="flex flex-col gap-3">
-        <Title size="large" color="app-teal">
+        <Title size="large" color="app-teal" className="self-start">
           はじめに
         </Title>
         <h1 className="text-2xl font-extrabold tracking-tight text-foreground">
           ようこそ、{greetingName} さん 🌷
         </h1>
-        <p className="max-w-2xl text-sm leading-relaxed font-medium text-foreground/75">
-          つぼみは <Code>tbm</Code> CLI から操作します。下の手順で自分の PC に インストールし、
-          <Code>tbm login</Code> で認証してください。インストール後は 左のメニューから
-          サービス・データベース・ボリューム・キャッシュを確認できます。
+        <p className="text-sm leading-relaxed font-medium text-foreground/75">
+          つぼみは web と <Code>tbm</Code> CLI のどちらからでも操作できます。CLI を使うなら、
+          下の手順で自分の PC にインストールし、<Code>tbm login</Code> で認証してください。
+          左のメニューから サービス・データベース・ボリューム・キャッシュを確認できます。
         </p>
       </header>
 
@@ -51,9 +50,7 @@ export default function Welcome() {
           <StepBadge n={1} />
           tbm CLI をインストール
         </h2>
-        <div className="w-full max-w-2xl">
-          <InstallSteps />
-        </div>
+        <InstallSteps />
       </section>
 
       {/* 2. 認証 */}
@@ -62,7 +59,7 @@ export default function Welcome() {
           <StepBadge n={2} />
           ログインする
         </h2>
-        <p className="max-w-2xl text-sm font-medium text-foreground/75">
+        <p className="text-sm font-medium text-foreground/75">
           ターミナルで <Code>tbm login</Code> を実行します。ブラウザで「許可する」を
           押すだけで認証が完了します(SSH 先・ヘッドレスでは自動でコピペ方式に 切り替わります)。
         </p>
@@ -90,8 +87,7 @@ export default function Welcome() {
           })}
         </div>
         <p className="text-xs font-medium text-muted-foreground">
-          まだ何も作成していなければ、各メニューは空の状態で表示されます。作成は CLI から 行います{" "}
-          <ArrowRight className="inline size-3" /> 例:<Code>tbm service create &lt;名前&gt;</Code>
+          まだ何も作成していなければ、各メニューは空の状態で表示されます。
         </p>
       </section>
     </div>
