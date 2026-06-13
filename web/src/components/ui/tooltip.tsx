@@ -92,26 +92,20 @@ export interface TooltipProps {
 // 4px ずれ(matched in &.visible で 0 に戻す)を Tailwind 任意値で再現する。
 // transform は visible 状態を data-visible で切り替える(原典の .visible 相当)。
 const PLACEMENT: Record<TooltipPlacement, string> = {
-  top: "bottom-[calc(100%+10px)] left-1/2 -translate-x-1/2 translate-y-[4px] data-[visible=true]:translate-y-0",
-  "top-start":
-    "bottom-[calc(100%+10px)] left-0 translate-y-[4px] data-[visible=true]:translate-y-0",
-  "top-end": "bottom-[calc(100%+10px)] right-0 translate-y-[4px] data-[visible=true]:translate-y-0",
+  top: "bottom-[calc(100%+10px)] left-1/2 -translate-x-1/2 translate-y-1 data-[visible=true]:translate-y-0",
+  "top-start": "bottom-[calc(100%+10px)] left-0 translate-y-1 data-[visible=true]:translate-y-0",
+  "top-end": "bottom-[calc(100%+10px)] right-0 translate-y-1 data-[visible=true]:translate-y-0",
   bottom:
-    "top-[calc(100%+10px)] left-1/2 -translate-x-1/2 translate-y-[-4px] data-[visible=true]:translate-y-0",
-  "bottom-start":
-    "top-[calc(100%+10px)] left-0 translate-y-[-4px] data-[visible=true]:translate-y-0",
-  "bottom-end":
-    "top-[calc(100%+10px)] right-0 translate-y-[-4px] data-[visible=true]:translate-y-0",
-  left: "right-[calc(100%+10px)] top-1/2 -translate-y-1/2 translate-x-[4px] data-[visible=true]:translate-x-0",
-  "left-start": "right-[calc(100%+10px)] top-0 translate-x-[4px] data-[visible=true]:translate-x-0",
-  "left-end":
-    "right-[calc(100%+10px)] bottom-0 translate-x-[4px] data-[visible=true]:translate-x-0",
+    "top-[calc(100%+10px)] left-1/2 -translate-x-1/2 -translate-y-1 data-[visible=true]:translate-y-0",
+  "bottom-start": "top-[calc(100%+10px)] left-0 -translate-y-1 data-[visible=true]:translate-y-0",
+  "bottom-end": "top-[calc(100%+10px)] right-0 -translate-y-1 data-[visible=true]:translate-y-0",
+  left: "right-[calc(100%+10px)] top-1/2 -translate-y-1/2 translate-x-1 data-[visible=true]:translate-x-0",
+  "left-start": "right-[calc(100%+10px)] top-0 translate-x-1 data-[visible=true]:translate-x-0",
+  "left-end": "right-[calc(100%+10px)] bottom-0 translate-x-1 data-[visible=true]:translate-x-0",
   right:
-    "left-[calc(100%+10px)] top-1/2 -translate-y-1/2 translate-x-[-4px] data-[visible=true]:translate-x-0",
-  "right-start":
-    "left-[calc(100%+10px)] top-0 translate-x-[-4px] data-[visible=true]:translate-x-0",
-  "right-end":
-    "left-[calc(100%+10px)] bottom-0 translate-x-[-4px] data-[visible=true]:translate-x-0",
+    "left-[calc(100%+10px)] top-1/2 -translate-y-1/2 -translate-x-1 data-[visible=true]:translate-x-0",
+  "right-start": "left-[calc(100%+10px)] top-0 -translate-x-1 data-[visible=true]:translate-x-0",
+  "right-end": "left-[calc(100%+10px)] bottom-0 -translate-x-1 data-[visible=true]:translate-x-0",
 };
 
 // 矢印(default の ::after) / しっぽ(island の .tail)の方位別クラス。位置決めと

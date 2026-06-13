@@ -228,7 +228,7 @@ export function Select({
   return (
     <div
       ref={wrapperRef}
-      className={cn("relative inline-block min-w-[140px] select-none", disabled && "opacity-50")}
+      className={cn("relative inline-block min-w-35 select-none", disabled && "opacity-50")}
       onKeyDown={handleKeyDown}
       onBlur={handleBlur}
     >
@@ -246,7 +246,7 @@ export function Select({
         className={cn(
           // min-h は現状の描画高(~40px)と同値の床。見た目は変えず、内容が縮んでも
           // タップしやすい高さを保証する(P2 touch target)。
-          "flex min-h-10 cursor-pointer items-center justify-between rounded-xl border-2 border-[#e8dcc8] bg-white px-[13px] py-2 outline-none transition-all duration-200 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
+          "flex min-h-10 cursor-pointer items-center justify-between rounded-xl border-2 border-[#e8dcc8] bg-white px-3.25 py-2 outline-none transition-all duration-200 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
           !disabled && "hover:border-[#d4c4a8] hover:bg-[#fffdf7]",
           disabled && "cursor-not-allowed bg-[#f5f5f0]",
         )}
@@ -287,7 +287,7 @@ export function Select({
       {open && mounted && (
         <div
           // dropdown:濃い黄面・角丸 28px・縦 12px パディング・フェードイン
-          className="z-100 rounded-[28px] bg-[#FFEEA0] py-3 opacity-0 [animation:animal-fade-in_0.2s_ease_forwards]"
+          className="z-100 rounded-[28px] bg-[#FFEEA0] py-3 opacity-0 animate-[animal-fade-in_0.2s_ease_forwards]"
           style={dropdownStyle}
           role="listbox"
           id={listboxId}
@@ -306,7 +306,7 @@ export function Select({
                 role="option"
                 aria-selected={selected}
                 className={cn(
-                  "relative flex cursor-pointer items-center justify-center py-[10px] pr-[30px] pl-[14px] text-sm font-medium whitespace-nowrap text-[#725d42]",
+                  "relative flex cursor-pointer items-center justify-center py-2.5 pr-7.5 pl-3.5 text-sm font-medium whitespace-nowrap text-[#725d42]",
                   (selected || highlighted) && "z-1 font-bold",
                 )}
                 onClick={() => {
@@ -322,14 +322,14 @@ export function Select({
                   // 原典の select-cursor.svg を左から滑り込ませる(自托管 /cursor)
                   <span
                     aria-hidden
-                    className="pointer-events-none absolute top-1/2 left-[-12px] size-[35px] bg-[url(/cursor/select-cursor.svg)] bg-contain bg-center bg-no-repeat [animation:tbm-select-cursor-slide-in_0.5s_ease-out_forwards]"
+                    className="pointer-events-none absolute top-1/2 -left-3 size-8.75 bg-[url(/cursor/select-cursor.svg)] bg-contain bg-center bg-no-repeat animate-[tbm-select-cursor-slide-in_0.5s_ease-out_forwards]"
                   />
                 )}
                 <span className="w-4 text-xs" aria-hidden />
                 {option.label}
                 {selected && (
                   // pillBar:選択項の下に敷く半透明の黄色バー
-                  <div className="absolute inset-x-0 top-[56%] -z-1 mx-5 h-[14px] -translate-y-1/2 rounded-[7px] bg-[#FFCC00] opacity-30" />
+                  <div className="absolute inset-x-0 top-[56%] -z-1 mx-5 h-3.5 -translate-y-1/2 rounded-[7px] bg-[#FFCC00] opacity-30" />
                 )}
               </div>
             );

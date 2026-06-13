@@ -126,7 +126,7 @@ export interface CodeBlockProps extends Omit<React.HTMLAttributes<HTMLDivElement
 }
 
 // 等幅フォントスタック(原典 codeBlockStyle の fontFamily を踏襲)。
-const MONO = "[font-family:'SF_Mono','Fira_Code','Cascadia_Code',Consolas,monospace]";
+const MONO = "font-['SF_Mono','Fira_Code','Cascadia_Code',Consolas,monospace]";
 
 export function CodeBlock({
   code,
@@ -214,7 +214,7 @@ export function CodeBlock({
         {/* a11y(P2 セマンティクス):トークンを <code> でラップし pre > code に。
             見た目は <pre> から継承させるため、ブラウザ既定の等幅/色を持ち込まない
             よう font/color を inherit に倒すだけ(色・寸法は一切変えない)。 */}
-        <code className="[font-family:inherit] text-inherit">{highlightJSX(code)}</code>
+        <code className="font-[inherit] text-inherit">{highlightJSX(code)}</code>
       </pre>
       {/* a11y(P2 コピーのライブ通知):コピー成功をスクリーンリーダーへ通知する
           視覚非表示の status 領域。視覚レイアウトには影響しない(sr-only 相当)。 */}

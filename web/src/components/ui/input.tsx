@@ -42,9 +42,9 @@ const WRAP_BASE =
   "inline-flex w-full items-center rounded-full border-2 border-[#c4b89e] bg-[rgb(247,243,223)] transition-all duration-250 ease-in-out";
 
 const WRAP_SIZE: Record<InputSize, string> = {
-  small: "h-8 rounded-[40px] px-[14px] text-xs",
-  middle: "h-10 px-[18px] text-sm",
-  large: "h-12 rounded-full border-[2.5px] px-[22px] text-base",
+  small: "h-8 rounded-[40px] px-3.5 text-xs",
+  middle: "h-10 px-4.5 text-sm",
+  large: "h-12 rounded-full border-[2.5px] px-5.5 text-base",
 };
 
 // 影あり時のサイズ別オフセット(small=2px / middle=3px / large=4px)。
@@ -125,7 +125,7 @@ export function Input({
           shadow && !status && !disabled && WRAP_SHADOW[size],
           status && WRAP_STATUS[status],
           // 内部 input が focus-visible のとき、ラッパに焦点アウトライン(黄)を出す
-          "has-[:focus-visible]:[outline:2px_solid_#f5c31c] has-[:focus-visible]:outline-offset-2",
+          "has-focus-visible:[outline:2px_solid_#f5c31c] has-focus-visible:outline-offset-2",
           disabled && "cursor-not-allowed border-[#d4c9b4] bg-[#ece8dc] opacity-60 shadow-none",
           className,
         )}

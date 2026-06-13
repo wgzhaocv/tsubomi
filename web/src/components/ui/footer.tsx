@@ -21,7 +21,7 @@ export interface FooterProps {
 }
 
 // 共通:全幅・高さ 80px。背景は no-repeat。背景画像と寸法・位置は type で切り替える。
-const BASE = "w-full h-[80px] bg-no-repeat";
+const BASE = "w-full h-20 bg-no-repeat";
 
 const TYPE: Record<FooterType, string> = {
   // 原典 .footer:center / contain

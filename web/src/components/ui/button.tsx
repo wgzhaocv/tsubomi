@@ -40,7 +40,7 @@ const BASE =
 const SIZE: Record<ButtonSize, string> = {
   // small:32px / radius16、large:48px / radius24、middle:45px / 丸薬形(base の rounded-full)
   small: "h-8 rounded-2xl px-4 text-xs",
-  middle: "h-[45px] rounded-full px-5 text-sm",
+  middle: "h-11.25 rounded-full px-5 text-sm",
   large: "h-12 rounded-3xl px-8 text-base",
 };
 
@@ -51,7 +51,7 @@ const SMALL_HIT_AREA =
   "before:absolute before:left-1/2 before:top-1/2 before:h-11 before:min-h-full before:w-full before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
 
 const LOADING =
-  "pointer-events-none cursor-default border-4 border-[#4de2da] bg-[#0ec4b6] bg-[length:28.28px_28.28px] text-white shadow-none [background-image:repeating-linear-gradient(-45deg,#0ec4b6,#0ec4b6_10px,#01b0a7_10px,#01b0a7_20px)] [animation:animal-btn-loading_1s_linear_infinite]";
+  "pointer-events-none cursor-default border-4 border-[#4de2da] bg-[#0ec4b6] bg-size-[28.28px_28.28px] text-white shadow-none bg-[repeating-linear-gradient(-45deg,#0ec4b6,#0ec4b6_10px,#01b0a7_10px,#01b0a7_20px)] animate-[animal-btn-loading_1s_linear_infinite]";
 
 // 種類ごとのクラス。hover/active は interactive(=非 disabled/非 loading)のときのみ付与する。
 function typeClasses(

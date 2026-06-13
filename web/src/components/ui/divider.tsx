@@ -41,13 +41,13 @@ const TYPE: Record<DividerType, string> = {
   "line-yellow": "bg-[url(/dividers/divider-line-yellow.svg)]",
   "wave-yellow": "bg-[url(/dividers/wave-yellow.svg)]",
   "dashed-brown":
-    "bg-[length:12px_2px] bg-repeat-x [background-image:linear-gradient(to_right,#c4b89e_50%,transparent_50%)]",
+    "bg-size-[12px_2px] bg-repeat-x bg-[linear-gradient(to_right,#c4b89e_50%,transparent_50%)]",
   "dashed-teal":
-    "bg-[length:12px_2px] bg-repeat-x [background-image:linear-gradient(to_right,#19c8b9_50%,transparent_50%)]",
+    "bg-size-[12px_2px] bg-repeat-x bg-[linear-gradient(to_right,#19c8b9_50%,transparent_50%)]",
   "dashed-white":
-    "bg-[length:12px_2px] bg-repeat-x [background-image:linear-gradient(to_right,#ffffff_50%,transparent_50%)]",
+    "bg-size-[12px_2px] bg-repeat-x bg-[linear-gradient(to_right,#ffffff_50%,transparent_50%)]",
   "dashed-yellow":
-    "bg-[length:12px_2px] bg-repeat-x [background-image:linear-gradient(to_right,#f5d04a_50%,transparent_50%)]",
+    "bg-size-[12px_2px] bg-repeat-x bg-[linear-gradient(to_right,#f5d04a_50%,transparent_50%)]",
 };
 
 export function Divider({ type = "line-brown", className, style }: DividerProps) {

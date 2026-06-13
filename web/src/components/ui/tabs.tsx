@@ -160,7 +160,7 @@ export function Tabs({
                   alt=""
                   aria-hidden
                   className={cn(
-                    "absolute -top-1 right-[-5px] size-[18px]",
+                    "absolute -top-1 -right-1.25 size-4.5",
                     leafAnimation && "animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]",
                   )}
                 />
@@ -171,14 +171,14 @@ export function Tabs({
       </div>
       {/* .tabContent:本文。表示の度に淡く立ち上がる(animal-tab-fade-in) */}
       <div
-        className="min-h-[60px] animate-[animal-tab-fade-in_0.25s_ease] p-6"
+        className="min-h-15 animate-[animal-tab-fade-in_0.25s_ease] p-6"
         role="tabpanel"
         id={activeItem ? panelId(activeItem.key) : undefined}
         aria-labelledby={activeItem ? tabId(activeItem.key) : undefined}
         tabIndex={0}
       >
         {/* .tabContentInner:二次テキスト色・基本サイズ・基本行間 */}
-        <div className="min-h-[40px] text-sm leading-[1.5715] text-[#9f927d]">
+        <div className="min-h-10 text-sm leading-[1.5715] text-[#9f927d]">
           {activeItem?.children}
         </div>
       </div>

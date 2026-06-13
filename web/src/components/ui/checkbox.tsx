@@ -37,9 +37,9 @@ export interface CheckboxProps {
 
 // box=円の直径 / check=チェック SVG の幅高 / label=文字サイズ。
 const SIZE: Record<CheckboxSize, { box: string; check: string; label: string }> = {
-  small: { box: "size-[18px]", check: "h-[9px] w-[10px]", label: "text-xs" },
-  middle: { box: "size-[22px]", check: "h-[11px] w-3", label: "text-sm" },
-  large: { box: "size-7", check: "h-[14px] w-[15px]", label: "text-base" },
+  small: { box: "size-4.5", check: "h-2.25 w-2.5", label: "text-xs" },
+  middle: { box: "size-5.5", check: "h-2.75 w-3", label: "text-sm" },
+  large: { box: "size-7", check: "h-3.5 w-3.75", label: "text-base" },
 };
 
 export function Checkbox({
