@@ -24,7 +24,7 @@ M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → M2 volume → M
 マイグレーションはフェーズ毎に追加。
 
 M1 で入ったもの:`resources` スーパーテーブル + `database_details`/`database_roles`
-+ `audit_log`;pg-tenant(ユーザ DB)+ pgbouncer(外部入口、auth_query);DB 作成/
++ `audit_log`;pg-tenant(ユーザ DB)+ pgbouncer(外部入口、auth_query、client TLS);DB 作成/
 一覧/接続文字列/rotate/web SQL/ソフト削除→ゴミ箱→復元/日次バックアップ;at-rest
 暗号化(crypto.rs、XChaCha20-Poly1305);`tbm db` サブコマンド。**双 role**:app
 (内部、M3 で service に注入)+ human(外部、rotate 可)— 詳細は §2/§5。

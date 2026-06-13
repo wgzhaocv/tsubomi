@@ -118,12 +118,12 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
 
 ```bash
 docker login docker.io
-REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 just release-image  # multi-arch push
-# just 無し:  REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 bash scripts/release-image.sh
+REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v3 just release-image  # multi-arch push
+# just 無し:  REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v3 bash scripts/release-image.sh
 ```
 
 publish 後、VPS 側は新タグで起こし直すだけ:
-`TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v2 docker compose --env-file .env.production -f compose.prod.yml up -d`
+`TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v3 docker compose --env-file .env.production -f compose.prod.yml up -d`
 (または `compose.prod.yml` の既定タグを上げて取得 → `up -d`)。
 
 **B. LAN 内ホストへ直送(香橙派など。Hub を介さず速い)**
@@ -133,7 +133,7 @@ publish 後、VPS 側は新タグで起こし直すだけ:
 
 ```bash
 HOST=zwg@192.168.0.106 just ship          # 既定タグ tsubomi:local で直送 + 起動
-# HOST=user@ip TAG=v2 just ship
+# HOST=user@ip TAG=v3 just ship
 # just 無し:  HOST=zwg@192.168.0.106 bash scripts/ship.sh
 ```
 
