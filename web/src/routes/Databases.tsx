@@ -44,11 +44,7 @@ export default function Databases() {
           <Title size="large" color="app-blue">
             データベース
           </Title>
-          <Button
-            type="default"
-            icon={<Plus className="size-4" />}
-            onClick={() => setOpen(true)}
-          >
+          <Button type="default" icon={<Plus className="size-4" />} onClick={() => setOpen(true)}>
             新規作成
           </Button>
         </header>
@@ -68,9 +64,7 @@ export default function Databases() {
                 <Database className="size-8" />
               </div>
               <div className="flex flex-col gap-1.5">
-                <p className="text-lg font-bold text-foreground">
-                  まだデータベースがありません
-                </p>
+                <p className="text-lg font-bold text-foreground">まだデータベースがありません</p>
                 <p className="max-w-md text-sm font-medium text-muted-foreground">
                   単一インスタンス上に独立した PostgreSQL
                   データベースを作成します。接続文字列はここから確認・コピーできます。
@@ -127,11 +121,7 @@ export default function Databases() {
               <Button type="text" onClick={() => setOpen(false)}>
                 キャンセル
               </Button>
-              <Button
-                type="primary"
-                loading={create.isPending}
-                onClick={submit}
-              >
+              <Button type="primary" loading={create.isPending} onClick={submit}>
                 作成
               </Button>
             </>
@@ -150,9 +140,7 @@ export default function Databases() {
               description="表示名です。後から変えても接続文字列は変わりません。"
             />
             {create.error && (
-              <p className="text-sm font-semibold text-[#e05a5a]">
-                {create.error.message}
-              </p>
+              <p className="text-sm font-semibold text-[#e05a5a]">{create.error.message}</p>
             )}
           </div>
         </Modal>

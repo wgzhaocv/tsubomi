@@ -13,11 +13,27 @@ export type Database = {
   rotated_at: string | null;
 };
 
-export type QueryResult = {
+// 1 文ぶんの結果。SELECT 系は columns/rows、それ以外は columns 空 + rows_affected。
+export type ResultSet = {
   columns: string[];
   rows: (string | null)[][];
   row_count: number;
   truncated: boolean;
+  rows_affected: number;
+};
+
+// /query の応答。複数文を投げると文ごとに 1 集合ずつ(混ざらない)。
+export type QueryResponse = {
+  results: ResultSet[];
+};
+
+// 空の結果集合(テーブル系フックで results が空のときのフォールバック)。
+const EMPTY_SET: ResultSet = {
+  columns: [],
+  rows: [],
+  row_count: 0,
+  truncated: false,
+  rows_affected: 0,
 };
 
 export const dbKeys = {
@@ -95,14 +111,20 @@ export function useRotate() {
 
 // その DB 自身の human 資格でサーバ側が任意 SQL を実行する低レベル関数。
 // SQL コンソール(mutation)とテーブル閲覧(query)の共通入口。
-async function runSql(id: string, sql: string): Promise<QueryResult> {
+async function runSql(id: string, sql: string): Promise<QueryResponse> {
   const res = await fetch(`/api/databases/${id}/query`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sql }),
   });
   if (!res.ok) return failBody(res);
-  return (await res.json()) as QueryResult;
+  return (await res.json()) as QueryResponse;
+}
+
+// テーブル系フックは単文(1 集合)なので先頭の結果集合だけ取り出す。
+async function runSingle(id: string, sql: string): Promise<ResultSet> {
+  const r = await runSql(id, sql);
+  return r.results[0] ?? EMPTY_SET;
 }
 
 // web SQL クライアント。その DB 自身の human 資格でサーバ側が実行する。
@@ -141,7 +163,7 @@ export function useTables(id: string) {
   return useQuery({
     queryKey: [...dbKeys.detail(id), "tables"],
     queryFn: async (): Promise<string[]> => {
-      const r = await runSql(
+      const r = await runSingle(
         id,
         "SELECT table_name FROM information_schema.tables " +
           "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' " +
@@ -158,7 +180,7 @@ export function useTableColumns(id: string, table: string | undefined) {
     queryKey: [...dbKeys.detail(id), "columns", table],
     enabled: !!table,
     queryFn: async (): Promise<TableColumn[]> => {
-      const r = await runSql(
+      const r = await runSingle(
         id,
         "SELECT column_name, data_type, is_nullable, column_default " +
           "FROM information_schema.columns " +
@@ -180,6 +202,6 @@ export function useTableRows(id: string, table: string | undefined) {
   return useQuery({
     queryKey: [...dbKeys.detail(id), "rows", table],
     enabled: !!table,
-    queryFn: () => runSql(id, `SELECT * FROM "public".${quoteIdent(table!)} LIMIT 100`),
+    queryFn: () => runSingle(id, `SELECT * FROM "public".${quoteIdent(table!)} LIMIT 100`),
   });
 }

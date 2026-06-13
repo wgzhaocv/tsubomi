@@ -278,7 +278,10 @@ export const Modal: React.FC<ModalProps> = ({
             </div>
           )}
           <div
-            className="flex flex-1 flex-col items-start overflow-y-auto pb-5 text-[20px] font-semibold leading-[1.6] text-[#8a7b66]"
+            // overflow-y-auto は overflow-x も auto に格上げされ横方向もクリップする。
+            // 中の要素の focus 枠(outline は box の外側に出る)が左右端で切れるので、
+            // px で枠の逃げ場を作り、同量の負マージンで見た目の位置を元へ戻す。
+            className="-mx-1.5 flex flex-1 flex-col items-start overflow-y-auto px-1.5 pb-5 text-[20px] font-semibold leading-[1.6] text-[#8a7b66]"
             id={bodyId}
           >
             {typewriter ? (

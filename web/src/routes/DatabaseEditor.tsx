@@ -4,11 +4,13 @@ import { useParams } from "react-router";
 
 import { ResultTable } from "@/components/query-result";
 import { Button } from "@/components/ui/button";
+import type { QueryResponse } from "@/lib/databases";
 import { useRunQuery } from "@/lib/databases";
 import { useEditorStore } from "@/lib/store/editor";
 
 // SQL コンソール(独立ページ)。当該 DB 自身の human 資格でサーバ側が実行する
 // (statement_timeout 10s + サーバ側 15s の硬い上限)。任意 SQL を流せる。
+// SQL 草稿と直近結果は zustand に置く(画面遷移で消えない。SQL は localStorage 永続)。
 
 // このマシンの修飾キー表示。実行判定は metaKey||ctrlKey の両対応なので、ここは
 // ラベルだけの問題(Mac は ⌘、それ以外は Ctrl)。
@@ -20,14 +22,18 @@ const MOD_KEY = isMac ? "⌘" : "Ctrl";
 export default function DatabaseEditor() {
   const { id = "" } = useParams();
   const runQuery = useRunQuery(id);
-  const [sql, setSql] = useState("");
+
+  // SQL 草稿・直近結果・高さはすべて zustand(遷移で消えない)。
+  const sql = useEditorStore((s) => s.sqlByDb[id] ?? "");
+  const setSql = useEditorStore((s) => s.setSql);
+  const stored = useEditorStore((s) => s.resultByDb[id]);
+  const setResult = useEditorStore((s) => s.setResult);
+  const height = useEditorStore((s) => s.height);
+  const setHeight = useEditorStore((s) => s.setHeight);
+
   // 選択範囲があるか(ボタン文言と実行範囲の判定に使う)。
   const [hasSelection, setHasSelection] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
-
-  // エディタ高さは zustand(localStorage 同期)に持つ。ドラッグバーで変える。
-  const height = useEditorStore((s) => s.height);
-  const setHeight = useEditorStore((s) => s.setHeight);
 
   // 実行する SQL を決める:選択範囲があればその部分だけ、無ければ全文。
   const run = () => {
@@ -36,17 +42,20 @@ export default function DatabaseEditor() {
       el && el.selectionStart !== el.selectionEnd
         ? el.value.slice(el.selectionStart, el.selectionEnd)
         : sql;
-    if (selected.trim()) runQuery.mutate(selected);
+    if (!selected.trim()) return;
+    runQuery.mutate(selected, {
+      onSuccess: (resp) => setResult(id, { ok: resp }),
+      onError: (e) => setResult(id, { error: e.message }),
+    });
   };
 
-  // SQL 整形(best-effort)。sql-formatter は重い(~260KB)ので、初回の整形時に
-  // 動的 import で別チャンクとして読み込む(本体バンドルに載せない)。パースできない
-  // SQL はそのまま据え置く(実行時にサーバがエラーを返す)。整形は常に全文に効かせる。
+  // SQL 整形(best-effort)。sql-formatter は重い(~260KB)ので初回整形時に動的 import。
+  // パースできない SQL はそのまま据え置く(実行時にサーバがエラーを返す)。整形は全文。
   const formatSql = async () => {
     if (!sql.trim()) return;
     try {
       const { format } = await import("sql-formatter");
-      setSql(format(sql, { language: "postgresql" }));
+      setSql(id, format(sql, { language: "postgresql" }));
     } catch {
       // 不正な SQL は整形しない。
     }
@@ -73,7 +82,7 @@ export default function DatabaseEditor() {
         <textarea
           ref={taRef}
           value={sql}
-          onChange={(e) => setSql(e.target.value)}
+          onChange={(e) => setSql(id, e.target.value)}
           onSelect={(e) => {
             const el = e.currentTarget;
             setHasSelection(el.selectionStart !== el.selectionEnd);
@@ -139,13 +148,41 @@ export default function DatabaseEditor() {
         </span>
       </div>
 
-      {runQuery.error && (
+      {stored && "error" in stored && (
         <pre className="overflow-auto rounded-2xl border-2 border-[#e05a5a] bg-[rgba(224,90,90,0.08)] px-4 py-3 text-sm font-semibold whitespace-pre-wrap text-[#c94444]">
-          {runQuery.error.message}
+          {stored.error}
         </pre>
       )}
+      {stored && "ok" in stored && <ResultsView resp={stored.ok} />}
+    </div>
+  );
+}
 
-      {runQuery.data && <ResultTable result={runQuery.data} />}
+// 複数文の結果を、文ごとに分けて表示する(混ぜない)。SELECT は表、それ以外は
+// 「OK · N 行に影響」。結果が複数あるときは見出しを付ける。
+function ResultsView({ resp }: { resp: QueryResponse }) {
+  if (resp.results.length === 0) {
+    return <p className="text-sm font-semibold text-[#11a89b]">OK。</p>;
+  }
+  const multi = resp.results.length > 1;
+  return (
+    <div className="flex flex-col gap-4">
+      {resp.results.map((set, i) => (
+        <div key={i} className="flex flex-col gap-1.5">
+          {multi && (
+            <p className="text-xs font-bold text-muted-foreground">
+              結果 {i + 1} / {resp.results.length}
+            </p>
+          )}
+          {set.columns.length > 0 ? (
+            <ResultTable result={set} />
+          ) : (
+            <p className="text-sm font-semibold text-[#11a89b]">
+              OK{set.rows_affected > 0 ? ` · ${set.rows_affected} 行に影響` : ""}
+            </p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

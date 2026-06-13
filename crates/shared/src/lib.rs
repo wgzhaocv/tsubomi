@@ -119,14 +119,23 @@ pub struct QueryReq {
     pub sql: String,
 }
 
-/// web SQL の結果。値はすべて text 表現(NULL は None)。
+/// web SQL の 1 文ぶんの結果。SELECT 系は columns/rows、それ以外(INSERT/UPDATE/
+/// CREATE 等)は columns 空 + rows_affected。値はすべて text 表現(NULL は None)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QueryResp {
+pub struct QueryResultSet {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
     /// 返した行数(上限で切り詰めた場合は truncated=true)。
     pub row_count: usize,
     pub truncated: bool,
+    /// SELECT 以外の影響行数(SELECT は 0)。
+    pub rows_affected: u64,
+}
+
+/// web SQL の結果。複数文を投げると文ごとに 1 集合ずつ返る(結果が混ざらない)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResp {
+    pub results: Vec<QueryResultSet>,
 }
 
 /// `GET /api/resources`:4 種をフラットに(dashboard 用)。

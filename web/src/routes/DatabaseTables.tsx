@@ -45,7 +45,10 @@ function TableList({
   const shown = filter ? all.filter((t) => t.toLowerCase().includes(filter.toLowerCase())) : all;
 
   return (
-    <aside className="flex max-h-[70vh] flex-col gap-2 rounded-2xl border-2 border-[#e8e2d6] bg-card p-3 md:sticky md:top-6">
+    // self-start:grid は既定で行高に引き伸ばすので、右の表が高いと list まで伸びる。
+    // 自分の内容高(min 〜 max-h-[70vh])に留め、右カラムの高さから切り離す。
+    // md:min-h で、テーブルが少なくても貧相に見えない下限を与える。
+    <aside className="flex max-h-[70vh] flex-col gap-2 self-start rounded-2xl border-2 border-[#e8e2d6] bg-card p-3 md:sticky md:top-6 md:min-h-96">
       {/* 検索 + 件数 */}
       <div className="flex items-center gap-2 rounded-xl border-2 border-[#c4b89e] bg-[rgb(247,243,223)] px-2.5 py-1.5 focus-within:[outline:2px_solid_#19c8b9] focus-within:outline-offset-1">
         <Search className="size-4 shrink-0 text-[#c4b89e]" />
@@ -58,7 +61,9 @@ function TableList({
         />
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      {/* overflow-y-auto は縦横ともクリップする ⇒ p で項目の focus 枠の逃げ場を四辺に
+          作り、同量の負マージンで見た目の位置を戻す(枠が端で切れるのを防ぐ)。 */}
+      <div className="-m-1 min-h-0 flex-1 overflow-y-auto p-1">
         {query.isPending && <p className="px-2 py-3 text-sm text-muted-foreground">読み込み中…</p>}
         {query.error && (
           <p className="px-2 py-3 text-sm font-semibold text-[#e05a5a]">{query.error.message}</p>
@@ -71,7 +76,8 @@ function TableList({
         {query.data && all.length > 0 && shown.length === 0 && (
           <p className="px-2 py-3 text-sm font-medium text-muted-foreground">一致なし。</p>
         )}
-        <ul className="flex flex-col gap-0.5">
+        {/* gap は項目間の focus 枠(outline-offset 込みで約 3px)が隣に被らない幅にする。 */}
+        <ul className="flex flex-col gap-1.5">
           {shown.map((t) => (
             <li key={t}>
               <NavLink
@@ -165,39 +171,46 @@ function StructurePane({ query }: { query: ReturnType<typeof useTableColumns> })
     return <p className="text-sm font-medium text-muted-foreground">列がありません。</p>;
 
   return (
-    <div className="overflow-auto rounded-2xl border-2 border-[#c4b89e]">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="bg-accent">
-            {["列名", "型", "NULL 可", "既定値"].map((h) => (
-              <th
-                key={h}
-                className="border-b-2 border-[#c4b89e] px-3 py-2 text-left font-bold whitespace-nowrap text-accent-foreground"
-              >
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {cols.map((c) => (
-            <tr key={c.name} className="even:bg-[rgba(196,184,158,0.12)]">
-              <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-bold whitespace-nowrap text-foreground">
-                {c.name}
-              </td>
-              <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-mono whitespace-nowrap text-[#11a89b]">
-                {c.type}
-              </td>
-              <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-medium whitespace-nowrap text-[#725d42]">
-                {c.nullable ? "YES" : "NO"}
-              </td>
-              <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-medium text-[#725d42]">
-                {c.default === null ? <span className="text-[#c4b89e] italic">—</span> : c.default}
-              </td>
+    // DATA と同じ作法:外で角丸 + bg、内で max-h スクロール、ヘッダは sticky。
+    <div className="overflow-hidden rounded-2xl border-2 border-[#c4b89e] bg-card">
+      <div className="max-h-[60vh] overflow-auto">
+        <table className="w-full border-collapse text-sm">
+          <thead>
+            <tr>
+              {["列名", "型", "NULL 可", "既定値"].map((h) => (
+                <th
+                  key={h}
+                  className="sticky top-0 z-10 border-b-2 border-[#c4b89e] bg-[#e8e1cc] px-3 py-2 text-left font-bold whitespace-nowrap text-[#794f27]"
+                >
+                  {h}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {cols.map((c) => (
+              <tr key={c.name} className="even:bg-[rgba(196,184,158,0.12)]">
+                <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-bold whitespace-nowrap text-foreground">
+                  {c.name}
+                </td>
+                <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-mono whitespace-nowrap text-[#11a89b]">
+                  {c.type}
+                </td>
+                <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-medium whitespace-nowrap text-[#725d42]">
+                  {c.nullable ? "YES" : "NO"}
+                </td>
+                <td className="border-b border-[#e8e2d6] px-3 py-1.5 font-medium text-[#725d42]">
+                  {c.default === null ? (
+                    <span className="text-[#c4b89e] italic">—</span>
+                  ) : (
+                    c.default
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

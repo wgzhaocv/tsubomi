@@ -17,9 +17,11 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use futures_util::StreamExt;
 use sqlx::{Column, Connection, Executor, PgPool, Row};
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, ResourceDto,
+    ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, QueryResultSet,
+    ResourceDto,
 };
 use uuid::Uuid;
 
@@ -345,9 +347,47 @@ pub async fn query(
 
     // raw_sql:単純クエリプロトコル(複数文 OK、値は text)。これは web SQL —
     // 任意 SQL の実行が目的なので AssertSqlSafe で包む(安全は L1/L2/L3 認証が担保)。
-    let exec = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql)).fetch_all(&mut conn);
-    let rows = match tokio::time::timeout(std::time::Duration::from_secs(15), exec).await {
-        Ok(r) => r.map_err(|e| AppError::BadRequest(format!("{e}")))?,
+    // fetch_many で「行(Right)/ 文完了(Left)」を流し、文ごとに 1 集合へまとめる
+    // (fetch_all だと全文の行が混ざり、別 SELECT の値が違う列に並んでしまう)。
+    let collect = async {
+        let stream = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql)).fetch_many(&mut conn);
+        futures_util::pin_mut!(stream);
+
+        let mut results: Vec<QueryResultSet> = Vec::new();
+        let mut cols: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut total: usize = 0; // 上限で切り詰める前の実件数
+
+        while let Some(item) = stream.next().await {
+            match item.map_err(|e| AppError::BadRequest(format!("{e}")))? {
+                // 文の完了 ⇒ 直前までの行を 1 集合として確定。
+                sqlx::Either::Left(done) => {
+                    results.push(QueryResultSet {
+                        columns: std::mem::take(&mut cols),
+                        rows: std::mem::take(&mut rows),
+                        row_count: total.min(MAX_QUERY_ROWS),
+                        truncated: total > MAX_QUERY_ROWS,
+                        rows_affected: done.rows_affected(),
+                    });
+                    total = 0;
+                }
+                // 行。最初の行で列名を確定し、上限まで text 化して貯める。
+                sqlx::Either::Right(row) => {
+                    if cols.is_empty() {
+                        cols = row.columns().iter().map(|c| c.name().to_string()).collect();
+                    }
+                    total += 1;
+                    if rows.len() < MAX_QUERY_ROWS {
+                        rows.push((0..row.len()).map(|i| tenant::col_to_string(&row, i)).collect());
+                    }
+                }
+            }
+        }
+        Ok::<_, AppError>(results)
+    };
+
+    let results = match tokio::time::timeout(std::time::Duration::from_secs(15), collect).await {
+        Ok(r) => r?,
         Err(_) => {
             // タイムアウト:接続を落として中断する。
             drop(conn);
@@ -358,28 +398,7 @@ pub async fn query(
     };
     let _ = conn.close().await;
 
-    let columns: Vec<String> = rows
-        .first()
-        .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
-        .unwrap_or_default();
-    let truncated = rows.len() > MAX_QUERY_ROWS;
-    let out_rows: Vec<Vec<Option<String>>> = rows
-        .iter()
-        .take(MAX_QUERY_ROWS)
-        .map(|row| {
-            (0..row.len())
-                .map(|i| tenant::col_to_string(row, i))
-                .collect()
-        })
-        .collect();
-    let row_count = out_rows.len();
-
-    Ok(Json(QueryResp {
-        columns,
-        rows: out_rows,
-        row_count,
-        truncated,
-    }))
+    Ok(Json(QueryResp { results }))
 }
 
 /// `DELETE /api/databases/:id`:ソフト削除(dump → DROP DATABASE → deleted_at)。
