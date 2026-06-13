@@ -83,10 +83,16 @@ deploy:
     @echo "✅ deployed → http://localhost:9090  (logs: just logs / stop: just down)"
 
 # サーバイメージを multi-arch(amd64+arm64)でビルドしてレジストリへ push。
-# リモート VPS 用。例: REGISTRY=ghcr.io/USER TAG=v1 just release-image
+# リモート VPS 用(各 VPS は docker pull で取得)。例: REGISTRY=ghcr.io/USER TAG=v1 just release-image
 # VPS 側: docker compose --env-file .env.production -f compose.prod.yml up -d
 release-image:
     chmod +x scripts/release-image.sh && scripts/release-image.sh
+
+# レジストリを介さず LAN 内ホスト(香橙派など)へ直接転送してデプロイ。
+# arch を検出して native ビルド → docker save | ssh docker load → 起動。速い。
+# 例: HOST=zwg@192.168.0.106 just ship   /   HOST=... TAG=v2 just ship
+ship:
+    chmod +x scripts/ship.sh && scripts/ship.sh
 
 # リリース CLI バイナリをビルド -> target/release/tbm
 release-cli:
