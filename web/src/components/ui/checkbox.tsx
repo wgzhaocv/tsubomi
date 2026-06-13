@@ -104,7 +104,7 @@ export function Checkbox({
                 className={cn(
                   "absolute inset-0 m-0 cursor-pointer appearance-none rounded-full border-2 border-[#c4b89e] bg-[rgb(247,243,223)] outline-none transition-[border-color] duration-250",
                   "checked:border-[#50B9AB] checked:bg-[#19c8b9]",
-                  "focus-visible:[outline:2px_solid_#f5c31c] focus-visible:[outline-offset:2px]",
+                  "focus-visible:[outline:2px_solid_#f5c31c] focus-visible:outline-offset-2",
                   "disabled:border-[#d4c9b4] disabled:bg-[#f0ece2]",
                 )}
               />

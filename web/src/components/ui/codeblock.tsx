@@ -190,7 +190,7 @@ export function CodeBlock({
               type="button"
               onClick={handleCopy}
               aria-label={copied ? "コピーしました" : "コードをコピー"}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-[10px] border border-[#3d3028] bg-[#3d3028] px-2.5 py-1 text-[12px] font-semibold text-[#e8d5bc] outline-none transition-colors duration-150 hover:bg-[#4a3a2e] focus-visible:[outline:2px_solid_#f0a870] focus-visible:[outline-offset:2px]"
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-[10px] border border-[#3d3028] bg-[#3d3028] px-2.5 py-1 text-[12px] font-semibold text-[#e8d5bc] outline-none transition-colors duration-150 hover:bg-[#4a3a2e] focus-visible:[outline:2px_solid_#f0a870] focus-visible:outline-offset-2"
             >
               {copied ? (
                 <Check className="size-3.5 text-[#a8d4a0]" />
@@ -214,7 +214,7 @@ export function CodeBlock({
         {/* a11y(P2 セマンティクス):トークンを <code> でラップし pre > code に。
             見た目は <pre> から継承させるため、ブラウザ既定の等幅/色を持ち込まない
             よう font/color を inherit に倒すだけ(色・寸法は一切変えない)。 */}
-        <code className="[font-family:inherit] [color:inherit]">{highlightJSX(code)}</code>
+        <code className="[font-family:inherit] text-inherit">{highlightJSX(code)}</code>
       </pre>
       {/* a11y(P2 コピーのライブ通知):コピー成功をスクリーンリーダーへ通知する
           視覚非表示の status 領域。視覚レイアウトには影響しない(sr-only 相当)。 */}

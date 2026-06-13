@@ -132,7 +132,7 @@ export function Tabs({
               onClick={() => handleTabClick(item.key)}
               className={cn(
                 // .tabItem:透明地・枠なし・丸み 24px・茶文字 500
-                "relative flex cursor-pointer items-center gap-2 rounded-3xl border-none bg-transparent px-4 py-2 text-sm font-medium text-[#794f27] outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:[outline-offset:2px]",
+                "relative flex cursor-pointer items-center gap-2 rounded-3xl border-none bg-transparent px-4 py-2 text-sm font-medium text-[#794f27] outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
                 // hover:ミント薄掛け(active 時は active 色が勝つ)
                 !isActive && "hover:bg-[rgba(25,200,185,0.1)]",
                 // .active:ミント面・クリーム文字 600

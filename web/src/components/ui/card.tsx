@@ -40,7 +40,7 @@ function Card({
       className={cn(
         "flex flex-col gap-6 rounded-[20px] bg-card py-4 font-medium text-card-foreground",
         interactive &&
-          "cursor-pointer outline-none transition-transform duration-300 ease-[ease] hover:-translate-y-0.5 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:[outline-offset:2px] active:translate-y-0",
+          "cursor-pointer outline-none transition-transform duration-300 ease-[ease] hover:-translate-y-0.5 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 active:translate-y-0",
         className,
       )}
       {...props}

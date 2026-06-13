@@ -125,7 +125,7 @@ export function Input({
           shadow && !status && !disabled && WRAP_SHADOW[size],
           status && WRAP_STATUS[status],
           // 内部 input が focus-visible のとき、ラッパに焦点アウトライン(黄)を出す
-          "has-[:focus-visible]:[outline:2px_solid_#f5c31c] has-[:focus-visible]:[outline-offset:2px]",
+          "has-[:focus-visible]:[outline:2px_solid_#f5c31c] has-[:focus-visible]:outline-offset-2",
           disabled && "cursor-not-allowed border-[#d4c9b4] bg-[#ece8dc] opacity-60 shadow-none",
           className,
         )}
@@ -152,7 +152,7 @@ export function Input({
             aria-label={clearAriaLabel}
             // 可視グリフは 20px のまま。before 疑似要素で当たり判定だけを
             // 上下左右 -12px 拡張し 44px のタッチ領域を確保(レイアウトは不変)。
-            className="relative ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-full border-none bg-transparent text-[13px] font-bold text-[#c4b89e] outline-none transition-colors duration-150 before:absolute before:-inset-3 before:content-[''] hover:bg-[rgba(114,93,66,0.1)] hover:text-[#725d42] focus-visible:[outline:2px_solid_#725d42] focus-visible:[outline-offset:1px]"
+            className="relative ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded-full border-none bg-transparent text-[13px] font-bold text-[#c4b89e] outline-none transition-colors duration-150 before:absolute before:-inset-3 before:content-[''] hover:bg-[rgba(114,93,66,0.1)] hover:text-[#725d42] focus-visible:[outline:2px_solid_#725d42] focus-visible:outline-offset-1"
           >
             ×
           </button>

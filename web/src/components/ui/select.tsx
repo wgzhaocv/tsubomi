@@ -246,7 +246,7 @@ export function Select({
         className={cn(
           // min-h は現状の描画高(~40px)と同値の床。見た目は変えず、内容が縮んでも
           // タップしやすい高さを保証する(P2 touch target)。
-          "flex min-h-10 cursor-pointer items-center justify-between rounded-xl border-2 border-[#e8dcc8] bg-white px-[13px] py-2 outline-none transition-all duration-200 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:[outline-offset:2px]",
+          "flex min-h-10 cursor-pointer items-center justify-between rounded-xl border-2 border-[#e8dcc8] bg-white px-[13px] py-2 outline-none transition-all duration-200 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
           !disabled && "hover:border-[#d4c4a8] hover:bg-[#fffdf7]",
           disabled && "cursor-not-allowed bg-[#f5f5f0]",
         )}
