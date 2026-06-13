@@ -43,21 +43,13 @@ Google OAuth クライアント:Google Cloud Console で作成(種別:Web applic
 `TSUBOMI_BIND_ADDR`)に待ち受け、前段の TLS リバースプロキシ越しに公開する。設定は
 ホスト毎の **`.env.production`**(git 管理外)。host ネットなので
 `DATABASE_URL=127.0.0.1:5434` が dev / 本番で共通のまま通る。`just` / ソース / sh が
-無いマシン(Windows 等)でも `docker compose` だけで完結する。イメージは初日から
-**両アーキ対応**(arm64 = 香橙派 / amd64 = x86_64 VPS)。
+無いマシン(Windows 等)でも `docker compose` だけで完結する。
 
-### 1. イメージをビルドして配布(ビルド機で一度)
+配布は公開イメージ **`docker.io/wgzhaofumi/tsubomi`**(multi-arch: arm64 = 香橙派 /
+amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビルドは不要**で、
+`.env.production` の `TSUBOMI_IMAGE` に使うタグを指すだけ。
 
-multi-arch イメージを作ってレジストリへ push する:
-
-```bash
-docker login docker.io
-REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
-# just 無し:  REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 bash scripts/release-image.sh
-# 単一アーキで高速化:  PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
-```
-
-### 2. 自分の VPS で動かす(本番セットアップ)
+### 自分の VPS で動かす(本番セットアップ)
 
 新しい VPS に必要なのは **Docker だけ**(ソース・just・sh は不要)。
 
@@ -68,7 +60,7 @@ REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
 3. **`.env.production` を本番値で埋める**(主なキー。全量は `.env.example` 参照):
 
    ```env
-   TSUBOMI_IMAGE=docker.io/<USER>/tsubomi:v1
+   TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v1   # 公開イメージをそのまま指す
    PG_PLATFORM_PASSWORD=<強いパスワード>
    DATABASE_URL=postgres://tsubomi:<同じパスワード>@127.0.0.1:5434/tsubomi_platform
    GOOGLE_CLIENT_ID=...
@@ -85,10 +77,9 @@ REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
    (compose が新規 pg をこのパスワードで初期化する)。
 4. **Google OAuth** に本番の redirect URI を追加:
    `https://<ドメイン>/api/auth/google/callback`
-5. **起動**(管制面 pg + server をまとめて立てる):
+5. **起動**(公開イメージを pull し、管制面 pg + server をまとめて立てる):
 
    ```bash
-   docker login docker.io     # 公開イメージなら不要
    docker compose --env-file .env.production -f compose.prod.yml up -d
    ```
 6. **TLS リバースプロキシ**を前段に置き、`<ドメイン>` → `127.0.0.1:9090` へ転送する。
@@ -99,19 +90,31 @@ REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
    curl -fsS http://127.0.0.1:9090/api/health
    docker compose -f compose.prod.yml logs -f server
    ```
-8. **更新**:新タグを push → `.env.production` の `TSUBOMI_IMAGE` を上げて
+8. **更新**:公開された新タグに合わせて `.env.production` の `TSUBOMI_IMAGE` を変え
    `docker compose --env-file .env.production -f compose.prod.yml up -d`
    (`pull` で先に取得しても可)。停止は `docker compose -f compose.prod.yml down`。
 
-### 3. ローカルビルドで動かす(ソースのあるホスト。例:香橙派で直接ビルド)
+### ソースから自分でビルドして動かす(任意)
 
-レジストリを使わず、その場でビルドして起動する:
+公開イメージを使わず、その場のソースからビルドして起動する場合:
 
 ```bash
 just deploy   # 管制面 pg 起動 → サーバを build + 起動(.env.production を使用)
 # just 無し:
 #   docker compose --env-file .env.production -f infra/docker-compose.yml up -d
 #   docker compose --env-file .env.production up --build -d
+```
+
+### メンテナ向け:新バージョンを公開する
+
+イメージを更新・公開するのは**メンテナだけ**(運用側は上記のとおり pull するだけ)。
+multi-arch でビルドして自分のレジストリへ push する:
+
+```bash
+docker login docker.io
+REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 just release-image
+# just 無し:  REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 bash scripts/release-image.sh
+# 単一アーキで高速化:  PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
 ```
 
 ## tbm CLI
