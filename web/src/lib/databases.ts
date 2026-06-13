@@ -107,7 +107,14 @@ async function runSql(id: string, sql: string): Promise<QueryResult> {
 
 // web SQL クライアント。その DB 自身の human 資格でサーバ側が実行する。
 export function useRunQuery(id: string) {
-  return useMutation({ mutationFn: (sql: string) => runSql(id, sql) });
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (sql: string) => runSql(id, sql),
+    // 任意 SQL は CREATE / DROP / ALTER やデータ変更を含みうるので、その DB の
+    // テーブル系クエリ(一覧 / 構造 / 行)を失効させる。テーブル画面へ移ると取り直す
+    // (例:SQL でテーブルを作ってからテーブル画面へ行くと自動で現れる)。
+    onSuccess: () => qc.invalidateQueries({ queryKey: dbKeys.detail(id) }),
+  });
 }
 
 // ===== テーブル閲覧(専用 API は持たず、/query へ information_schema /

@@ -42,12 +42,9 @@ function Card({
       onKeyDown={interactive ? handleKeyDown : onKeyDown}
       className={cn(
         "flex flex-col gap-6 rounded-[20px] bg-card py-4 font-medium text-card-foreground",
-        // 原典 .card-dashed(2px dashed #e8dcc8・影なし)。ただし塗りは原典の不透明
-        // クリームではなく半透明(bg-card と同じクリームの 70% アルファ)にする:隣の
-        // 実面パネル(bg-card)と同じ色相で揃えつつ、placeholder として軽く・壁紙を
-        // うっすら透かして馴染ませる。(bg-card/70 は @theme inline の var 経由色だと
-        // アルファが効かないので、リテラル rgba で確実に半透明にする。)
-        type === "dashed" && "border-2 border-dashed border-[#e8dcc8] bg-[rgba(247,243,223,0.7)]",
+        // 原典の dashed カード。塗りは基底の bg-card のまま(隣の実面パネルと同じ
+        // クリーム実色)にして色差をなくし、破線枠だけで「空 / placeholder」を示す。
+        type === "dashed" && "border-2 border-dashed border-[#e8dcc8]",
         interactive &&
           "cursor-pointer outline-none transition-transform duration-300 ease-[ease] hover:-translate-y-0.5 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 active:translate-y-0",
         className,
