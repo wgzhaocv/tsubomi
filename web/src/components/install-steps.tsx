@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useCopied } from "@/lib/use-copied";
 import { cn } from "@/lib/utils";
 
 // tbm CLI のインストール手順(各 OS のコマンドカード)。Welcome(管理画面の入口)と
@@ -25,22 +26,13 @@ export function Code({ children }: { children: ReactNode }) {
 }
 
 function CommandCard({ title, note, command }: { title: string; note: string; command: string }) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopied();
   return (
     <Card className="w-full">
       <CardHeader>
         <CardTitle className="text-base">{title}</CardTitle>
         <CardAction>
-          <Button
-            type="default"
-            size="small"
-            onClick={() => {
-              void navigator.clipboard.writeText(command).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1500);
-              });
-            }}
-          >
+          <Button type="default" size="small" onClick={() => copy(command)}>
             {copied ? "コピーしました ✓" : "コピー"}
           </Button>
         </CardAction>

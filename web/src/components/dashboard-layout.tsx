@@ -1,24 +1,20 @@
-import { LogOut } from "lucide-react";
-import { NavLink, Navigate, Outlet, useOutletContext } from "react-router";
+import { useEffect } from "react";
+import { LogOut, Menu, X } from "lucide-react";
+import { Link, NavLink, Navigate, Outlet } from "react-router";
 
 import { Button } from "@/components/ui/button";
-import { logout, useMe, type Me } from "@/lib/auth";
+import { useLogout, useMeQuery } from "@/lib/auth";
 import { RESOURCES } from "@/lib/resources";
+import { useUiStore } from "@/lib/store/ui";
 import { cn } from "@/lib/utils";
 
-// 管理画面の外殻:左サイドメニュー + 内容領域(<Outlet>)。
-// ログイン守衛もここで行う(未ログインなら /login へ)。背景の壁紙は body::before が
-// 全画面に敷くので、サイドバー・内容はその上に浮くクリーム面パネルとして置く。
-// 画面幅:md 未満はアイコンのみの細い縦バー(w-20)、md 以上はラベル付き(w-64)。
+// 管理画面の外殻:左サイドメニュー + 内容領域(<Outlet>)。ログイン守衛もここ。
+// 状態は props で配らない:利用者(me)もログアウトも、必要な子が自分のフックで
+// 直接読む(useMeQuery / useLogout)。Query が重複排除するので追加リクエストは出ない。
+// 背景壁紙は body::before が全画面に敷くので、各パネルはその上に浮くクリーム面。
+// 画面幅:md 以上は常設サイドバー、md 未満は上部バー + ドロワー(zustand 管理)。
 
-// 子ルートへ渡す文脈(今はログインユーザのみ)。Welcome で名前表示に使う。
-export type DashboardContext = { me: Me };
-
-export function useDashboard() {
-  return useOutletContext<DashboardContext>();
-}
-
-// 読み込み中の全画面表示(ミントのリング)。背景壁紙の上に中央寄せ。
+// 読み込み中の全画面表示(ミントのリング)。
 function FullPageLoading() {
   return (
     <div className="flex min-h-dvh items-center justify-center p-8">
@@ -30,20 +26,23 @@ function FullPageLoading() {
   );
 }
 
-function Sidebar({ me, onLogout }: { me: Me; onLogout: () => void }) {
+// サイドバーの中身(ブランド + ナビ + 利用者)。常設サイドバーとドロワーで共用する。
+// onNavigate はドロワーから渡され、項目クリックで閉じる(常設側は渡さない)。
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
+  const { data: me } = useMeQuery();
+  const logout = useLogout();
+
   return (
-    // sticky で全高に貼り付ける。右に淡い 2px の区切り。クリーム面。
-    <aside className="sticky top-0 flex h-dvh w-20 shrink-0 flex-col border-r-2 border-[#e8e2d6] bg-[rgb(247,243,223)] md:w-64">
+    <div className="flex h-full flex-col">
       {/* ブランド(クリックで はじめに へ) */}
       <NavLink
         to="/"
         end
-        className="flex items-center gap-2.5 px-4 py-5 outline-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 md:px-6"
+        onClick={onNavigate}
+        className="flex items-center gap-2.5 px-6 py-5 outline-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
       >
         <img src="/logo.png" alt="" className="h-9 w-auto shrink-0" />
-        <span className="hidden text-2xl font-extrabold tracking-tight text-foreground md:inline">
-          つぼみ
-        </span>
+        <span className="text-2xl font-extrabold tracking-tight text-foreground">つぼみ</span>
       </NavLink>
 
       {/* リソースのナビ。RESOURCES 設定から生成(順序もそこで決まる)。 */}
@@ -54,12 +53,11 @@ function Sidebar({ me, onLogout }: { me: Me; onLogout: () => void }) {
             <NavLink
               key={r.path}
               to={r.path}
-              aria-label={r.label}
-              title={r.label}
+              onClick={onNavigate}
               className={({ isActive }) =>
                 cn(
-                  // 既定:茶文字・透明地・丸み。md 未満は中央寄せ(アイコンのみ)。
-                  "relative flex items-center gap-3 rounded-2xl px-3 py-2.5 text-sm font-semibold text-[#794f27] outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 max-md:justify-center",
+                  // 既定:茶文字・透明地・丸み薬形。
+                  "relative flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-semibold text-foreground outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
                   isActive
                     ? // active:ミント面・クリーム文字・下方向の立体影(Tabs の active と同じ語彙)
                       "bg-[#0CC0B5] text-[#FFF9E3] shadow-[0_3px_0_0_rgba(61,52,40,0.08)]"
@@ -70,14 +68,14 @@ function Sidebar({ me, onLogout }: { me: Me; onLogout: () => void }) {
               {({ isActive }) => (
                 <>
                   <Icon className="size-5 shrink-0" />
-                  <span className="hidden md:inline">{r.label}</span>
-                  {/* active タブ右上の葉っぱ(原典 Tabs と同じ icon-leaf を流用)。 */}
+                  <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                  {/* active 項目右上の葉っぱ(原典 Tabs と同じ icon-leaf を流用)。 */}
                   {isActive && (
                     <img
                       src="/icons/icon-leaf.png"
                       alt=""
                       aria-hidden
-                      className="absolute -top-1 -right-[5px] size-[18px] animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]"
+                      className="absolute -top-1 right-1 size-4.5 animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]"
                     />
                   )}
                 </>
@@ -88,61 +86,131 @@ function Sidebar({ me, onLogout }: { me: Me; onLogout: () => void }) {
       </nav>
 
       {/* 利用者チップ + ログアウト */}
-      <div className="mt-auto flex flex-col gap-2 border-t-2 border-[#e8e2d6] p-3">
-        <div className="flex items-center gap-2.5 px-1">
-          {me.avatar_url ? (
-            <img
-              src={me.avatar_url}
-              alt=""
-              className="size-9 shrink-0 rounded-full border-2 border-border"
-            />
-          ) : (
-            <div className="grid size-9 shrink-0 place-items-center rounded-full border-2 border-border bg-accent text-sm font-bold text-accent-foreground">
-              {(me.name ?? me.email).slice(0, 1).toUpperCase()}
+      {me && (
+        <div className="mt-auto flex flex-col gap-2 border-t-2 border-[#e8e2d6] p-3">
+          <div className="flex items-center gap-2.5 px-1">
+            {me.avatar_url ? (
+              <img
+                src={me.avatar_url}
+                alt=""
+                className="size-9 shrink-0 rounded-full border-2 border-border"
+              />
+            ) : (
+              <div className="grid size-9 shrink-0 place-items-center rounded-full border-2 border-border bg-accent text-sm font-bold text-accent-foreground">
+                {(me.name ?? me.email).slice(0, 1).toUpperCase()}
+              </div>
+            )}
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate text-sm font-bold text-foreground">
+                {me.name ?? me.email}
+              </span>
+              <span className="truncate text-xs text-muted-foreground">
+                {me.email} · {me.role}
+              </span>
             </div>
-          )}
-          <div className="hidden min-w-0 flex-col md:flex">
-            <span className="truncate text-sm font-bold text-foreground">{me.name ?? me.email}</span>
-            <span className="truncate text-xs text-muted-foreground">
-              {me.email} · {me.role}
-            </span>
           </div>
+          <Button
+            type="text"
+            size="small"
+            block
+            loading={logout.isPending}
+            icon={<LogOut className="size-4" />}
+            onClick={() => logout.mutate()}
+            className="justify-start"
+          >
+            ログアウト
+          </Button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// md 未満のオーバーレイ・ドロワー。開閉は zustand。Esc とマスククリックで閉じる。
+function MobileNav() {
+  const navOpen = useUiStore((s) => s.navOpen);
+  const closeNav = useUiStore((s) => s.closeNav);
+
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeNav();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [navOpen, closeNav]);
+
+  if (!navOpen) return null;
+
+  return (
+    // Modal と同じマスク作法:外側 div がマスク(クリックで閉じる)、内側がパネル。
+    <div
+      className="fixed inset-0 z-1000 flex bg-[rgba(0,0,0,0.35)] animate-[animal-fade-in_0.2s_ease] md:hidden"
+      onClick={closeNav}
+    >
+      {/* パネル(クリックは伝播させない) */}
+      <div
+        className="relative flex w-72 max-w-[80%] flex-col border-r-2 border-[#e8e2d6] bg-card shadow-[4px_0_16px_rgba(61,52,40,0.12)]"
+        onClick={(e) => e.stopPropagation()}
+      >
         <Button
           type="text"
-          size="small"
-          block
-          aria-label="ログアウト"
-          icon={<LogOut className="size-4" />}
-          onClick={onLogout}
-          className="max-md:justify-center md:justify-start"
-        >
-          <span className="hidden md:inline">ログアウト</span>
-        </Button>
+          aria-label="メニューを閉じる"
+          icon={<X className="size-5" />}
+          onClick={closeNav}
+          className="absolute top-4 right-3 z-10 size-9 rounded-full px-0"
+        />
+        <SidebarContent onNavigate={closeNav} />
       </div>
-    </aside>
+    </div>
+  );
+}
+
+// md 未満の上部バー(ハンバーガー + ブランド)。
+function MobileTopBar() {
+  const openNav = useUiStore((s) => s.openNav);
+  return (
+    <header className="sticky top-0 z-30 flex items-center gap-3 border-b-2 border-[#e8e2d6] bg-card px-4 py-3 md:hidden">
+      <Button
+        type="text"
+        aria-label="メニューを開く"
+        icon={<Menu className="size-5" />}
+        onClick={openNav}
+        className="size-9 rounded-full px-0"
+      />
+      <Link to="/" className="flex items-center gap-2 outline-none">
+        <img src="/logo.png" alt="" className="h-7 w-auto" />
+        <span className="text-lg font-extrabold tracking-tight text-foreground">つぼみ</span>
+      </Link>
+    </header>
   );
 }
 
 export function DashboardLayout() {
-  const { me, loading, setMe } = useMe();
+  const { data: me, isPending } = useMeQuery();
 
-  if (loading) return <FullPageLoading />;
+  if (isPending) return <FullPageLoading />;
   // 未ログインはログイン画面へ。replace で戻る矢印に守衛ループを残さない。
   if (!me) return <Navigate to="/login" replace />;
 
-  const handleLogout = () => {
-    void logout().then(() => setMe(null));
-  };
-
   return (
     <div className="flex min-h-dvh">
-      <Sidebar me={me} onLogout={handleLogout} />
-      <main className="min-w-0 flex-1">
-        <div className="mx-auto w-full max-w-5xl p-6 md:p-10">
-          <Outlet context={{ me } satisfies DashboardContext} />
-        </div>
-      </main>
+      {/* 常設サイドバー(md 以上) */}
+      <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 border-r-2 border-[#e8e2d6] bg-card md:block">
+        <SidebarContent />
+      </aside>
+
+      {/* ドロワー(md 未満) */}
+      <MobileNav />
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <MobileTopBar />
+        <main className="min-w-0 flex-1">
+          <div className="mx-auto w-full max-w-5xl p-6 md:p-10">
+            <Outlet />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

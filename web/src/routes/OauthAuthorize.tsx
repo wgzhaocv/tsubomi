@@ -1,51 +1,48 @@
-import { useEffect, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
 
+import { Code } from "@/components/install-steps";
 import { PageMeta } from "@/components/page-meta";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { fetchMe, type Me } from "@/lib/auth";
+import { useMeQuery } from "@/lib/auth";
 
 // PKCE ステップ 2:`tbm login` がこのページを開く。ログイン済みユーザが
 // 確認したら、クエリパラメータを /api/oauth/authorize(session 認証)に
 // POST し、返ってきた redirect_to へ遷移する。遷移先がコードを表示し、
 // ユーザはそれを CLI に貼り戻す。
+// 状態は Query/Mutation で扱う:me は useMeQuery、承認 POST は useMutation。
 export default function OauthAuthorize() {
   const [params] = useSearchParams();
-  const [me, setMe] = useState<Me | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { data: me, isPending: meLoading, error: meError } = useMeQuery();
 
-  useEffect(() => {
-    fetchMe()
-      .then(setMe)
-      .catch((e: unknown) => setError(String(e)))
-      .finally(() => setLoading(false));
-  }, []);
+  const approve = useMutation({
+    mutationFn: async () => {
+      const body = {
+        response_type: params.get("response_type") ?? "",
+        client_id: params.get("client_id") ?? "",
+        redirect_uri: params.get("redirect_uri") ?? "",
+        code_challenge: params.get("code_challenge") ?? "",
+        code_challenge_method: params.get("code_challenge_method") ?? "",
+        state: params.get("state") ?? "",
+        hint: params.get("hint") ?? undefined,
+      };
+      const res = await fetch("/api/oauth/authorize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        throw new Error(`authorize failed: ${res.status} ${await res.text()}`);
+      }
+      return (await res.json()) as { redirect_to: string };
+    },
+    onSuccess: ({ redirect_to }) => {
+      window.location.href = redirect_to;
+    },
+  });
 
-  async function approve() {
-    setError(null);
-    const body = {
-      response_type: params.get("response_type") ?? "",
-      client_id: params.get("client_id") ?? "",
-      redirect_uri: params.get("redirect_uri") ?? "",
-      code_challenge: params.get("code_challenge") ?? "",
-      code_challenge_method: params.get("code_challenge_method") ?? "",
-      state: params.get("state") ?? "",
-      hint: params.get("hint") ?? undefined,
-    };
-    const res = await fetch("/api/oauth/authorize", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      setError(`authorize failed: ${res.status} ${await res.text()}`);
-      return;
-    }
-    const { redirect_to } = (await res.json()) as { redirect_to: string };
-    window.location.href = redirect_to;
-  }
+  const error = meError ?? approve.error;
 
   return (
     <main className="flex min-h-dvh flex-col items-center justify-center gap-6 p-8 text-foreground">
@@ -54,19 +51,17 @@ export default function OauthAuthorize() {
 
       <Card className="w-full max-w-md">
         <CardContent className="flex flex-col items-center gap-4">
-          {loading && <p className="text-muted-foreground">…</p>}
+          {meLoading && <p className="text-muted-foreground">…</p>}
           {error && (
-            <p className="w-full text-center text-sm wrap-break-word text-destructive">{error}</p>
+            <p className="w-full text-center text-sm wrap-break-word text-destructive">
+              {String(error)}
+            </p>
           )}
 
-          {!loading && !me && (
+          {!meLoading && !me && (
             <>
               <p className="text-center text-sm text-muted-foreground">
-                先にログインしてから、もう一度{" "}
-                <code className="rounded-md bg-card/80 px-1.5 py-0.5 text-[0.85em] font-bold text-foreground">
-                  tbm login
-                </code>{" "}
-                を実行してください。
+                先にログインしてから、もう一度 <Code>tbm login</Code> を実行してください。
               </p>
               <Button asChild type="primary" block>
                 <a href="/api/auth/google/start">Google でログイン</a>
@@ -83,9 +78,8 @@ export default function OauthAuthorize() {
               <Button
                 type="primary"
                 block
-                onClick={() => {
-                  void approve();
-                }}
+                loading={approve.isPending}
+                onClick={() => approve.mutate()}
               >
                 許可する
               </Button>

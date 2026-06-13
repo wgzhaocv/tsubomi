@@ -85,7 +85,6 @@ export const RESOURCES: ResourceNav[] = [
     icon: Activity,
     ribbon: "purple",
     emptyTitle: "まだアクティビティがありません",
-    emptyBody:
-      "リソースの作成・削除や owner 操作などの履歴が、ここに時系列で表示されます。",
+    emptyBody: "リソースの作成・削除や owner 操作などの履歴が、ここに時系列で表示されます。",
   },
 ];

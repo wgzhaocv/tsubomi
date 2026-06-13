@@ -14,6 +14,7 @@
     "@fontsource-variable/noto-sans-jp": "^5.2.10",
     "@fontsource-variable/nunito": "^5.2.7",
     "@radix-ui/react-slot": "^1.2.5",
+    "@tanstack/react-query": "^5.101.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.12.0",
@@ -25,7 +26,6 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
-    "@tailwindcss/language-server": "0.14.29",
     "@tailwindcss/vite": "^4.2.4",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
