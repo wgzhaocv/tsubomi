@@ -1,18 +1,18 @@
-# 本番(リモート VPS)用デプロイ。下の server.image(公開イメージの既定値)を
-# pull して起動するだけ — ビルド不要・justfile 不要・sh 不要。Docker さえあれば
-# OS を問わない。
+# 本番(リモート VPS / 香橙派)用デプロイ。**このファイルと .env.production の 2 つだけ**
+# を置けば動く — pg-tenant 初期化スクリプト / pgbouncer 設定 / userlist は下の
+# `configs:` に**インライン**で埋め込んであるので、別ファイルを配る必要がない。
+# ビルド不要・justfile 不要。Docker さえあれば OS を問わない。
 #
-# VPS 側の手順(どの VPS でも同じ。このファイルと .env.production を同じ場所に置く):
-#   1) docker login <レジストリ>   # 公開イメージなら不要
-#   2) .env.production を用意(サーバ設定 + PG_PLATFORM_PASSWORD。.env.example 参照)
+# VPS 側の手順:
+#   1) docker login <レジストリ>            # 公開イメージなら不要
+#   2) .env.production を用意(.env.example がひな形)
 #   3) docker compose --env-file .env.production -f compose.prod.yml up -d
 #
-# デプロイするイメージは server.image の既定値で固定。別タグにしたいときだけ環境変数
-# TSUBOMI_IMAGE を上書きする(例 TSUBOMI_IMAGE=...:v2 docker compose ... up -d)。
+# 更新:`docker compose --env-file .env.production -f compose.prod.yml pull && up -d`
+#       (別タグなら TSUBOMI_IMAGE=...:vN を前置)。
 #
-# 設計: pg は loopback(127.0.0.1:5434)バインドでテナントから隔離。server は
-# host ネットワークで 127.0.0.1:5434 へ到達し、:9090 をホストに公開する
-# (DATABASE_URL=127.0.0.1:5434 が dev/deploy 共通で通る)。
+# 設計: pg-platform は loopback(127.0.0.1:5434)、pg-tenant は loopback(:5435)で
+# テナントから隔離。pgbouncer(:6432)が外部入口。server は host ネットワーク。
 services:
   pg-platform:
     image: postgres:18
@@ -33,6 +33,7 @@ services:
       retries: 20
 
   # M1:ユーザ DB インスタンス(管制面とは別)。admin は loopback :5435。
+  # 初期化スクリプトは下の configs(pgtenant_init)からマウント = 別ファイル不要。
   pg-tenant:
     image: postgres:18
     container_name: tsubomi-pg-tenant
@@ -41,20 +42,44 @@ services:
       POSTGRES_USER: tsubomi_admin
       POSTGRES_PASSWORD: ${PG_TENANT_PASSWORD:?set PG_TENANT_PASSWORD in .env.production}
       POSTGRES_DB: postgres
-      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:-tsubomi_pgb_dev}
     ports:
       - "127.0.0.1:5435:5432"
     volumes:
       - pg_tenant_data:/var/lib/postgresql
-      # 初回起動のみ:pgbouncer auth ロール + pg_shadow 参照関数。ship.sh が同梱する。
-      - ./pg-tenant-init:/docker-entrypoint-initdb.d:ro
+    configs:
+      - source: pgtenant_init
+        target: /docker-entrypoint-initdb.d/01-pgbouncer-auth.sh
+        mode: 0755
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U tsubomi_admin -d postgres"]
       interval: 5s
       timeout: 3s
       retries: 20
 
+  # クライアント TLS 用の自己署名証明書を 1 度だけ生成して volume に置く。
+  # sslmode=require は証明書を検証しない(LAN・受動的盗聴対策)ので自己署名で十分。
+  # postgres:18 を流用(openssl 同梱、別イメージ不要)。鍵は volume 内のみ・git に残さない。
+  pgbouncer-certgen:
+    image: postgres:18
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ ! -f /tls/server.key ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -subj "/CN=tsubomi-pgbouncer" \
+            -keyout /tls/server.key -out /tls/server.crt
+          chmod 644 /tls/server.key /tls/server.crt
+          echo "generated self-signed pgbouncer TLS cert"
+        fi
+    volumes:
+      - pgb_tls:/tls
+    restart: "no"
+
   # M1:外部接続入口 + プール。会社 LAN に晒す(送信元制限は iptables DOCKER-USER)。
+  # client TLS(sslmode=require)で LAN 上のワイヤを暗号化する。設定 / userlist は
+  # 下の configs から。userlist のパスワードは .env から插值され、pgtenant_init が
+  # 作るロールと自動で一致する(手動同期は不要)。
   pgbouncer:
     image: edoburu/pgbouncer:v1.25.2-p0
     container_name: tsubomi-pgbouncer
@@ -62,15 +87,21 @@ services:
     depends_on:
       pg-tenant:
         condition: service_healthy
+      pgbouncer-certgen:
+        condition: service_completed_successfully
     ports:
       - "${PGBOUNCER_BIND_ADDR:-127.0.0.1}:6432:6432"
     volumes:
-      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+      - pgb_tls:/etc/pgbouncer/tls:ro
+    configs:
+      - source: pgbouncer_ini
+        target: /etc/pgbouncer/pgbouncer.ini
+      - source: pgbouncer_userlist
+        target: /etc/pgbouncer/userlist.txt
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
-    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v1}
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v3}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
@@ -92,3 +123,53 @@ services:
 volumes:
   pg_platform_data:
   pg_tenant_data:
+  pgb_tls:
+
+# ===========================================================================
+# インライン設定(別ファイルを配らずに済ませるための埋め込み)。
+# `$$` は compose の插值回避 ⇒ コンテナ内では `$`(実行時のシェル / SQL の $)。
+# `${PGBOUNCER_AUTH_PASSWORD:-...}` は compose が .env から插值する(秘密は env に)。
+# 内容は dev の infra/pg-tenant-init/*.sh・infra/pgbouncer/pgbouncer.ini と同一 ——
+# どちらか変えたら両方そろえること。
+# ===========================================================================
+configs:
+  pgtenant_init:
+    content: |
+      #!/bin/bash
+      set -e
+      psql -v ON_ERROR_STOP=1 --username "$$POSTGRES_USER" --dbname postgres --set=auth_pw="${PGBOUNCER_AUTH_PASSWORD:?set PGBOUNCER_AUTH_PASSWORD in .env.production (英数字のみ)}" <<'EOSQL'
+      CREATE ROLE pgbouncer_auth LOGIN PASSWORD :'auth_pw';
+      CREATE OR REPLACE FUNCTION public.pgbouncer_get_auth(p_usename text)
+      RETURNS TABLE(usename text, passwd text)
+      LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS
+      $$func$$
+      SELECT usename::text, passwd::text FROM pg_shadow WHERE usename = p_usename;
+      $$func$$;
+      REVOKE ALL ON FUNCTION public.pgbouncer_get_auth(text) FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION public.pgbouncer_get_auth(text) TO pgbouncer_auth;
+      REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
+      REVOKE CONNECT ON DATABASE template1 FROM PUBLIC;
+      GRANT CONNECT ON DATABASE postgres TO pgbouncer_auth;
+      EOSQL
+  pgbouncer_ini:
+    content: |
+      [databases]
+      * = host=pg-tenant port=5432
+      [pgbouncer]
+      listen_addr = 0.0.0.0
+      listen_port = 6432
+      client_tls_sslmode = require
+      client_tls_cert_file = /etc/pgbouncer/tls/server.crt
+      client_tls_key_file = /etc/pgbouncer/tls/server.key
+      auth_type = scram-sha-256
+      auth_file = /etc/pgbouncer/userlist.txt
+      auth_user = pgbouncer_auth
+      auth_dbname = postgres
+      auth_query = SELECT usename, passwd FROM public.pgbouncer_get_auth($$1)
+      pool_mode = transaction
+      max_client_conn = 1000
+      default_pool_size = 20
+      ignore_startup_parameters = extra_float_digits,options
+  pgbouncer_userlist:
+    content: |
+      "pgbouncer_auth" "${PGBOUNCER_AUTH_PASSWORD:?set PGBOUNCER_AUTH_PASSWORD in .env.production (英数字のみ)}"

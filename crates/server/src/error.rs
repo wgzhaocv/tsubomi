@@ -13,6 +13,9 @@ pub enum AppError {
     Forbidden,
     #[error("{0}")]
     BadRequest(String),
+    /// 409。重複(同名リソースなど)。500 に潰さず、原因が分かる 4xx で返す。
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
@@ -32,6 +35,7 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Sqlx(_) | Self::Reqwest(_) | Self::Json(_) | Self::Io(_) | Self::Other(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

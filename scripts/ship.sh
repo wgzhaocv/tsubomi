@@ -34,19 +34,11 @@ docker buildx build --platform "$platform" -t "$IMAGE" --load .
 echo "▶ ${HOST} へ直接転送(docker save | ssh docker load)..."
 docker save "$IMAGE" | ssh "$HOST" 'docker load'
 
-# compose 定義 + infra の config(pg-tenant 初期化 / pgbouncer)を同梱転送する。
-# これらはデプロイ成果物の一部(イメージと一緒に動く)。.env.production は秘密なので
-# 同期しない(対象ホスト側で管理 — 初回 M1 化のときだけ手動で配る)。
-echo "▶ ${HOST} へ compose / infra config を配布..."
-ssh "$HOST" "mkdir -p ${DIR}/pg-tenant-init ${DIR}/pgbouncer"
+# compose 定義だけ配ればよい(pg-tenant 初期化 / pgbouncer 設定 / userlist は
+# compose.prod.yml に inline 埋め込み済み = 別ファイル不要)。.env.production は秘密
+# なので同期しない(対象ホスト側で管理)。
+echo "▶ ${HOST} へ compose.prod.yml を配布..."
 scp -q compose.prod.yml "$HOST:${DIR}/compose.prod.yml"
-scp -q infra/pg-tenant-init/* "$HOST:${DIR}/pg-tenant-init/"
-scp -q infra/pgbouncer/pgbouncer.ini "$HOST:${DIR}/pgbouncer/pgbouncer.ini"
-# pgbouncer の userlist は秘密(auth_user パスワード)。git の dev 既定値ではなく
-# .env.production の PGBOUNCER_AUTH_PASSWORD から生成して配る(pg-tenant 側の初期化と一致)。
-pgb_pw=$(grep -E '^PGBOUNCER_AUTH_PASSWORD=' .env.production 2>/dev/null | head -1 | cut -d= -f2-)
-pgb_pw="${pgb_pw:-tsubomi_pgb_dev}"
-printf '"pgbouncer_auth" "%s"\n' "$pgb_pw" | ssh "$HOST" "cat > ${DIR}/pgbouncer/userlist.txt"
 
 echo "▶ ${HOST} で起動(${DIR}/compose.prod.yml)..."
 ssh "$HOST" "cd ${DIR} && TSUBOMI_IMAGE=${IMAGE} docker compose --env-file .env.production -f compose.prod.yml up -d"

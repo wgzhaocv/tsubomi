@@ -56,10 +56,9 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
 新しい VPS に必要なのは **Docker だけ**(ソース・just・sh は不要)。
 
 1. **Docker を入れる**:`curl -fsSL https://get.docker.com | sh`
-2. **compose 定義 + infra config + env を任意のディレクトリ(例 `~/tsubomi`)に置く**:
-   - `compose.prod.yml` — リポジトリからコピー
-   - `pg-tenant-init/`、`pgbouncer/` — `infra/` 配下のこの 2 ディレクトリもコピー
-     (M1。compose がマウントする。`just ship` は自動で同梱する)
+2. **2 ファイルだけ**を任意のディレクトリ(例 `~/tsubomi`)に置く:
+   - `compose.prod.yml` — リポジトリからコピー(pg-tenant 初期化 / pgbouncer 設定 /
+     userlist は全部この中に inline 埋め込み済み = 別ファイル不要)
    - `.env.production` — 同じ場所に新規作成(`.env.example` がひな形)
 3. **`.env.production` を本番値で埋める**(主なキー。全量は `.env.example` 参照):
 
@@ -97,6 +96,9 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    - **M1 の DB 入口(pgbouncer :6432)を必ず会社 CIDR に絞る**(iptables の
      `DOCKER-USER` チェーン。ufw だけでは Docker を素通りする — design v2 §1)。
      `PGBOUNCER_BIND_ADDR=0.0.0.0` は「受ける」だけで、送信元制限はこの柵が担う。
+   - DB ワイヤ自体は **client TLS(自己署名、`sslmode=require`)で暗号化済み** ——
+     pgbouncer が起動時に証明書を生成し、平文接続(`sslmode=disable`)は拒否する。
+     CIDR 制限と合わせて二重(LAN 盗聴も塞ぐ)。
 7. **確認 / ログ**:
 
    ```bash
@@ -107,17 +109,6 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    `docker compose --env-file .env.production -f compose.prod.yml up -d`
    (別タグなら `TSUBOMI_IMAGE=...:vN` を前置して実行)。停止は
    `docker compose -f compose.prod.yml down`。
-
-### ソースから自分でビルドして動かす(任意)
-
-公開イメージを使わず、その場のソースからビルドして起動する場合:
-
-```bash
-just deploy   # 管制面 pg 起動 → サーバを build + 起動(.env.production を使用)
-# just 無し:
-#   docker compose --env-file .env.production -f infra/docker-compose.yml up -d
-#   docker compose --env-file .env.production up --build -d
-```
 
 ### メンテナ向け:配布・更新
 

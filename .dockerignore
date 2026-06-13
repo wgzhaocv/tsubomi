@@ -2,4 +2,7 @@ target/
 web/node_modules/
 web/dist/
 .git/
+# secrets はビルドコンテキストに送らない(イメージには焼かれないが、builder の
+# ログ / キャッシュに残りうるため)。.env / .env.production / .env.* 全部除外。
 .env
+.env.*

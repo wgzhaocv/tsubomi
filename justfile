@@ -10,42 +10,29 @@ dev:
     (cd web && bun run dev) &
     wait
 
-# axum サーバを http://localhost:9090 で起動
-dev-server:
-    cargo run -p tsubomi-server
-
-# web dev サーバを起動(http://localhost:5173、/api → :9090 にプロキシ)
-dev-web:
-    cd web && bun run dev
-
-# tbm CLI を実行。例:`just cli health` / `just cli login`
+# tbm CLI を実行。例:`just cli health` / `just cli db list`
 cli *args:
     cargo run -p tsubomi-cli -- {{args}}
 
-# 管制面 postgres を起動(インフラ層。香橙派でも同じファイル)
+# infra 起動: pg-platform:5434 / pg-tenant:5435 / pgbouncer:6432(MIG は起動時に自動)
 db-up:
     docker compose -f infra/docker-compose.yml up -d
 
-# 管制面 postgres を停止(データは volume に残る)
+# infra を停止(データは volume に残る)
 db-down:
     docker compose -f infra/docker-compose.yml down
 
-# 管制面 DB に psql で入る
+# 管制面 DB(pg-platform)に psql で入る
 db-psql:
     docker exec -it tsubomi-pg-platform psql -U tsubomi -d tsubomi_platform
 
-# テナント DB インスタンス(ユーザ DB 群)に admin で入る
+# テナント DB インスタンス(pg-tenant、ユーザ DB 群)に admin で入る
 db-psql-tenant:
     docker exec -it tsubomi-pg-tenant psql -U tsubomi_admin -d postgres
 
-# web の依存をインストール
+# web の依存をインストール(初回のみ)
 web-install:
     cd web && bun install
-
-# リリースビルド:server + cli バイナリ + 本番 web バンドル
-build:
-    cargo build --release
-    cd web && bun run build
 
 # Rust のテストを全部実行
 test:
@@ -56,52 +43,25 @@ fmt:
     cargo fmt --all
     cd web && bun run fmt
 
-# 型チェック + clippy + web lint
+# 型チェック + clippy + web lint(コミット前の門番)
 check:
     cargo check --workspace
     cargo clippy --workspace -- -D warnings
     cd web && bun run lint
 
-# オールインワンイメージをビルド:rust サーバ + ビルド済み SPA を 1 ポートで配信
-docker-build:
-    docker build -t tsubomi-server:latest .
-
-# アプリ全体を docker でビルド + 起動(detached、http://localhost:9090)
-up:
-    docker compose up --build -d
-
-# docker アプリを停止 + 削除
-down:
-    docker compose down
-
-# サーバログを追う
-logs:
-    docker compose logs -f server
-
-# デプロイ(リポジトリのあるホストでローカルビルド):管制面 pg を起動してから
-# サーバを build + 起動。env は .env.production。これ一発で本番が立つ。
-# リモート VPS へはビルド不要の registry 経由を使う(release-image + compose.prod.yml)。
-deploy:
-    docker compose --env-file .env.production -f infra/docker-compose.yml up -d
-    docker compose --env-file .env.production up --build -d
-    @echo "✅ deployed → http://localhost:9090  (logs: just logs / stop: just down)"
-
-# サーバイメージを multi-arch(amd64+arm64)でビルドしてレジストリへ push。
-# リモート VPS 用(各 VPS は docker pull で取得)。例: REGISTRY=ghcr.io/USER TAG=v1 just release-image
-# VPS 側: docker compose --env-file .env.production -f compose.prod.yml up -d
-release-image:
-    chmod +x scripts/release-image.sh && scripts/release-image.sh
-
-# レジストリを介さず LAN 内ホスト(香橙派など)へ直接転送してデプロイ。
-# arch を検出して native ビルド → docker save | ssh docker load → 起動。速い。
+# LAN 内ホスト(香橙派など)へ直接転送してデプロイ。レジストリ不要・速い:
+# arch を検出 → native ビルド → docker save | ssh docker load → 起動。
 # 例: HOST=zwg@192.168.0.106 just ship   /   HOST=... TAG=v2 just ship
 ship:
     chmod +x scripts/ship.sh && scripts/ship.sh
 
-# リリース CLI バイナリをビルド -> target/release/tbm
-release-cli:
-    cargo build --release -p tsubomi-cli
+# サーバイメージを multi-arch(amd64+arm64)でビルドしてレジストリへ push。
+# リモート VPS 用(各 VPS は compose.prod.yml で docker pull 起動)。
+# 例: REGISTRY=docker.io/USER IMAGE=tsubomi TAG=v2 just release-image
+release-image:
+    chmod +x scripts/release-image.sh && scripts/release-image.sh
 
-# CLI を 4 ターゲットでビルドして香橙派へリリース公開
+# tbm CLI を 4 ターゲットでビルドして香橙派へリリース公開。
+# 内容を変えたら crates/cli/Cargo.toml の version を上げてから実行(不可変リリース)。
 release-cli-publish:
     chmod +x scripts/release-cli.sh && scripts/release-cli.sh
