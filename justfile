@@ -74,6 +74,20 @@ down:
 logs:
     docker compose logs -f server
 
+# デプロイ(リポジトリのあるホストでローカルビルド):管制面 pg を起動してから
+# サーバを build + 起動。env は .env.production。これ一発で本番が立つ。
+# リモート VPS へはビルド不要の registry 経由を使う(release-image + compose.prod.yml)。
+deploy:
+    docker compose --env-file .env.production -f infra/docker-compose.yml up -d
+    docker compose --env-file .env.production up --build -d
+    @echo "✅ deployed → http://localhost:9090  (logs: just logs / stop: just down)"
+
+# サーバイメージを multi-arch(amd64+arm64)でビルドしてレジストリへ push。
+# リモート VPS 用。例: REGISTRY=ghcr.io/USER TAG=v1 just release-image
+# VPS 側: docker compose --env-file .env.production -f compose.prod.yml up -d
+release-image:
+    chmod +x scripts/release-image.sh && scripts/release-image.sh
+
 # リリース CLI バイナリをビルド -> target/release/tbm
 release-cli:
     cargo build --release -p tsubomi-cli

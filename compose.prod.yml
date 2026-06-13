@@ -1,0 +1,47 @@
+# 本番(リモート VPS)用デプロイ。レジストリの完成イメージを pull して起動する
+# だけ — ビルド不要・justfile 不要・sh 不要。Docker さえあれば OS を問わない。
+#
+# VPS 側の手順(どの VPS でも同じ。リポジトリ root で実行):
+#   1) docker login <レジストリ>
+#   2) この root に .env.production を置く。中に TSUBOMI_IMAGE と
+#      PG_PLATFORM_PASSWORD も書く。
+#        例) TSUBOMI_IMAGE=ghcr.io/USER/tsubomi-server:v1
+#            PG_PLATFORM_PASSWORD=...(強いパスワード)
+#   3) docker compose --env-file .env.production -f compose.prod.yml up -d
+#        (--env-file は ${TSUBOMI_IMAGE} 等の YAML 置換に必要)
+#
+# 設計: pg は loopback(127.0.0.1:5434)バインドでテナントから隔離。server は
+# host ネットワークで 127.0.0.1:5434 へ到達し、:9090 をホストに公開する
+# (DATABASE_URL=127.0.0.1:5434 が dev/deploy 共通で通る)。
+services:
+  pg-platform:
+    image: postgres:18
+    container_name: tsubomi-pg-platform
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tsubomi
+      POSTGRES_PASSWORD: ${PG_PLATFORM_PASSWORD:?set PG_PLATFORM_PASSWORD in .env.production}
+      POSTGRES_DB: tsubomi_platform
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - pg_platform_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsubomi -d tsubomi_platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  server:
+    image: ${TSUBOMI_IMAGE:?set TSUBOMI_IMAGE in .env.production (例 ghcr.io/USER/tsubomi-server:TAG)}
+    container_name: tsubomi-server
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.production
+    depends_on:
+      pg-platform:
+        condition: service_healthy
+
+volumes:
+  pg_platform_data:
