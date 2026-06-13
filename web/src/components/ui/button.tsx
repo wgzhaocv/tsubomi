@@ -61,9 +61,11 @@ function typeClasses(
   interactive: boolean,
 ): string {
   if (ghost) {
-    // 原典は ghost+primary のみ定義(透明・ミント枠/文字)。
+    // 原典は ghost+primary のみ定義。静止時は枠色を上書きしないので .btn-primary の
+    // #f8f8f0(クリーム=ほぼ不可視)を継承し、文字だけミント。hover で枠/文字が
+    // ミント(#3dd4c6)+ 淡ミント背景になる。
     return cn(
-      "border-[#19c8b9] bg-transparent text-[#19c8b9] shadow-none",
+      "border-[#f8f8f0] bg-transparent text-[#19c8b9] shadow-none",
       interactive && "hover:border-[#3dd4c6] hover:bg-[rgba(25,200,185,0.08)] hover:text-[#3dd4c6]",
     );
   }

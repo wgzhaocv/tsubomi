@@ -46,8 +46,10 @@ Google OAuth クライアント:Google Cloud Console で作成(種別:Web applic
 無いマシン(Windows 等)でも `docker compose` だけで完結する。
 
 配布は公開イメージ **`docker.io/wgzhaofumi/tsubomi`**(multi-arch: arm64 = 香橙派 /
-amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビルドは不要**で、
-`.env.production` の `TSUBOMI_IMAGE` に使うタグを指すだけ。
+amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビルドは不要**。使う
+イメージは `compose.prod.yml` の既定値に固定済みなので `.env.production` には書かない
+(別タグを試すときだけ環境変数 `TSUBOMI_IMAGE` で上書き)。`.env.production` は
+**サーバ設定だけ**を持つ。
 
 ### 自分の VPS で動かす(本番セットアップ)
 
@@ -60,7 +62,6 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
 3. **`.env.production` を本番値で埋める**(主なキー。全量は `.env.example` 参照):
 
    ```env
-   TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v1   # 公開イメージをそのまま指す
    PG_PLATFORM_PASSWORD=<強いパスワード>
    DATABASE_URL=postgres://tsubomi:<同じパスワード>@127.0.0.1:5434/tsubomi_platform
    GOOGLE_CLIENT_ID=...
@@ -90,9 +91,10 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    curl -fsS http://127.0.0.1:9090/api/health
    docker compose -f compose.prod.yml logs -f server
    ```
-8. **更新**:公開された新タグに合わせて `.env.production` の `TSUBOMI_IMAGE` を変え
+8. **更新**:新しい `compose.prod.yml`(既定タグが上がっている)を取得して
    `docker compose --env-file .env.production -f compose.prod.yml up -d`
-   (`pull` で先に取得しても可)。停止は `docker compose -f compose.prod.yml down`。
+   (別タグなら `TSUBOMI_IMAGE=...:vN` を前置して実行)。停止は
+   `docker compose -f compose.prod.yml down`。
 
 ### ソースから自分でビルドして動かす(任意)
 

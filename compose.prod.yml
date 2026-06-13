@@ -1,14 +1,14 @@
-# 本番(リモート VPS)用デプロイ。レジストリの完成イメージを pull して起動する
-# だけ — ビルド不要・justfile 不要・sh 不要。Docker さえあれば OS を問わない。
+# 本番(リモート VPS)用デプロイ。下の server.image(公開イメージの既定値)を
+# pull して起動するだけ — ビルド不要・justfile 不要・sh 不要。Docker さえあれば
+# OS を問わない。
 #
-# VPS 側の手順(どの VPS でも同じ。リポジトリ root で実行):
-#   1) docker login <レジストリ>
-#   2) この root に .env.production を置く。中に TSUBOMI_IMAGE と
-#      PG_PLATFORM_PASSWORD も書く。
-#        例) TSUBOMI_IMAGE=ghcr.io/USER/tsubomi-server:v1
-#            PG_PLATFORM_PASSWORD=...(強いパスワード)
+# VPS 側の手順(どの VPS でも同じ。このファイルと .env.production を同じ場所に置く):
+#   1) docker login <レジストリ>   # 公開イメージなら不要
+#   2) .env.production を用意(サーバ設定 + PG_PLATFORM_PASSWORD。.env.example 参照)
 #   3) docker compose --env-file .env.production -f compose.prod.yml up -d
-#        (--env-file は ${TSUBOMI_IMAGE} 等の YAML 置換に必要)
+#
+# デプロイするイメージは server.image の既定値で固定。別タグにしたいときだけ環境変数
+# TSUBOMI_IMAGE を上書きする(例 TSUBOMI_IMAGE=...:v2 docker compose ... up -d)。
 #
 # 設計: pg は loopback(127.0.0.1:5434)バインドでテナントから隔離。server は
 # host ネットワークで 127.0.0.1:5434 へ到達し、:9090 をホストに公開する
@@ -33,7 +33,8 @@ services:
       retries: 20
 
   server:
-    image: ${TSUBOMI_IMAGE:?set TSUBOMI_IMAGE in .env.production (例 ghcr.io/USER/tsubomi-server:TAG)}
+    # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v1}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
