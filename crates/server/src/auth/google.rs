@@ -153,7 +153,11 @@ pub async fn callback(
     let email_ok = allowed.iter().any(|a| a == email_domain);
     if !hd_ok || !email_ok {
         tracing::warn!(sub = %info.sub, hd = ?info.hd, %email, "login rejected: outside allowed domains");
-        return Err(AppError::Forbidden);
+        // ブラウザ遷移の途中なので、素の 403 本文ではなく専用の /forbidden
+        // 画面へリダイレクトして「権限なし」を見せる。中途で立った
+        // oauth_state cookie も掃除しておく(session は元々張っていない)。
+        let jar = CookieJar::new().add(cookie::build_oauth_state_clear(state.config.cookie_secure));
+        return Ok((jar, Redirect::to("/forbidden")).into_response());
     }
 
     let user_id = upsert_google_user(&state.db, &info, &email).await?;
