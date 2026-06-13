@@ -49,8 +49,10 @@ curl -fsSL https://<ドメイン>/install.sh | sh && exec $SHELL
 ```
 
 ```bash
-tbm login                # ブラウザで「許可する」を押すだけ(RFC 8252 loopback)
-tbm login --manual       # コピペ方式(SSH 先などブラウザと CLI が別マシンの場合)
+tbm login                # 自動判定。ローカルはブラウザで「許可する」を押すだけ
+                         # (RFC 8252 loopback)、SSH 先・ヘッドレスは自動でコピペ方式
+tbm login --manual       # コピペ方式を強制(自動判定が漏れたとき。sudo / mosh 等)
+tbm login --web          # ブラウザ方式を強制(VS Code Remote 等で上書きしたいとき)
 tbm whoami
 tbm update               # 手動セルフアップデート(バージョンチェックは通知のみ)
 tbm uninstall            # 設定・PATH・本体まで残留物ゼロで削除

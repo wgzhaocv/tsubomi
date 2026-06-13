@@ -23,11 +23,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// ブラウザで OAuth + PKCE によりこの CLI を認可する
+    /// ブラウザで OAuth + PKCE によりこの CLI を認可する。
+    /// 無指定なら自動判定(SSH 先・ヘッドレスは手動に倒す)。
     Login {
-        /// コピペ方式(ブラウザと CLI が別マシンの場合。SSH 先など)
-        #[arg(long)]
+        /// コピペ方式を強制(ブラウザと CLI が別マシンの場合。SSH 先など)
+        #[arg(long, conflicts_with = "web")]
         manual: bool,
+        /// ブラウザ(loopback)方式を強制(自動判定を上書き)
+        #[arg(long)]
+        web: bool,
     },
     /// 現在の認証ユーザを表示
     Whoami,
@@ -65,7 +69,7 @@ async fn main() -> Result<()> {
     };
 
     let result = match cli.command {
-        Cmd::Login { manual } => commands::login::run(cli.server, manual).await,
+        Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token).await,
         Cmd::Logout => commands::logout::run(cli.server).await,
         Cmd::Health => commands::health::run(cli.server).await,

@@ -18,12 +18,25 @@ use crate::oauth::{
 /// loopback リスナーでブラウザのリダイレクトを待つ上限。
 const LOOPBACK_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub async fn run(server_override: Option<String>, manual: bool) -> Result<()> {
+pub async fn run(server_override: Option<String>, manual: bool, web: bool) -> Result<()> {
     // 読み込みは一度だけ:既存設定にアイデンティティをマージするのと、
     // override が無いときのサーバ URL 解決の両方に使う。
     let mut cfg = config::load()?.unwrap_or_default();
     let server_url = resolve_server_from(server_override.as_deref(), Some(&cfg));
     let server_url = server_url.as_str();
+
+    // フローの選択(真理値表は choose_manual のテスト参照)。SSH 先では
+    // loopback が原理的に成立しない(リダイレクト先の 127.0.0.1 はブラウザの
+    // ある手元マシンを指し、リスナーのいる遠隔機ではない)ので、検出したら
+    // 自動で手動に倒す。判定は完全でない(sudo は env を消す、mosh は SSH_* を
+    // 立てない)ため、必ず --web / --manual で上書きできる。
+    let use_manual = choose_manual(manual, web, browser_likely_unavailable());
+    // 自動で手動に倒したときだけ理由を出す(--manual を明示した人には不要)。
+    if use_manual && !manual {
+        eprintln!(
+            "リモート/ヘッドレス環境を検出したため手動(コピペ)モードにします(ブラウザ方式を使うなら --web)。"
+        );
+    }
 
     // PKCE:verifier はこのプロセスから出ない。URL を通るのは challenge
     // (sha256 ハッシュ)だけなので、傍受されても無力。
@@ -32,7 +45,7 @@ pub async fn run(server_override: Option<String>, manual: bool) -> Result<()> {
     let state = generate_state();
     let hint = build_hint();
 
-    let token = if manual {
+    let token = if use_manual {
         // manual:ブラウザと CLI が別マシン(SSH 先など)でも使える。
         // サーバのページがコードを表示し、ユーザが貼り戻す。
         let redirect = manual_redirect_uri(server_url);
@@ -83,6 +96,38 @@ fn open_in_browser(url: &str) {
     if webbrowser::open(url).is_err() {
         eprintln!("(browser failed to open; copy the URL above into a browser manually)");
     }
+}
+
+/// ログインフローの選択。明示フラグが最優先、無指定は検出結果に従う。
+/// （--manual と --web の同時指定は clap が弾くので両 true は来ない。）
+fn choose_manual(force_manual: bool, force_web: bool, browser_unavailable: bool) -> bool {
+    match (force_manual, force_web) {
+        (true, _) => true,        // --manual:常にコピペ
+        (_, true) => false,       // --web:常に loopback(SSH でも)
+        _ => browser_unavailable, // 無指定:検出に従う
+    }
+}
+
+/// ブラウザ(loopback)方式が使えない可能性が高い環境を推定する。
+/// あくまでデフォルト選択のヒント — 完全な判定は不可能なので、
+/// --web / --manual で必ず上書きできるようにしてある。
+///
+/// 偽陽性(本当は手元 GUI なのに manual)は安く済む(コピペ 1 手 + 自動で
+/// ブラウザも開く)が、偽陰性(遠隔/headless なのに loopback)はリスナーが
+/// 来ない応答を 300 秒待つ。よって迷ったら手動側に倒す。
+fn browser_likely_unavailable() -> bool {
+    // OpenSSH は session に SSH_CONNECTION を、pty 割り当て時に SSH_TTY を
+    // 立て、どちらも子プロセスに継承される。
+    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+        return true;
+    }
+    // Linux のヘッドレス(X も Wayland も無い)。mac/Windows は常に GUI 前提
+    // なのでこの判定はしない(誤検出を避ける)。
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return true;
+    }
+    false
 }
 
 fn read_code_from_stdin() -> Result<String> {
@@ -161,4 +206,19 @@ fn build_hint() -> String {
         host
     };
     format!("{host}-{}", Utc::now().format("%Y-%m-%d"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose_manual;
+
+    #[test]
+    fn choose_manual_truth_table() {
+        // 明示フラグが最優先
+        assert!(choose_manual(true, false, false)); // --manual はローカルでもコピペ
+        assert!(!choose_manual(false, true, true)); // --web は SSH でも loopback
+        // 無指定なら検出結果に従う
+        assert!(choose_manual(false, false, true)); // remote/headless → 手動
+        assert!(!choose_manual(false, false, false)); // ローカル GUI → loopback
+    }
 }
