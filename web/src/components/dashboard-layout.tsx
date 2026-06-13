@@ -206,7 +206,7 @@ export function DashboardLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileTopBar />
         <main className="min-w-0 flex-1">
-          <div className="mx-auto w-full max-w-3xl p-6 md:p-10">
+          <div className="mx-auto w-full max-w-5xl p-6 md:p-10">
             <Outlet />
           </div>
         </main>

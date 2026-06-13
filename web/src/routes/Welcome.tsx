@@ -25,7 +25,9 @@ export default function Welcome() {
   const greetingName = me?.name ?? me?.email ?? "ようこそ";
 
   return (
-    <div className="flex flex-col gap-8">
+    // はじめに は「文章」ページなので、5xl の内容領域の中で 3xl の列を中央寄せにする
+    // (左右の余白を対称にし、左に寄って右が大きく空くのを防ぐ)。
+    <div className="mx-auto flex max-w-3xl flex-col gap-8">
       <PageMeta title="はじめに" />
 
       <header className="flex flex-col gap-3">
