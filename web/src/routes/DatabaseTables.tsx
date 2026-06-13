@@ -4,6 +4,7 @@ import { Link, NavLink, useParams } from "react-router";
 
 import { ResultTable } from "@/components/query-result";
 import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import { useTableColumns, useTableRows, useTables } from "@/lib/databases";
 import { cn } from "@/lib/utils";
 
@@ -76,7 +77,7 @@ function TableList({
               <NavLink
                 to={`/databases/${id}/tables/${encodeURIComponent(t)}`}
                 className={cn(
-                  "flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-sm font-semibold outline-none transition-colors duration-150 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-1",
+                  "flex min-h-9 items-center gap-2 rounded-xl px-2.5 py-1.5 text-sm font-semibold outline-none transition-colors duration-150 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-1",
                   t === selected
                     ? "bg-[#0CC0B5] text-[#FFF9E3]"
                     : "text-foreground hover:bg-[rgba(25,200,185,0.1)] hover:text-[#11a89b]",
@@ -96,8 +97,10 @@ function TableList({
 // ===== 右:選択中テーブルの DATA / STRUCTURE =====
 function TableViewer({ id, table }: { id: string; table: string }) {
   const [tab, setTab] = useState<"data" | "structure">("data");
-  const rows = useTableRows(id, table);
-  const columns = useTableColumns(id, table);
+  // 表示中の tab だけ取りに行く(隠れた tab の SQL は投げない)。切替時は
+  // staleTime 内ならキャッシュ命中で即表示なので、行き来は体感即座のまま。
+  const rows = useTableRows(id, tab === "data" ? table : undefined);
+  const columns = useTableColumns(id, tab === "structure" ? table : undefined);
 
   const active = tab === "data" ? rows : columns;
   const refresh = () => void active.refetch();
@@ -106,9 +109,9 @@ function TableViewer({ id, table }: { id: string; table: string }) {
     <div className="flex flex-col gap-3">
       {/* ヘッダ:テーブル名 + DATA/STRUCTURE 切替 + 再読込 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-base font-bold text-foreground">
-          <Table2 className="size-5 text-[#11a89b]" />
-          <span className="truncate">{table}</span>
+        <div className="flex min-w-0 items-center gap-2 text-base font-bold text-foreground">
+          <Table2 className="size-5 shrink-0 text-[#11a89b]" />
+          <span className="min-w-0 truncate">{table}</span>
         </div>
         <div className="flex items-center gap-2">
           <div className="flex gap-1 rounded-2xl bg-[rgba(196,184,158,0.18)] p-1">
@@ -217,7 +220,7 @@ function Seg({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold tracking-wide outline-none transition-all duration-150 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-1",
+        "flex min-h-9 items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold tracking-wide outline-none transition-all duration-150 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-1",
         active
           ? "bg-[#0CC0B5] text-[#FFF9E3] shadow-[0_2px_0_0_rgba(61,52,40,0.08)]"
           : "text-[#794f27] hover:text-[#11a89b]",
@@ -242,31 +245,34 @@ function Loading() {
 function EmptyRight({ hasTables }: { hasTables: boolean }) {
   const { id = "" } = useParams();
   return (
-    <div className="grid h-full min-h-[40vh] place-items-center rounded-2xl border-2 border-dashed border-[#c4b89e]">
-      <div className="flex flex-col items-center gap-3 px-6 py-12 text-center">
-        <div className="grid size-14 place-items-center rounded-full bg-accent text-accent-foreground">
-          <Database className="size-7" />
-        </div>
-        {hasTables ? (
-          <p className="text-sm font-semibold text-muted-foreground">
-            左の一覧からテーブルを選んでください。
-          </p>
-        ) : (
-          <div className="flex flex-col items-center gap-2">
-            <p className="text-base font-bold text-foreground">まだテーブルがありません</p>
-            <p className="max-w-xs text-sm font-medium text-muted-foreground">
-              SQL コンソールで <code className="font-mono">CREATE TABLE …</code>{" "}
-              を実行するとここに並びます。
-            </p>
-            <Link
-              to={`/databases/${id}/editor`}
-              className="text-sm font-bold text-[#11a89b] underline-offset-2 hover:underline"
-            >
-              SQL コンソールを開く →
-            </Link>
-          </div>
-        )}
+    // 壁紙が透けて読みにくくならないよう、原典の dashed カード(薄クリーム面 +
+    // 破線枠)を使う。中身は縦積みで中央寄せ。
+    <Card
+      type="dashed"
+      className="min-h-[40vh] items-center justify-center gap-3 px-6 py-12 text-center"
+    >
+      <div className="grid size-14 place-items-center rounded-full bg-accent text-accent-foreground">
+        <Database className="size-7" />
       </div>
-    </div>
+      {hasTables ? (
+        <p className="text-sm font-semibold text-muted-foreground">
+          左の一覧からテーブルを選んでください。
+        </p>
+      ) : (
+        <div className="flex flex-col items-center gap-2">
+          <p className="text-base font-bold text-foreground">まだテーブルがありません</p>
+          <p className="max-w-xs text-sm font-medium text-muted-foreground">
+            SQL コンソールで <code className="font-mono">CREATE TABLE …</code>{" "}
+            を実行するとここに並びます。
+          </p>
+          <Link
+            to={`/databases/${id}/editor`}
+            className="text-sm font-bold text-[#11a89b] underline-offset-2 hover:underline"
+          >
+            SQL コンソールを開く →
+          </Link>
+        </div>
+      )}
+    </Card>
   );
 }

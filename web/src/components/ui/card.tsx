@@ -4,6 +4,8 @@ import { cn } from "@/lib/utils";
 
 // どうぶつの森風カード。原典 animal-island-ui の Card に準拠:
 // 丸み 20px・暖クリーム面(rgb(247,243,223))・本文 500・枠なし・影なし。
+// type は原典の prop 式 API を踏襲('default' | 'dashed')。dashed は薄クリーム面 +
+// 破線枠(空状態などの placeholder 用。壁紙が透けて読みにくくならないよう塗りを敷く)。
 // hover の持ち上げ(translateY(-2px))は interactive=クリック可能なカードのみ
 // 付与する(原典は既定で hover するが、本プロジェクトでは静的パネルは動かさない)。
 // a11y: interactive のときは div でもキーボード操作できるよう role="button" /
@@ -12,12 +14,13 @@ import { cn } from "@/lib/utils";
 // role / tabIndex / onKeyDown を渡した場合はそれを優先する。
 function Card({
   className,
+  type = "default",
   interactive = false,
   role,
   tabIndex,
   onKeyDown,
   ...props
-}: React.ComponentProps<"div"> & { interactive?: boolean }) {
+}: React.ComponentProps<"div"> & { type?: "default" | "dashed"; interactive?: boolean }) {
   // Enter / Space でクリックを発火(利用側 onClick があればそれも呼ばれる)。
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     onKeyDown?.(event);
@@ -39,6 +42,12 @@ function Card({
       onKeyDown={interactive ? handleKeyDown : onKeyDown}
       className={cn(
         "flex flex-col gap-6 rounded-[20px] bg-card py-4 font-medium text-card-foreground",
+        // 原典 .card-dashed(2px dashed #e8dcc8・影なし)。ただし塗りは原典の不透明
+        // クリームではなく半透明(bg-card と同じクリームの 70% アルファ)にする:隣の
+        // 実面パネル(bg-card)と同じ色相で揃えつつ、placeholder として軽く・壁紙を
+        // うっすら透かして馴染ませる。(bg-card/70 は @theme inline の var 経由色だと
+        // アルファが効かないので、リテラル rgba で確実に半透明にする。)
+        type === "dashed" && "border-2 border-dashed border-[#e8dcc8] bg-[rgba(247,243,223,0.7)]",
         interactive &&
           "cursor-pointer outline-none transition-transform duration-300 ease-[ease] hover:-translate-y-0.5 focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2 active:translate-y-0",
         className,

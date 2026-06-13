@@ -23,9 +23,10 @@ export function ResultTable({
         <table className="w-full border-collapse text-sm">
           <thead>
             <tr className="bg-accent">
-              {result.columns.map((c) => (
+              {result.columns.map((c, ci) => (
+                // 列名は重複しうる(JOIN / 別名) ⇒ key には index を混ぜる。
                 <th
-                  key={c}
+                  key={`${c}-${ci}`}
                   className="border-b-2 border-[#c4b89e] px-3 py-2 text-left font-bold whitespace-nowrap text-accent-foreground"
                 >
                   {c}
@@ -49,10 +50,14 @@ export function ResultTable({
                   {row.map((cell, ci) => (
                     <td
                       key={ci}
-                      className="max-w-100 truncate border-b border-[#e8e2d6] px-3 py-1.5 align-top font-medium text-[#725d42]"
+                      className="border-b border-[#e8e2d6] px-3 py-1.5 align-top font-medium text-[#725d42]"
                       title={cell ?? undefined}
                     >
-                      {cell === null ? <span className="text-[#c4b89e] italic">NULL</span> : cell}
+                      {/* 表セルの max-width は auto レイアウトでは効かない ⇒ ブロックの
+                          内側 div で幅を縛り、長い値を省略表示する(全文は title に出る)。 */}
+                      <div className="max-w-100 truncate">
+                        {cell === null ? <span className="text-[#c4b89e] italic">NULL</span> : cell}
+                      </div>
                     </td>
                   ))}
                 </tr>

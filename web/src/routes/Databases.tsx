@@ -56,7 +56,7 @@ export default function Databases() {
       )}
 
       {!isPending && dbs && dbs.length === 0 && (
-        <Card className="border-2 border-dashed border-[#c4b89e] bg-transparent">
+        <Card type="dashed">
           <CardContent className="flex flex-col items-center gap-4 px-6 py-12 text-center">
             <div className="grid size-16 place-items-center rounded-full bg-accent text-accent-foreground">
               <Database className="size-8" />

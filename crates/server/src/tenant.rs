@@ -433,8 +433,10 @@ pub fn col_to_string(row: &PgRow, i: usize) -> Option<String> {
         }
         _ => {}
     }
-    // フォールバック:text として読めれば返す、駄目なら型名。
-    match row.try_get::<Option<String>, _>(i) {
+    // フォールバック:未対応型(numeric / interval / 配列 / 独自型 …)は raw text を
+    // **unchecked** で読む。raw_sql は単純クエリプロトコル = 値が text 形式なので、
+    // 型チェックを飛ばして String(= UTF-8 text)に decode すれば素直に文字列化できる。
+    match row.try_get_unchecked::<Option<String>, _>(i) {
         Ok(v) => v,
         Err(_) => Some(format!("({ty})")),
     }

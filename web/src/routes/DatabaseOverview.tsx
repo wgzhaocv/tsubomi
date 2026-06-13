@@ -47,7 +47,7 @@ export default function DatabaseOverview() {
               稼働中
             </span>
           </Stat>
-          <Stat label="テーブル数">{tables ? `${tables.length}` : "…"}</Stat>
+          <Stat label="テーブル数">{tables?.length ?? "…"}</Stat>
           <Stat label="作成日">
             {db ? new Date(db.created_at).toLocaleDateString("ja-JP") : "…"}
           </Stat>
