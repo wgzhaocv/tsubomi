@@ -39,36 +39,73 @@ Google OAuth クライアント:Google Cloud Console で作成(種別:Web applic
 
 ## デプロイ
 
-単機運用・ホスト直走り。サーバは **host ネットワーク**で動き `:9090` をホストに出す
-(前段に reverse proxy を置く想定)。設定はホスト毎の **`.env.production`**(git 管理外。
-`TSUBOMI_IMAGE` と `PG_PLATFORM_PASSWORD` もここに書く)。host ネットなので
-`DATABASE_URL=127.0.0.1:5434` が dev / 本番で共通のまま通る。`just` が無いマシン
-(Windows 等)でも下段の生コマンドだけで完結する。
+単機運用・ホスト直走り。サーバは **host ネットワーク**で `127.0.0.1:9090`(本番は
+`TSUBOMI_BIND_ADDR`)に待ち受け、前段の TLS リバースプロキシ越しに公開する。設定は
+ホスト毎の **`.env.production`**(git 管理外)。host ネットなので
+`DATABASE_URL=127.0.0.1:5434` が dev / 本番で共通のまま通る。`just` / ソース / sh が
+無いマシン(Windows 等)でも `docker compose` だけで完結する。イメージは初日から
+**両アーキ対応**(arm64 = 香橙派 / amd64 = x86_64 VPS)。
 
-イメージは初日から **両アーキ対応**(arm64 = 香橙派 / amd64 = x86_64 VPS)。
+### 1. イメージをビルドして配布(ビルド機で一度)
 
-### A. レジストリ経由(リモート VPS 推奨・ビルド不要・OS 非依存)
-
-ビルド機で multi-arch イメージを作ってレジストリへ push:
+multi-arch イメージを作ってレジストリへ push する:
 
 ```bash
 docker login docker.io
 REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 just release-image
-# just 無し: REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 bash scripts/release-image.sh
-# 単一アーキで高速化: PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
+# just 無し:  REGISTRY=docker.io/<USER> IMAGE=tsubomi TAG=v1 bash scripts/release-image.sh
+# 単一アーキで高速化:  PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
 ```
 
-VPS 側は `compose.prod.yml` と `.env.production` を置いて起動するだけ:
+### 2. 自分の VPS で動かす(本番セットアップ)
 
-```bash
-docker login docker.io   # 公開イメージなら不要
-docker compose --env-file .env.production -f compose.prod.yml up -d
-```
+新しい VPS に必要なのは **Docker だけ**(ソース・just・sh は不要)。
 
-`compose.prod.yml` が管制面 pg(loopback バインドで隔離)+ server を一括起動する。
-停止は `docker compose -f compose.prod.yml down`。
+1. **Docker を入れる**:`curl -fsSL https://get.docker.com | sh`
+2. **2 ファイルを任意のディレクトリ(例 `~/tsubomi`)に置く**:
+   - `compose.prod.yml` — リポジトリからコピー(`scp` / `git clone` / `curl`)
+   - `.env.production` — 同じ場所に新規作成(`.env.example` がひな形)
+3. **`.env.production` を本番値で埋める**(主なキー。全量は `.env.example` 参照):
 
-### B. ローカルビルド(ソースのあるホスト。例:香橙派 arm64)
+   ```env
+   TSUBOMI_IMAGE=docker.io/<USER>/tsubomi:v1
+   PG_PLATFORM_PASSWORD=<強いパスワード>
+   DATABASE_URL=postgres://tsubomi:<同じパスワード>@127.0.0.1:5434/tsubomi_platform
+   GOOGLE_CLIENT_ID=...
+   GOOGLE_CLIENT_SECRET=...
+   GOOGLE_REDIRECT_URI=https://<ドメイン>/api/auth/google/callback
+   TSUBOMI_SERVER_URL=https://<ドメイン>
+   TSUBOMI_ALLOWED_HD=<会社ドメイン>      # 複数はカンマ区切り
+   TSUBOMI_OWNER_EMAILS=<owner のメール>   # 複数はカンマ区切り
+   TSUBOMI_BIND_ADDR=127.0.0.1:9090
+   TSUBOMI_COOKIE_SECURE=true             # HTTPS 必須
+   ```
+
+   `PG_PLATFORM_PASSWORD` と `DATABASE_URL` 内のパスワードは**必ず一致**させる
+   (compose が新規 pg をこのパスワードで初期化する)。
+4. **Google OAuth** に本番の redirect URI を追加:
+   `https://<ドメイン>/api/auth/google/callback`
+5. **起動**(管制面 pg + server をまとめて立てる):
+
+   ```bash
+   docker login docker.io     # 公開イメージなら不要
+   docker compose --env-file .env.production -f compose.prod.yml up -d
+   ```
+6. **TLS リバースプロキシ**を前段に置き、`<ドメイン>` → `127.0.0.1:9090` へ転送する。
+   例(Caddy):`<ドメイン> { reverse_proxy 127.0.0.1:9090 }`
+7. **確認 / ログ**:
+
+   ```bash
+   curl -fsS http://127.0.0.1:9090/api/health
+   docker compose -f compose.prod.yml logs -f server
+   ```
+8. **更新**:新タグを push → `.env.production` の `TSUBOMI_IMAGE` を上げて
+   `docker compose --env-file .env.production -f compose.prod.yml up -d`
+   (`pull` で先に取得しても可)。停止は `docker compose -f compose.prod.yml down`。
+
+### 3. ローカルビルドで動かす(ソースのあるホスト。例:香橙派で直接ビルド)
+
+レジストリを使わず、その場でビルドして起動する:
 
 ```bash
 just deploy   # 管制面 pg 起動 → サーバを build + 起動(.env.production を使用)
