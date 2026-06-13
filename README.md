@@ -107,17 +107,34 @@ just deploy   # 管制面 pg 起動 → サーバを build + 起動(.env.product
 #   docker compose --env-file .env.production up --build -d
 ```
 
-### メンテナ向け:新バージョンを公開する
+### メンテナ向け:配布・更新
 
-イメージを更新・公開するのは**メンテナだけ**(運用側は上記のとおり pull するだけ)。
-multi-arch でビルドして自分のレジストリへ push する:
+イメージを更新・配布するのは**メンテナだけ**。配り先で 2 通り。
+
+**A. レジストリへ publish(別マシン / 不特定の VPS 用。各 VPS は `docker pull`)**
 
 ```bash
 docker login docker.io
-REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 just release-image
+REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 just release-image  # multi-arch push
 # just 無し:  REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v2 bash scripts/release-image.sh
-# 単一アーキで高速化:  PLATFORMS=linux/arm64 REGISTRY=... bash scripts/release-image.sh
 ```
+
+publish 後、VPS 側は新タグで起こし直すだけ:
+`TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v2 docker compose --env-file .env.production -f compose.prod.yml up -d`
+(または `compose.prod.yml` の既定タグを上げて取得 → `up -d`)。
+
+**B. LAN 内ホストへ直送(香橙派など。Hub を介さず速い)**
+
+ビルド機 → 対象ホストへ `docker save | ssh docker load` で直接渡し、その場で起こす。
+対象のアーキを検出して native ビルドするので同アーキ(Mac arm64 → 香橙派 arm64)は高速:
+
+```bash
+HOST=zwg@192.168.0.106 just ship          # 既定タグ tsubomi:local で直送 + 起動
+# HOST=user@ip TAG=v2 just ship
+# just 無し:  HOST=zwg@192.168.0.106 bash scripts/ship.sh
+```
+
+事前に対象ホストへ `compose.prod.yml` と `.env.production` を置いておく(既定 `~/tsubomi-deploy`)。
 
 ## tbm CLI
 
