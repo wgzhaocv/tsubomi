@@ -1,7 +1,34 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use tsubomi_shared::{ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, Health, Me};
 
 pub const ME_PATH: &str = "/api/auth/me";
+
+/// API 由来のエラー。`code` は安定した機械可読コード(json 出力のエラー信封で使う)。
+/// anyhow に載せて伝播し、main で downcast して code を取り出す。
+#[derive(Debug)]
+pub struct ApiError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+impl std::error::Error for ApiError {}
+
+/// HTTP ステータス → 安定コード。
+fn code_for(status: reqwest::StatusCode) -> &'static str {
+    match status.as_u16() {
+        401 => "unauthorized",
+        403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        400 => "bad_request",
+        _ => "server_error",
+    }
+}
 
 pub async fn fetch_me(server_url: &str, token: &str) -> Result<Me> {
     let resp = reqwest::Client::new()
@@ -11,12 +38,18 @@ pub async fn fetch_me(server_url: &str, token: &str) -> Result<Me> {
         .await
         .context("failed to call /api/auth/me")?;
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("token invalid (run: tbm login)");
-    }
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        bail!("/api/auth/me failed: HTTP {status} {body}");
+        let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+            "token invalid (run: tbm login)".to_owned()
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            format!("/api/auth/me failed: HTTP {status} {body}")
+        };
+        return Err(ApiError {
+            code: code_for(status),
+            message,
+        }
+        .into());
     }
     resp.json()
         .await
@@ -49,11 +82,21 @@ async fn send_ok(rb: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         return Ok(resp);
     }
     let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        bail!("認証に失敗しました(tbm login を実行してください)");
+    let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+        "認証に失敗しました(tbm login を実行してください)".to_owned()
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        if body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            body
+        }
+    };
+    Err(ApiError {
+        code: code_for(status),
+        message,
     }
-    let body = resp.text().await.unwrap_or_default();
-    bail!("HTTP {status}: {body}")
+    .into())
 }
 
 pub async fn db_list(

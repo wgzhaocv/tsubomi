@@ -17,6 +17,15 @@ struct Cli {
     /// Bearer トークン(env: TSUBOMI_TOKEN)。保存済み設定より優先 — CI / スクリプト用
     #[arg(long, env = "TSUBOMI_TOKEN", global = true)]
     token: Option<String>,
+    /// 出力形式(env: TBM_OUTPUT)。auto=端末は text・パイプ/捕捉は json(AI 向け)
+    #[arg(
+        long,
+        short = 'o',
+        global = true,
+        default_value = "auto",
+        env = "TBM_OUTPUT"
+    )]
+    output: commands::OutputFormat,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -60,25 +69,33 @@ async fn main() -> Result<()> {
         .expect("failed to install rustls ring provider");
 
     let cli = Cli::parse();
+    // auto を一度だけ解決(端末→text / パイプ→json)。以後はこの out を配る。
+    let out = cli.output.resolve();
+    let json = out.is_json();
 
     // バージョンチェック:沈黙・クールダウン付き・**通知のみ** — 更新は常に
     // 明示的な `tbm update`(プロジェクト決定:自動更新はしない)。
     // `update`(自分で取得する)と `uninstall`(去る人)ではスキップ。
-    let nudge = match cli.command {
-        Cmd::Update | Cmd::Uninstall => None,
-        _ => {
-            let cfg = config::load().ok().flatten();
-            let server = commands::resolve_server_from(cli.server.as_deref(), cfg.as_ref());
-            version_check::maybe_check(&server, cfg).await
+    // json モードでは出力を汚さない(かつ追加のネットワークも避ける)ため一切やらない。
+    let nudge = if json {
+        None
+    } else {
+        match cli.command {
+            Cmd::Update | Cmd::Uninstall => None,
+            _ => {
+                let cfg = config::load().ok().flatten();
+                let server = commands::resolve_server_from(cli.server.as_deref(), cfg.as_ref());
+                version_check::maybe_check(&server, cfg).await
+            }
         }
     };
 
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
-        Cmd::Db { action } => commands::db::run(action, cli.server, cli.token).await,
-        Cmd::Whoami => commands::whoami::run(cli.server, cli.token).await,
-        Cmd::Logout => commands::logout::run(cli.server).await,
-        Cmd::Health => commands::health::run(cli.server).await,
+        Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
+        Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,
+        Cmd::Logout => commands::logout::run(cli.server, out).await,
+        Cmd::Health => commands::health::run(cli.server, out).await,
         Cmd::Update => commands::update::run(cli.server).await,
         Cmd::Uninstall => commands::uninstall::run(cli.server).await,
     };
@@ -88,6 +105,21 @@ async fn main() -> Result<()> {
         eprintln!(
             "note: tbm {latest} is available (you have {current}). Run 'tbm update' to upgrade."
         );
+    }
+
+    // json モードのエラーは構造化して stdout に出す({error, code}、非零終了)。
+    // code は API 由来なら ApiError から、それ以外は "error"。text は従来どおり
+    // anyhow が stderr に「Error: …」を出す。
+    if let Err(e) = &result
+        && json
+    {
+        let code = e
+            .downcast_ref::<api::ApiError>()
+            .map(|a| a.code)
+            .unwrap_or("error");
+        let env = serde_json::json!({ "error": format!("{e:#}"), "code": code });
+        println!("{env}");
+        std::process::exit(1);
     }
     result
 }

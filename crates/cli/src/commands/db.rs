@@ -1,8 +1,9 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
+use serde_json::json;
 
 use crate::api;
-use crate::commands::{resolve_server_from, resolve_token_from};
+use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
 use crate::config;
 use tsubomi_shared::DatabaseDto;
 
@@ -26,22 +27,34 @@ pub enum DbCmd {
     Connect { name: String },
 }
 
-pub async fn run(action: DbCmd, server: Option<String>, token: Option<String>) -> Result<()> {
+pub async fn run(
+    action: DbCmd,
+    server: Option<String>,
+    token: Option<String>,
+    out: OutputFormat,
+) -> Result<()> {
     let cfg = config::load()?;
     let server_url = resolve_server_from(server.as_deref(), cfg.as_ref());
     let token = resolve_token_from(token, cfg)?;
+    let json = out.is_json();
     // コマンド内の全リクエストで 1 つの client を使い回す(TLS 初期化を 1 回に)。
     let c = reqwest::Client::new();
 
     match action {
         DbCmd::Create { name } => {
             let db = api::db_create(&c, &server_url, &token, &name).await?;
-            println!("作成しました:{} (database{})", db.display_name, db.anon_seq);
-            println!("接続文字列:  tbm db url {}", db.display_name);
+            if json {
+                print_json(&db)?;
+            } else {
+                println!("作成しました:{} (database{})", db.display_name, db.anon_seq);
+                println!("接続文字列:  tbm db url {}", db.display_name);
+            }
         }
         DbCmd::List => {
             let dbs = api::db_list(&c, &server_url, &token).await?;
-            if dbs.is_empty() {
+            if json {
+                print_json(&dbs)?;
+            } else if dbs.is_empty() {
                 println!("(データベースはありません。`tbm db create <名前>` で作成)");
             } else {
                 for db in dbs {
@@ -52,25 +65,42 @@ pub async fn run(action: DbCmd, server: Option<String>, token: Option<String>) -
         DbCmd::Url { name } => {
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             let url = api::db_url(&c, &server_url, &token, &id).await?;
-            // 警告は stderr、文字列は stdout(パイプで拾えるように)。
-            eprintln!("⚠ この文字列はパスワードそのものです。共有・commit しないこと。");
-            println!("{url}");
+            if json {
+                print_json(&json!({ "url": url }))?;
+            } else {
+                // 警告は stderr、文字列は stdout(パイプで拾えるように)。
+                eprintln!("⚠ この文字列はパスワードそのものです。共有・commit しないこと。");
+                println!("{url}");
+            }
         }
         DbCmd::Rotate { name } => {
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             let url = api::db_rotate(&c, &server_url, &token, &id).await?;
-            eprintln!("rotate しました。古い接続文字列は失効しました。新しい接続文字列:");
-            println!("{url}");
+            if json {
+                print_json(&json!({ "url": url, "rotated": true }))?;
+            } else {
+                eprintln!("rotate しました。古い接続文字列は失効しました。新しい接続文字列:");
+                println!("{url}");
+            }
         }
         DbCmd::Delete { name } => {
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             api::db_delete(&c, &server_url, &token, &id).await?;
-            println!("削除しました(ゴミ箱へ。3 日間は復元可能)。");
+            if json {
+                print_json(&json!({ "status": "deleted", "recoverable_days": 3 }))?;
+            } else {
+                println!("削除しました(ゴミ箱へ。3 日間は復元可能)。");
+            }
         }
         DbCmd::Connect { name } => {
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             let url = api::db_url(&c, &server_url, &token, &id).await?;
-            connect_psql(&url)?;
+            if json {
+                // json モードでは対話的 psql は起動せず、接続先だけ返す(AI 用)。
+                print_json(&json!({ "url": url }))?;
+            } else {
+                connect_psql(&url)?;
+            }
         }
     }
     Ok(())
