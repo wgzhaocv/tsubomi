@@ -1,4 +1,5 @@
 use anyhow::Context;
+use base64::Engine;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -29,6 +30,57 @@ pub struct Config {
     /// None = まだリリース未発行。エンドポイントは 404 を返し、CLI の
     /// バージョンチェックは沈黙する。
     pub release_dir: Option<PathBuf>,
+
+    // ===== M1 database =====
+    /// pg-tenant の admin 接続(DDL 実行用)。
+    /// 例:postgres://tsubomi_admin:..@127.0.0.1:5435/postgres
+    pub tenant_admin_url: String,
+    /// human が手にする外部接続文字列のホスト。dev=127.0.0.1 / prod=db.<域名>。
+    pub db_public_host: String,
+    pub db_public_port: u16,
+    /// 接続文字列の sslmode。dev=disable(pgbouncer に TLS なし)、prod は env で調整。
+    pub db_sslmode: String,
+    /// at-rest 暗号化の master key(32 bytes)。DB パスワードの暗号化に使う。
+    pub master_key: MasterKey,
+    /// 日次バックアップの置き場 / ゴミ箱(dump)の置き場(server ホスト上)。
+    /// pg_dump / psql は TENANT_ADMIN_URL 経由で TCP 直結する(docker exec ではない)。
+    pub backup_dir: PathBuf,
+    pub trash_dir: PathBuf,
+}
+
+/// master key のラッパ。Config は Debug 派生なので、生鍵が `{:?}` で漏れないように
+/// 手書き Debug で伏せる。
+#[derive(Clone)]
+pub struct MasterKey(pub [u8; 32]);
+
+impl std::fmt::Debug for MasterKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MasterKey([redacted])")
+    }
+}
+
+/// master key を env から読む:`TSUBOMI_MASTER_KEY`(base64 インライン)優先、
+/// 無ければ `TSUBOMI_MASTER_KEY_FILE`(base64 を書いたファイル、prod は root のみ)。
+/// どちらも 32 bytes にデコードされること。
+fn load_master_key() -> anyhow::Result<[u8; 32]> {
+    let b64 = if let Ok(inline) = std::env::var("TSUBOMI_MASTER_KEY") {
+        inline
+    } else if let Ok(path) = std::env::var("TSUBOMI_MASTER_KEY_FILE") {
+        std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?
+    } else {
+        anyhow::bail!(
+            "TSUBOMI_MASTER_KEY or TSUBOMI_MASTER_KEY_FILE must be set (at-rest 暗号化の master key, base64 of 32 bytes)"
+        );
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .context("master key must be valid base64")?;
+    bytes.as_slice().try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "master key must decode to exactly 32 bytes (got {})",
+            bytes.len()
+        )
+    })
 }
 
 impl Config {
@@ -77,6 +129,24 @@ impl Config {
 
         let release_dir = std::env::var("TSUBOMI_RELEASE_DIR").ok().map(PathBuf::from);
 
+        let tenant_admin_url = std::env::var("TENANT_ADMIN_URL")
+            .context("TENANT_ADMIN_URL must be set (pg-tenant admin 接続)")?;
+        let db_public_host =
+            std::env::var("TSUBOMI_DB_PUBLIC_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let db_public_port: u16 = std::env::var("TSUBOMI_DB_PUBLIC_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6432);
+        let db_sslmode =
+            std::env::var("TSUBOMI_DB_SSLMODE").unwrap_or_else(|_| "disable".to_string());
+        let master_key = MasterKey(load_master_key()?);
+        let backup_dir = std::env::var("TSUBOMI_BACKUP_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/backups"));
+        let trash_dir = std::env::var("TSUBOMI_TRASH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/trash"));
+
         Ok(Self {
             bind_addr,
             web_dir,
@@ -89,6 +159,13 @@ impl Config {
             owner_emails,
             cookie_secure,
             release_dir,
+            tenant_admin_url,
+            db_public_host,
+            db_public_port,
+            db_sslmode,
+            master_key,
+            backup_dir,
+            trash_dir,
         })
     }
 }

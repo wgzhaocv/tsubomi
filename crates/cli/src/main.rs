@@ -33,6 +33,11 @@ enum Cmd {
         #[arg(long)]
         web: bool,
     },
+    /// データベース(作成 / 一覧 / 接続文字列 / rotate / 削除 / psql 接続)
+    Db {
+        #[command(subcommand)]
+        action: commands::db::DbCmd,
+    },
     /// 現在の認証ユーザを表示
     Whoami,
     /// ローカル設定を削除(サーバ側トークンは失効しない)
@@ -70,6 +75,7 @@ async fn main() -> Result<()> {
 
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
+        Cmd::Db { action } => commands::db::run(action, cli.server, cli.token).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token).await,
         Cmd::Logout => commands::logout::run(cli.server).await,
         Cmd::Health => commands::health::run(cli.server).await,

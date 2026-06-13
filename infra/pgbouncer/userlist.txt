@@ -1,0 +1,7 @@
+; pgbouncer が auth_query を実行するために自分が pg-tenant へ接続する資格情報。
+; ここに載るのは auth_user の 1 行だけ(他ユーザは auth_query で都度引くので不要)。
+; pg-tenant 側のロール(infra/pg-tenant-init/01-pgbouncer-auth.sh の
+; PGBOUNCER_AUTH_PASSWORD)と一致させること。
+;   dev は既定値で揃う。本番は PGBOUNCER_AUTH_PASSWORD を強い値にし、この行も差し替える
+;   (リリース手順で生成。auth_type=scram-sha-256 では平文を置けば pgbouncer が SCRAM 計算する)。
+"pgbouncer_auth" "tsubomi_pgb_dev"

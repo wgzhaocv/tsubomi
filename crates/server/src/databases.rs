@@ -1,0 +1,467 @@
+//! database リソースの API ハンドラ(tech-design §6 の database 面)。
+//! web と CLI は同一ハンドラの 2 入口 — 認証 extractor(AuthCtx)だけが分岐点。
+//!
+//! 背骨:平台が「期望状態」を resources / database_details / database_roles に持ち、
+//! 現実(pg-tenant の DB / role)をそこへ収束させる。create は tenant DDL を先に
+//! 流し、成功してから platform 行を入れる(失敗時は tenant 側を掃除)。
+
+use crate::auth::AuthCtx;
+use crate::error::{AppError, AppResult};
+use crate::state::AppState;
+use crate::tenant::{self, DbNames};
+use crate::validate;
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use chrono::{DateTime, Utc};
+use serde_json::json;
+use sqlx::{Column, Connection, Executor, PgPool, Row};
+use tsubomi_shared::{
+    ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, ResourceDto,
+};
+use uuid::Uuid;
+
+const MAX_NAME_LEN: usize = 64;
+/// web SQL が返す最大行数(超過は truncated=true で切り詰め)。
+const MAX_QUERY_ROWS: usize = 1000;
+
+/// `list` / `get_one` の行(id, display_name, anon_seq, created_at, rotated_at)。
+type DbRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>);
+/// `list_resources` の行(+ kind, deleted_at)。
+type ResourceRow = (
+    Uuid,
+    String,
+    String,
+    i32,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+/// DbRow → DatabaseDto(list と get_one が共有)。DatabaseDto も DbRow も外部型なので
+/// From は孤児規則で書けず、自由関数にする。
+fn db_row_to_dto((id, display_name, anon_seq, created_at, rotated_at): DbRow) -> DatabaseDto {
+    DatabaseDto {
+        id,
+        display_name,
+        anon_seq,
+        created_at,
+        rotated_at,
+    }
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/resources", get(list_resources))
+        .route("/databases", get(list).post(create))
+        .route("/databases/{id}", get(get_one).delete(delete))
+        .route("/databases/{id}/url", get(url))
+        .route("/databases/{id}/rotate", post(rotate))
+        .route("/databases/{id}/query", post(query))
+}
+
+// ===== 監査 =====
+
+/// audit_log への記録。ベストエフォート(失敗してもリクエストは成功扱い、ログだけ残す)。
+/// actor=None はシステム操作(reconcile の自動 purge など)。trash / gc から再利用する。
+pub(crate) async fn audit(
+    db: &PgPool,
+    actor: Option<Uuid>,
+    action: &str,
+    target: Uuid,
+    detail: serde_json::Value,
+) {
+    let r = sqlx::query(
+        "INSERT INTO audit_log (actor_id, action, target_resource, detail) VALUES ($1,$2,$3,$4)",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(target)
+    .bind(detail)
+    .execute(db)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(error = ?e, action, "audit insert failed");
+    }
+}
+
+// ===== 共通の取得 =====
+
+/// 所有者チェック付きで human role の (pg_dbname, pg_role, password_enc) を引く。
+/// 見つからない / 他ユーザ / 削除済みは 404 に収束。
+async fn fetch_human(db: &PgPool, user_id: Uuid, id: Uuid) -> AppResult<(String, String, Vec<u8>)> {
+    let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT d.pg_dbname, ro.pg_role, ro.password_enc
+           FROM resources r
+           JOIN database_details d ON d.resource_id = r.id
+           JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'human'
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+    row.ok_or(AppError::NotFound)
+}
+
+fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> String {
+    let cfg = &state.config;
+    format!(
+        "postgres://{role}:{password}@{}:{}/{dbname}?sslmode={}",
+        cfg.db_public_host, cfg.db_public_port, cfg.db_sslmode
+    )
+}
+
+// ===== ハンドラ =====
+
+/// `POST /api/databases`:DB 作成。
+pub async fn create(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Json(req): Json<CreateDatabaseReq>,
+) -> AppResult<(StatusCode, Json<DatabaseDto>)> {
+    let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+    let names = DbNames::generate();
+    let app_pw = tenant::gen_password();
+    let human_pw = tenant::gen_password();
+
+    // 1. tenant 側 DDL を先に(CREATE DATABASE はトランザクション不可)。
+    if let Err(e) = tenant::create_database(
+        &state.tenant_admin,
+        &state.config.tenant_admin_url,
+        &names,
+        &app_pw,
+        &human_pw,
+    )
+    .await
+    {
+        // 途中で失敗 → 残骸を掃除(「platform 行が在る ⇒ tenant DB が在る」を保つ)。
+        let _ = tenant::drop_database_and_roles(&state.tenant_admin, &names).await;
+        return Err(e);
+    }
+
+    // 2. platform 側にメタを記録(パスワードは暗号化)。
+    let app_enc = state.crypto.encrypt(&app_pw)?;
+    let human_enc = state.crypto.encrypt(&human_pw)?;
+    let dto = match insert_rows(
+        &state.db,
+        auth.user_id,
+        &display_name,
+        &names,
+        app_enc,
+        human_enc,
+    )
+    .await
+    {
+        Ok(dto) => dto,
+        Err(e) => {
+            // platform 挿入に失敗 → tenant 側をロールバック。
+            let _ = tenant::drop_database_and_roles(&state.tenant_admin, &names).await;
+            return Err(e);
+        }
+    };
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.create",
+        dto.id,
+        json!({ "display_name": display_name, "pg_dbname": names.dbname }),
+    )
+    .await;
+    Ok((StatusCode::CREATED, Json(dto)))
+}
+
+async fn insert_rows(
+    db: &PgPool,
+    user_id: Uuid,
+    display_name: &str,
+    names: &DbNames,
+    app_enc: Vec<u8>,
+    human_enc: Vec<u8>,
+) -> AppResult<DatabaseDto> {
+    let mut tx = db.begin().await?;
+
+    // ユーザ単位で anon_seq の採番を直列化(同時 create の競合を防ぐ)。
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 42)")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let anon_seq: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(anon_seq),0)+1 FROM resources WHERE user_id=$1 AND kind='database'",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let (id, created_at): (Uuid, DateTime<Utc>) = sqlx::query_as(
+        "INSERT INTO resources (user_id, kind, display_name, anon_seq)
+              VALUES ($1, 'database', $2, $3)
+         RETURNING id, created_at",
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .bind(anon_seq)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query("INSERT INTO database_details (resource_id, pg_dbname) VALUES ($1, $2)")
+        .bind(id)
+        .bind(&names.dbname)
+        .execute(&mut *tx)
+        .await?;
+
+    for (kind, role, enc) in [
+        ("app", &names.app, app_enc),
+        ("human", &names.human, human_enc),
+    ] {
+        sqlx::query(
+            "INSERT INTO database_roles (resource_id, role_kind, pg_role, password_enc)
+                  VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(role)
+        .bind(enc)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(DatabaseDto {
+        id,
+        display_name: display_name.to_owned(),
+        anon_seq,
+        created_at,
+        rotated_at: None,
+    })
+}
+
+/// `GET /api/databases`:自分の DB 一覧。
+pub async fn list(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<DatabaseDto>>> {
+    let rows: Vec<DbRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+           FROM resources r
+           JOIN database_details d ON d.resource_id = r.id
+          WHERE r.user_id = $1 AND r.kind = 'database' AND r.deleted_at IS NULL
+          ORDER BY r.anon_seq",
+    )
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows.into_iter().map(db_row_to_dto).collect()))
+}
+
+/// `GET /api/databases/:id`:単体。
+pub async fn get_one(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<DatabaseDto>> {
+    let row: Option<DbRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+           FROM resources r
+           JOIN database_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let row = row.ok_or(AppError::NotFound)?;
+    Ok(Json(db_row_to_dto(row)))
+}
+
+/// `GET /api/databases/:id/url`:外部(human)接続文字列。**パスワードそのもの**。
+pub async fn url(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ConnectionUrlResp>> {
+    let (dbname, role, enc) = fetch_human(&state.db, auth.user_id, id).await?;
+    let pw = state.crypto.decrypt(&enc)?;
+    Ok(Json(ConnectionUrlResp {
+        url: build_url(&state, &role, &pw, &dbname),
+    }))
+}
+
+/// `POST /api/databases/:id/rotate`:human のパスワードを差し替える(非破壊 — app は不変)。
+pub async fn rotate(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ConnectionUrlResp>> {
+    let (dbname, role, _) = fetch_human(&state.db, auth.user_id, id).await?;
+    let new_pw = tenant::gen_password();
+    tenant::rotate_password(&state.tenant_admin, &role, &new_pw).await?;
+
+    // 新パスワードの保存と rotated_at を 1 トランザクションで(片方だけ書けてズレない)。
+    let enc = state.crypto.encrypt(&new_pw)?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE database_roles SET password_enc = $1 WHERE resource_id = $2 AND role_kind = 'human'",
+    )
+    .bind(enc)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE database_details SET rotated_at = now() WHERE resource_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    audit(&state.db, Some(auth.user_id), "db.rotate", id, json!({})).await;
+    Ok(Json(ConnectionUrlResp {
+        url: build_url(&state, &role, &new_pw, &dbname),
+    }))
+}
+
+/// `POST /api/databases/:id/query`:web SQL(L1 session 認証 + L2 所有者 + L3 その DB
+/// 自身の human role で接続。admin は絶対に使わない — §7)。
+pub async fn query(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<QueryReq>,
+) -> AppResult<Json<QueryResp>> {
+    let (dbname, role, enc) = fetch_human(&state.db, auth.user_id, id).await?;
+    let pw = state.crypto.decrypt(&enc)?;
+
+    let mut conn =
+        tenant::connect_as_human(&state.config.tenant_admin_url, &role, &pw, &dbname).await?;
+
+    // 暴走クエリ対策(二重)。statement_timeout はユーザが `SET statement_timeout=0`
+    // で外せるので、サーバ側の tokio タイムアウトを硬い上限として被せる(超過で
+    // 接続を落とす = クエリも中断)。
+    conn.execute("SET statement_timeout = '10s'").await?;
+
+    // raw_sql:単純クエリプロトコル(複数文 OK、値は text)。これは web SQL —
+    // 任意 SQL の実行が目的なので AssertSqlSafe で包む(安全は L1/L2/L3 認証が担保)。
+    let exec = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql)).fetch_all(&mut conn);
+    let rows = match tokio::time::timeout(std::time::Duration::from_secs(15), exec).await {
+        Ok(r) => r.map_err(|e| AppError::BadRequest(format!("{e}")))?,
+        Err(_) => {
+            // タイムアウト:接続を落として中断する。
+            drop(conn);
+            return Err(AppError::BadRequest(
+                "クエリがタイムアウトしました(15 秒)".into(),
+            ));
+        }
+    };
+    let _ = conn.close().await;
+
+    let columns: Vec<String> = rows
+        .first()
+        .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
+        .unwrap_or_default();
+    let truncated = rows.len() > MAX_QUERY_ROWS;
+    let out_rows: Vec<Vec<Option<String>>> = rows
+        .iter()
+        .take(MAX_QUERY_ROWS)
+        .map(|row| {
+            (0..row.len())
+                .map(|i| tenant::col_to_string(row, i))
+                .collect()
+        })
+        .collect();
+    let row_count = out_rows.len();
+
+    Ok(Json(QueryResp {
+        columns,
+        rows: out_rows,
+        row_count,
+        truncated,
+    }))
+}
+
+/// `DELETE /api/databases/:id`:ソフト削除(dump → DROP DATABASE → deleted_at)。
+/// role は残す(復元で同じパスワードで再作成するため)。
+pub async fn delete(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT d.pg_dbname
+           FROM resources r
+           JOIN database_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let dbname = row.ok_or(AppError::NotFound)?.0;
+
+    // dump(無圧縮)→ ゴミ箱へ。失敗したら削除を中止(復元不能な削除はしない)。
+    let dump_path = state.config.trash_dir.join(format!("{id}.sql"));
+    tenant::dump_database(&state.config.tenant_admin_url, &dbname, &dump_path).await?;
+
+    // DATABASE を落とす(接続は WITH FORCE で切る)。role は残す。
+    tenant::drop_database(&state.tenant_admin, &dbname).await?;
+
+    let meta = json!({
+        "pg_dbname": dbname,
+        "dump_path": dump_path.to_string_lossy(),
+    });
+    sqlx::query(
+        "UPDATE resources
+            SET deleted_at = now(),
+                purge_after = now() + interval '3 days',
+                trash_meta = $2
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(meta)
+    .execute(&state.db)
+    .await?;
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.delete",
+        id,
+        json!({ "pg_dbname": dbname }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/resources`:4 種をフラットに(dashboard 用。M1 では database のみ存在)。
+pub async fn list_resources(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<ResourceDto>>> {
+    let rows: Vec<ResourceRow> = sqlx::query_as(
+        "SELECT id, kind, display_name, anon_seq, created_at, deleted_at
+           FROM resources
+          WHERE user_id = $1 AND deleted_at IS NULL
+          ORDER BY kind, anon_seq",
+    )
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(
+                |(id, kind, display_name, anon_seq, created_at, deleted_at)| ResourceDto {
+                    id,
+                    kind,
+                    display_name,
+                    anon_seq,
+                    created_at,
+                    deleted_at,
+                },
+            )
+            .collect(),
+    ))
+}

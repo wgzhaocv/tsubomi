@@ -24,10 +24,15 @@ pub fn build_router(state: AppState) -> Router {
         );
     }
 
-    let protected = auth::protected_routes().layer(middleware::from_fn_with_state(
-        state.clone(),
-        auth::middleware::require_auth,
-    ));
+    // protected:認証(session / Bearer)の後ろ。auth + database + trash の各面を
+    // 同じ require_auth layer の下に束ねる(web も CLI も同じ extractor を通る)。
+    let protected = auth::protected_routes()
+        .merge(crate::databases::routes())
+        .merge(crate::trash::routes())
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::middleware::require_auth,
+        ));
 
     Router::new()
         .nest("/api", public.merge(protected))

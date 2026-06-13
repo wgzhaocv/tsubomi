@@ -14,3 +14,6 @@ services:
     network_mode: host
     env_file:
       - .env.production
+    volumes:
+      # バックアップ / ゴミ箱 dump をホストに永続化(M1)。
+      - /srv/tsubomi:/srv/tsubomi

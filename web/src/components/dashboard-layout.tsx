@@ -216,10 +216,15 @@ function MobileTopBar() {
 
 export function DashboardLayout() {
   const { data: me, isPending } = useMeQuery();
+  const { pathname } = useLocation();
 
   if (isPending) return <FullPageLoading />;
   // 未ログインはログイン画面へ。replace で戻る矢印に守衛ループを残さない。
   if (!me) return <Navigate to="/login" replace />;
+
+  // データベース詳細(/databases/:id 配下)はテーブルデータの横スクロールのため
+  // 全幅。それ以外は読みやすさ優先で max-w-5xl に収める。
+  const wide = /^\/databases\/[^/]+/.test(pathname);
 
   return (
     <div className="flex min-h-dvh">
@@ -234,7 +239,7 @@ export function DashboardLayout() {
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileTopBar />
         <main className="min-w-0 flex-1">
-          <div className="mx-auto w-full max-w-5xl p-6 md:p-10">
+          <div className={cn("mx-auto w-full p-6 md:p-10", wide ? "max-w-360" : "max-w-5xl")}>
             <Outlet />
           </div>
         </main>

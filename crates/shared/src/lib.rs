@@ -5,9 +5,11 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 // ============ OAuth / PKCE プロトコル定数(サーバと CLI の合意点)============
 
@@ -79,6 +81,75 @@ pub struct Me {
     pub avatar_url: Option<String>,
     /// `"user"` か `"owner"`。
     pub role: String,
+}
+
+// ============ M1 database(server ⇄ CLI / web の単一契約)============
+
+/// `GET /api/databases` の各要素 / `POST /api/databases` のレスポンス。
+/// 秘密(パスワード / 接続文字列)は含まない — それは `/url` 専用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseDto {
+    pub id: Uuid,
+    /// ユーザの自由名(改名は接続文字列に触れない)。
+    pub display_name: String,
+    /// 匿名番号(user+kind 内連番):database1/2…
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+    /// human role の最後の rotate 時刻。これより前にコピーした文字列は失効済み。
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+/// `POST /api/databases` のリクエストボディ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDatabaseReq {
+    pub name: String,
+}
+
+/// `GET /api/databases/:id/url` / `POST /api/databases/:id/rotate` のレスポンス。
+/// 外部(human role)接続文字列。**パスワードそのもの** — 表示箇所で警告すること。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionUrlResp {
+    pub url: String,
+}
+
+/// `POST /api/databases/:id/query`(web SQL)のリクエスト。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryReq {
+    pub sql: String,
+}
+
+/// web SQL の結果。値はすべて text 表現(NULL は None)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryResp {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+    /// 返した行数(上限で切り詰めた場合は truncated=true)。
+    pub row_count: usize,
+    pub truncated: bool,
+}
+
+/// `GET /api/resources`:4 種をフラットに(dashboard 用)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDto {
+    pub id: Uuid,
+    pub kind: String,
+    pub display_name: String,
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /api/trash`:ソフト削除済みリソース。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashItemDto {
+    pub id: Uuid,
+    pub kind: String,
+    pub display_name: String,
+    pub deleted_at: DateTime<Utc>,
+    #[serde(default)]
+    pub purge_after: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

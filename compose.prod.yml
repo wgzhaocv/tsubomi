@@ -32,6 +32,42 @@ services:
       timeout: 3s
       retries: 20
 
+  # M1:ユーザ DB インスタンス(管制面とは別)。admin は loopback :5435。
+  pg-tenant:
+    image: postgres:18
+    container_name: tsubomi-pg-tenant
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tsubomi_admin
+      POSTGRES_PASSWORD: ${PG_TENANT_PASSWORD:?set PG_TENANT_PASSWORD in .env.production}
+      POSTGRES_DB: postgres
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:-tsubomi_pgb_dev}
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - pg_tenant_data:/var/lib/postgresql
+      # 初回起動のみ:pgbouncer auth ロール + pg_shadow 参照関数。ship.sh が同梱する。
+      - ./pg-tenant-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tsubomi_admin -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # M1:外部接続入口 + プール。会社 LAN に晒す(送信元制限は iptables DOCKER-USER)。
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    container_name: tsubomi-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      pg-tenant:
+        condition: service_healthy
+    ports:
+      - "${PGBOUNCER_BIND_ADDR:-127.0.0.1}:6432:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
     image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v1}
@@ -40,9 +76,19 @@ services:
     network_mode: host
     env_file:
       - .env.production
+    volumes:
+      # バックアップ / ゴミ箱 dump をホストに永続化(server は host ネットなので
+      # コンテナ内パス = ホストパスで一致。TSUBOMI_BACKUP_DIR / _TRASH_DIR と対応)。
+      - /srv/tsubomi:/srv/tsubomi
+      # CLI リリース配信:release-cli.sh が公開するホストの release ディレクトリを
+      # TSUBOMI_RELEASE_DIR(/srv/releases)へ ro マウント。/api/cli/version を配信。
+      - ${TSUBOMI_RELEASES_HOST:-/srv/tsubomi/releases}:/srv/releases:ro
     depends_on:
       pg-platform:
+        condition: service_healthy
+      pg-tenant:
         condition: service_healthy
 
 volumes:
   pg_platform_data:
+  pg_tenant_data:

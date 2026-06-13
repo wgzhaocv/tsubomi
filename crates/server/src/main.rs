@@ -7,10 +7,15 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod auth;
 mod cli_release;
 mod config;
+mod crypto;
+mod databases;
 mod error;
 mod gc;
 mod routes;
 mod state;
+mod tenant;
+mod trash;
+mod validate;
 
 use config::Config;
 use state::AppState;

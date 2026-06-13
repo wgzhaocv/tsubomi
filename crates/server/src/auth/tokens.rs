@@ -102,19 +102,7 @@ pub struct TokenDto {
 }
 
 pub(super) fn validate_name(raw: &str) -> AppResult<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::BadRequest("名前が空です".into()));
-    }
-    if trimmed.chars().count() > MAX_NAME_LEN {
-        return Err(AppError::BadRequest(format!(
-            "名前は{MAX_NAME_LEN}文字以内です"
-        )));
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err(AppError::BadRequest("名前に制御文字を含めません".into()));
-    }
-    Ok(trimmed.to_owned())
+    crate::validate::name(raw, MAX_NAME_LEN)
 }
 
 /// 個人 CLI トークンを発行する。Web の `POST /api/tokens` と OAuth の

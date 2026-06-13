@@ -26,14 +26,17 @@ COPY migrations ./migrations
 RUN cargo build --release --bin tsubomi-server
 
 # ---- ランタイム ----
-FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# ベースを postgres:18 にする理由:M1 のバックアップ / ゴミ箱が pg_dump / psql を
+# 使う。これらは **サーバ(pg-tenant / pg-platform = 18)と同じメジャー版**でないと
+# 動かない(古い pg_dump は新しいサーバを dump 不可)。postgres:18 イメージは
+# pg_dump/psql 18 + libpq + ca-certificates を最初から備え、arm64/amd64 両対応。
+# 自前サーバを動かすので postgres の entrypoint は無効化する。
+FROM postgres:18
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/tsubomi-server /usr/local/bin/tsubomi-server
 COPY --from=web-builder /web/dist /app/web/dist
 EXPOSE 9090
 # サーバは web/dist から SPA を配信し(TSUBOMI_WEB_DIR デフォルト、/app 相対)、
 # /api を 0.0.0.0:9090 で受ける(8080 は amber が使う)。
+ENTRYPOINT []
 CMD ["tsubomi-server"]

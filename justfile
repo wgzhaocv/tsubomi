@@ -34,6 +34,10 @@ db-down:
 db-psql:
     docker exec -it tsubomi-pg-platform psql -U tsubomi -d tsubomi_platform
 
+# テナント DB インスタンス(ユーザ DB 群)に admin で入る
+db-psql-tenant:
+    docker exec -it tsubomi-pg-tenant psql -U tsubomi_admin -d postgres
+
 # web の依存をインストール
 web-install:
     cd web && bun install

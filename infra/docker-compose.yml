@@ -4,8 +4,8 @@
 # `docker compose -f infra/docker-compose.yml up -d` で立てる。
 #
 # 同じファイルが dev の Mac でも本番ホスト(香橙派 arm64 / 将来の x86_64 機)
-# でも動く(postgres イメージは multi-arch)。
-# 後のフェーズで追加:traefik, registry, pg-tenant, pgbouncer, valkey。
+# でも動く(postgres / pgbouncer イメージは multi-arch)。
+# 後のフェーズで追加:traefik, registry, valkey。
 services:
   pg-platform:
     # 管制面メタデータ専用。loopback にバインド:bridge ネットワーク上の
@@ -26,5 +26,47 @@ services:
       # バージョン非依存の親ディレクトリをマウントするのが upstream 推奨。
       - pg_platform_data:/var/lib/postgresql
 
+  pg-tenant:
+    # ユーザ DB 専用インスタンス(管制面とは別 — 決定 #1:ユーザがここを潰しても
+    # 管制面は生きている)。admin 端口は pg-platform と同じく loopback バインド:
+    # bridge 上のコンテナはホストの 127.0.0.1 に届かないので、平台だけが
+    # 127.0.0.1:5435 で DDL / web SQL のために直結できる。外部入口は pgbouncer。
+    image: postgres:18
+    container_name: tsubomi-pg-tenant
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tsubomi_admin
+      POSTGRES_PASSWORD: ${PG_TENANT_PASSWORD:-tsubomi_tenant_dev}
+      POSTGRES_DB: postgres
+      # 初期化スクリプトが pgbouncer の auth_query 用ロールに付けるパスワード。
+      # userlist.txt と一致させること(dev は既定値で揃う)。
+      PGBOUNCER_AUTH_PASSWORD: ${PGBOUNCER_AUTH_PASSWORD:-tsubomi_pgb_dev}
+    ports:
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - pg_tenant_data:/var/lib/postgresql
+      # 初回起動時のみ実行(空データディレクトリ時)。pgbouncer auth_query 用の
+      # ロール + pg_shadow 参照関数を作る。IaC 層 = 平台は触らない(決定 #6)。
+      - ./pg-tenant-init:/docker-entrypoint-initdb.d:ro
+
+  pgbouncer:
+    # 外部接続の唯一の入口 + プール。dev は 127.0.0.1:6432 にバインド(本番の
+    # CIDR 制限は iptables の DOCKER-USER で行う — compose では絞らない)。
+    # auth_query で pg_shadow を都度引くので、DB / ロールを動的に作っても
+    # pgbouncer の再読込は不要(rotate も即反映)。
+    image: edoburu/pgbouncer:v1.25.2-p0
+    container_name: tsubomi-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      - pg-tenant
+    ports:
+      # dev は loopback。本番(香橙派など)は会社 LAN から届くよう
+      # PGBOUNCER_BIND_ADDR=0.0.0.0 にし、送信元制限は iptables DOCKER-USER で行う(§1)。
+      - "${PGBOUNCER_BIND_ADDR:-127.0.0.1}:6432:6432"
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+
 volumes:
   pg_platform_data:
+  pg_tenant_data:

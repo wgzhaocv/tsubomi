@@ -3,6 +3,11 @@ import { createBrowserRouter } from "react-router";
 import { DashboardLayout } from "@/components/dashboard-layout";
 import { RESOURCES } from "@/lib/resources";
 import CliInstall from "@/routes/CliInstall";
+import DatabaseEditor from "@/routes/DatabaseEditor";
+import DatabaseLayout from "@/routes/DatabaseLayout";
+import DatabaseOverview from "@/routes/DatabaseOverview";
+import Databases from "@/routes/Databases";
+import DatabaseTables from "@/routes/DatabaseTables";
 import Forbidden from "@/routes/Forbidden";
 import Login from "@/routes/Login";
 import OauthAuthorize from "@/routes/OauthAuthorize";
@@ -26,7 +31,20 @@ export const router = createBrowserRouter([
     element: <DashboardLayout />,
     children: [
       { index: true, element: <Welcome /> },
-      ...RESOURCES.map((r) => ({
+      // database は実装済み(一覧 + 詳細 3 ページ)。他の種別は当面 ResourcePage の骨格。
+      { path: "databases", element: <Databases /> },
+      {
+        // 詳細の外殻(見出し + サブナビ)。子が 概要 / SQL / テーブル の 3 ページ。
+        path: "databases/:id",
+        element: <DatabaseLayout />,
+        children: [
+          { index: true, element: <DatabaseOverview /> },
+          { path: "editor", element: <DatabaseEditor /> },
+          { path: "tables", element: <DatabaseTables /> },
+          { path: "tables/:table", element: <DatabaseTables /> },
+        ],
+      },
+      ...RESOURCES.filter((r) => r.kind !== "database").map((r) => ({
         path: r.path.replace(/^\//, ""),
         element: <ResourcePage resource={r} />,
       })),
