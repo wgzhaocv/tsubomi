@@ -160,7 +160,7 @@ export function Tabs({
                   alt=""
                   aria-hidden
                   className={cn(
-                    "absolute -top-1 -right-[5px] size-[18px]",
+                    "absolute -top-1 right-[-5px] size-[18px]",
                     leafAnimation && "animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]",
                   )}
                 />

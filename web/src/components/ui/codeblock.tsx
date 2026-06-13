@@ -206,7 +206,7 @@ export function CodeBlock({
         className={cn(
           // 原典 codeBlockStyle:padding 20px 24px / fontSize 14 / lineHeight 1.7
           // / fontWeight 600 / color #e8d5bc / whiteSpace pre / overflow auto。
-          "m-0 overflow-auto px-6 py-5 text-[14px] leading-[1.7] font-semibold whitespace-pre text-[#e8d5bc] [tab-size:4]",
+          "m-0 overflow-auto px-6 py-5 text-[14px] leading-[1.7] font-semibold whitespace-pre text-[#e8d5bc] tab-4",
           MONO,
         )}
         style={preStyle}

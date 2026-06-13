@@ -193,7 +193,7 @@ export function Radio({
               />
               <svg
                 className={cn(
-                  "pointer-events-none absolute top-1/2 left-1/2 z-1 -translate-x-1/2 -translate-y-[54%]",
+                  "pointer-events-none absolute top-1/2 left-1/2 z-1 -translate-x-1/2 translate-y-[-54%]",
                   sz.check,
                 )}
                 viewBox="0 0 15 14"
