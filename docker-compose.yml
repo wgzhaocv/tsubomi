@@ -1,8 +1,16 @@
+# プラットフォーム本体。ホスト直走りの単機 PaaS なので host ネットワークで動かす:
+#   - 管制面 pg は infra 側で 127.0.0.1:5434 に loopback バインド(テナント隔離)。
+#     host ネットなら DATABASE_URL=127.0.0.1:5434 が dev(host で cargo)と
+#     deploy(このコンテナ)で同じ値のまま通る。
+#   - :9090 はそのままホストに出る(ports マッピング不要)。
+# どの VPS でも、その機の .env を置けば `just deploy` 一発で動く(host 固有値は
+# 全て .env 側 = DATABASE_URL / GOOGLE_* / TSUBOMI_SERVER_URL 等)。
 services:
   server:
     build: .
     image: tsubomi-server:latest
     container_name: tsubomi-server
     restart: unless-stopped
-    ports:
-      - "9090:9090"
+    network_mode: host
+    env_file:
+      - .env
