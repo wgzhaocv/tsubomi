@@ -301,6 +301,9 @@
   padding-top: 0.11em;
   color: var(--rt);
   text-shadow: 0 0.04em 0.08em rgba(0, 0, 0, 0.05);
+  /* 飘带本体は user-select:none(装飾層を含めて選択させない)だが、文字だけは
+     選択可能にする(コピーしたい要望)。装飾層は空 span なので none のまま。 */
+  user-select: text;
 }
 .tbm-ribbon-back {
   position: absolute;

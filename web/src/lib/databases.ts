@@ -84,6 +84,24 @@ export function useDeleteDatabase() {
   });
 }
 
+// リネーム(表示名の変更のみ。接続文字列・dbname は不変)。一覧の名前が変わるので
+// 一覧を無効化する。
+export function useRenameDatabase(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string): Promise<Database> => {
+      const res = await fetch(`/api/databases/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as Database;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: dbKeys.all }),
+  });
+}
+
 // 接続文字列を都度取得する(秘密なのでキャッシュしない)。表示要求時のみ呼ぶ。
 export function useRevealUrl() {
   return useMutation({

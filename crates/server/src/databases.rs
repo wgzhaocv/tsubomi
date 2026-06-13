@@ -21,7 +21,7 @@ use futures_util::StreamExt;
 use sqlx::{Column, Connection, Executor, PgPool, Row};
 use tsubomi_shared::{
     ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, QueryResultSet,
-    ResourceDto,
+    RenameDatabaseReq, ResourceDto,
 };
 use uuid::Uuid;
 
@@ -57,7 +57,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/resources", get(list_resources))
         .route("/databases", get(list).post(create))
-        .route("/databases/{id}", get(get_one).delete(delete))
+        .route("/databases/{id}", get(get_one).patch(rename).delete(delete))
         .route("/databases/{id}/url", get(url))
         .route("/databases/{id}/rotate", post(rotate))
         .route("/databases/{id}/query", post(query))
@@ -258,6 +258,42 @@ pub async fn list(
     .await?;
 
     Ok(Json(rows.into_iter().map(db_row_to_dto).collect()))
+}
+
+/// `PATCH /api/databases/:id`:表示名のリネーム。display_name(resources)だけ更新し、
+/// pg_dbname / role / 接続文字列は一切変えない(リネームは UI 上のラベル変更)。
+pub async fn rename(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RenameDatabaseReq>,
+) -> AppResult<Json<DatabaseDto>> {
+    let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+
+    // 所有者の自分の DB のみ更新。RETURNING で更新後の行をそのまま DTO 化する。
+    let row: Option<DbRow> = sqlx::query_as(
+        "UPDATE resources r SET display_name = $1
+           FROM database_details d
+          WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'database' AND r.deleted_at IS NULL
+            AND d.resource_id = r.id
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at",
+    )
+    .bind(&display_name)
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let row = row.ok_or(AppError::NotFound)?;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.rename",
+        id,
+        json!({ "display_name": display_name }),
+    )
+    .await;
+    Ok(Json(db_row_to_dto(row)))
 }
 
 /// `GET /api/databases/:id`:単体。

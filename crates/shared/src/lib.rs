@@ -106,6 +106,12 @@ pub struct CreateDatabaseReq {
     pub name: String,
 }
 
+/// `PATCH /api/databases/:id`:表示名のリネーム(接続文字列・dbname は不変)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameDatabaseReq {
+    pub name: String,
+}
+
 /// `GET /api/databases/:id/url` / `POST /api/databases/:id/rotate` のレスポンス。
 /// 外部(human role)接続文字列。**パスワードそのもの** — 表示箇所で警告すること。
 #[derive(Debug, Clone, Serialize, Deserialize)]
