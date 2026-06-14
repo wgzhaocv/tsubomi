@@ -581,6 +581,24 @@ CLI/UI はこれを明示(「反映には再デプロイ」)。
 **やらないこと(決定 #5)**:env / 注入のドリフトは追わない。reconcile は「走るべきが
 走っている」だけを見る。
 
+**実装メモ(S8 で確定 / 積み残し)** — 実装は `crates/server/src/services/reconcile.rs`:
+
+- reconcile は **存在収束 + 孤児掃除**に純化。**nonce 掃除 / purge は gc.rs**(ハウスキーピング)へ
+  寄せた(purge は既に gc の sweep_trash。reconcile は容器/route 収束だけを持つ = 関心分離)。
+- 存在収束の対象は単なる `desired_state='running'` ではなく **`phase='running'`** に絞る = **churn 防止**:
+  壊れたイメージを毎パス再起動し続けない(復活失敗 → run_digest が `phase='failed'` → 次パス対象外 =
+  自己沈静化)。「存在」= コンテナ state ∈ {running, restarting}(restarting は restart policy に委ね
+  手出ししない。デプロイ時の厳格 `is_live`=restart_count==0 とは別の緩い判定)。
+- 孤児掃除は 3 種:(a) DB に生きた行の無い `tsubomi.managed` コンテナ → stop+remove+route 削除、
+  (b) `service_id` ラベル欠落の管理コンテナ → 個別削除、(c) 対応 service の無い `svc-<id>.yml` → 削除。
+- **stop レース防御**:reconcile の復活は `DeployTrigger::Reconcile` で run_digest を呼び、run_digest は
+  `deploy_lock` 取得後に desired/phase を再取得し、running でなければ起動しない(候補取得とロック取得の
+  間に stop が割り込んでも停止済み service を蘇らせない。commit_success が desired=running に戻すのを防ぐ)。
+- 積み残し(後相・低影響):① 1 パスで service 毎に `list_containers`(N+1)— 単機・少数では無視可、
+  数が増えたら 1 スナップショット + メモリ照合へ。② live service の余剰コンテナ掃除(deploy の
+  `remove_others` 失敗で旧が残るケース)は未対応 — route は正を指したまま=無害。正コンテナの識別子
+  (現行コンテナ列など)が要るので別チャンクで。
+
 ---
 
 ## 9. API 面 / CLI(第 4 層 §6 の M3 分を確定)
@@ -651,13 +669,17 @@ Button/Dialog を踏襲(frontend 規約)。
 
 ## 12. 完了判定(第 4 層 §9 の M3 行を満たす)
 
-- [ ] `tbm service create x` → `git push` → **30 秒以内**に `<sub>.<ドメイン>` が開く
-- [ ] `tbm inject <db> --into x` + 再デプロイ → コンテナ内 `$DATABASE_URL` が app role の内部文字列で、実際に接続できる
-- [ ] `tbm inject <volume> --into x --mount /data` → コンテナ内 `/data` に volume が見える
-- [ ] `tbm service stop/start/logs/status` が期待通り
-- [ ] ホスト再起動(or `docker rm` で全コンテナ消す)→ reconcile が desired=running を自動復活
-- [ ] 孤児コンテナ(DB に行が無い `tsubomi.managed` コンテナ)が reconcile で消える
-- [ ] deploy hook:署名不一致 401 / ts 範囲外 400 / nonce 重複 409 / 正常 202
-- [ ] `tbm deploy --local` が GitHub 非依存で同じ結果を出す
-- [ ] `tbm service rollback <deploy-id>` が旧 digest を再起動(再 build なし)
+> 現状(S1–S8 機能完成、dev e2e 済み):機能・デプロイ経路・注入・lifecycle・reconcile は緑。
+> **残りは prod-infra**(GH Actions buildx 双架 + 本番 traefik/LE/registry/pgbouncer)— ✗ の 2 行が
+> それに依存する(dev は registry 到達不可 / 本番ドメイン・LE 無しのため end-to-end を張れない)。
+
+- [ ] `tbm service create x` → `git push` → **30 秒以内**に `<sub>.<ドメイン>` が開く ← **prod-infra 待ち**(デプロイ経路・file provider ルーティングは S3–S5 で実装・dev の `<sub>.localhost` で検証済み。GitHub push→本番ドメインの end-to-end が残り)
+- [x] `tbm inject <db> --into x` + 再デプロイ → コンテナ内 `$DATABASE_URL` が app role の内部文字列で、実際に接続できる(S6)
+- [x] `tbm inject <volume> --into x --mount /data` → コンテナ内 `/data` に volume が見える(S6)
+- [x] `tbm service stop/start/logs/status` が期待通り(S7a)
+- [x] ホスト再起動(or `docker rm` で全コンテナ消す)→ reconcile が desired=running を自動復活(S8、dev e2e 済み)
+- [x] 孤児コンテナ(DB に行が無い `tsubomi.managed` コンテナ)が reconcile で消える(S8)
+- [x] deploy hook:署名不一致 401 / ts 範囲外 400 / nonce 重複 409 / 正常 202(S4/S5)
+- [ ] `tbm deploy --local` が GitHub 非依存で同じ結果を出す ← 実装済み(S5)だが **dev は buildx コンテナドライバが host registry に届かず未検証。prod registry で確認**
+- [x] `tbm service rollback <deploy-id>` が旧 digest を再起動(再 build なし)(S7a)
 ```

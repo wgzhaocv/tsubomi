@@ -17,11 +17,11 @@ app をデプロイし、データベース / ボリュームを作る。
 ディスク)をそこへ収束させる**。注入はバインディングだけを保存し、値はコンテナ
 起動の瞬間に解決する(だから rotate 後は再デプロイして初めて効く — これは仕様)。
 
-## フェーズ(現在地:M2 完了)
+## フェーズ(現在地:M3 service 機能完成 — prod-infra 残り)
 
-M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → **M2 volume(完了)** → M3 service
-(デプロイ経路+注入)→ M4 ガバナンス → M5 valkey。各フェーズ単体で使える状態にする。
-マイグレーションはフェーズ毎に追加。
+M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → **M2 volume(完了)** →
+**M3 service(機能完成 S1–S8、残り = prod-infra)** → M4 ガバナンス → M5 valkey。
+各フェーズ単体で使える状態にする。マイグレーションはフェーズ毎に追加。
 
 M1 で入ったもの:`resources` スーパーテーブル + `database_details`/`database_roles`
 + `audit_log`;pg-tenant(ユーザ DB)+ pgbouncer(外部入口、auth_query、client TLS);DB 作成/
@@ -37,6 +37,20 @@ dev macOS=canonicalize フォールバック、`..`/絶対/NUL/symlink 越えを
 ファイルブラウザ(**パスは URL の splat に持つ** `/volumes/:id/files/<path>`)+ `tbm volume`
 フル + ゴミ箱(trash へ mv / 復元 / 完全削除)の web/CLI 入口 + volumes の日次 rsync。
 **注入(service への mount + `STORAGE_PATH`)は M3** — 動詞「注入」の相手は service。
+
+M3 で入ったもの(S1–S8):`service_details`/`deploys`/`injections`/`service_env`/
+`deploy_nonces`;**service リソース一式** — create + GitHub オーケストレーション(CLI が
+ユーザ自身の `gh` で repo/secret/workflow を設定。平台は GitHub に触れない)、deploy hook
+(HMAC=権限・nonce・digest ピン留め)+ 非同期パイプライン(bollard、**start-first swap** =
+新コンテナを起こし存活確認 → route 切替 → 旧削除。失敗時は旧版を温存 §6.4)、**注入**
+(database→app role の内部接続文字列 / volume→bind mount + `STORAGE_PATH` / 静的 env。値は
+**コンテナ起動の瞬間に解決** = rotate 後は再デプロイで効く)、lifecycle(start/stop/logs/
+delete→ゴミ箱/rollback)、web 詳細ページ(概要/デプロイ/注入/環境変数/ログ)、**reconcile**
+(`services/reconcile.rs`、起動時フル + 30s:存在収束 + 孤児掃除。`restart=unless-stopped` が
+第一の保険、これが第二)。ルーティングは **traefik file provider**(`svc-<id>.yml`。docker
+provider は Docker Engine 29 で壊れるため不使用)。**残り = prod-infra**:GH Actions buildx
+双架(arm64+amd64 manifest list)+ 本番 traefik(:443 + LE + 会社 IP 許可リスト)/ pgbouncer /
+registry 入口の落とし込み。
 
 ## 重要な約束事
 
