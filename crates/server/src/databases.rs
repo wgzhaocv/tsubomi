@@ -88,6 +88,33 @@ pub(crate) async fn audit(
     }
 }
 
+/// owner の代理操作用:`target_user`(誰の資源を触ったか)も埋める audit。
+/// 通常の `audit` は target_user を埋めない(本人操作なので actor = 所有者)。owner が他人の
+/// 資源を stop/delete する「最後の砦」(M4 S3)はここを使い、誰の何を動かしたかを残す。
+pub(crate) async fn audit_with_target(
+    db: &PgPool,
+    actor: Uuid,
+    action: &str,
+    target_resource: Uuid,
+    target_user: Uuid,
+    detail: serde_json::Value,
+) {
+    let r = sqlx::query(
+        "INSERT INTO audit_log (actor_id, action, target_resource, target_user, detail)
+         VALUES ($1,$2,$3,$4,$5)",
+    )
+    .bind(actor)
+    .bind(action)
+    .bind(target_resource)
+    .bind(target_user)
+    .bind(detail)
+    .execute(db)
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(error = ?e, action, "audit insert failed");
+    }
+}
+
 // ===== 共通の取得 =====
 
 /// 所有者チェック付きで human role の (pg_dbname, pg_role, password_enc) を引く。
@@ -512,14 +539,40 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    // 所有権チェック(他人の DB は 404 に収束)。実体の削除は soft_delete に委譲。
+    let owned: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM resources
+          WHERE id = $1 AND user_id = $2 AND kind = 'database' AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    owned.ok_or(AppError::NotFound)?;
+
+    let dbname = soft_delete(&state, id).await?;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.delete",
+        id,
+        json!({ "pg_dbname": dbname }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// database のソフト削除(dump → ゴミ箱 → DROP → deleted_at/trash_meta)。**所有権も audit も
+/// しない素の操作** — ユーザ口(`delete`)と owner 代理(admin の最後の砦)が共有する(§5.2)。
+/// id で引く(owner はどのユーザの DB も対象にできる)。pg_dbname を返す(audit detail 用)。
+pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<String> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT d.pg_dbname
            FROM resources r
            JOIN database_details d ON d.resource_id = r.id
-          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+          WHERE r.id = $1 AND r.kind = 'database' AND r.deleted_at IS NULL",
     )
     .bind(id)
-    .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await?;
     let dbname = row.ok_or(AppError::NotFound)?.0;
@@ -546,16 +599,7 @@ pub async fn delete(
     .bind(meta)
     .execute(&state.db)
     .await?;
-
-    audit(
-        &state.db,
-        Some(auth.user_id),
-        "db.delete",
-        id,
-        json!({ "pg_dbname": dbname }),
-    )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(dbname)
 }
 
 /// `GET /api/resources`:4 種をフラットに(dashboard 用。M1 では database のみ存在)。

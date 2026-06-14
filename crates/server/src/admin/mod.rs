@@ -10,14 +10,18 @@ use crate::auth::AuthCtx;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 
+mod actions;
 mod overview;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/overview", get(overview::overview))
         .route("/admin/ranking", get(overview::ranking))
+        // 最後の砦(S3):owner が他人の資源を停止 / 削除(二段確認 + 検証コード)。
+        .route("/admin/resources/{id}/stop", post(actions::stop))
+        .route("/admin/resources/{id}/delete", post(actions::delete))
 }
 
 /// admin ゲート:owner 身分 **かつ** session 由来(Bearer cli_token は拒否)。

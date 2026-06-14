@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { RESOURCES } from "@/lib/resources";
 
@@ -71,3 +71,31 @@ export function useAdminRanking() {
 export const KIND_LABEL: Record<string, string> = Object.fromEntries(
   RESOURCES.filter((r) => r.kind).map((r) => [r.kind as string, r.label]),
 );
+
+// 最後の砦(S3):owner が他人の資源を停止 / 削除。二段確認 —
+//   1 回目(code なし)→ サーバが owner にメールでコードを送り { code_required: true }。
+//   2 回目(code あり)→ 検証して実行し { code_required: false }(実行済みなので一覧を無効化)。
+export type AdminAction = "stop" | "delete";
+export type AdminActionInput = { id: string; action: AdminAction; code?: string };
+
+export function useAdminAction() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, action, code }: AdminActionInput): Promise<{ code_required: boolean }> => {
+      const res = await fetch(`/api/admin/resources/${id}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code ?? null }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as { code_required: boolean };
+    },
+    onSuccess: (data) => {
+      // 実行されたのは 2 段目(code_required=false)だけ。1 段目はコード送信のみ = 状態不変。
+      if (!data.code_required) {
+        qc.invalidateQueries({ queryKey: adminKeys.ranking });
+        qc.invalidateQueries({ queryKey: adminKeys.overview });
+      }
+    },
+  });
+}

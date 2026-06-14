@@ -250,7 +250,8 @@ owner 専用、跨ユーザ。**2 段**:
   - require_owner
   - DELETE FROM admin_action_codes WHERE code_hash=sha256(code) AND actor_id=owner
     AND resource_id=:id AND action=$ AND expires_at>now() RETURNING 1   (単回消費)
-    無 → 401 {error:"コードが無効か期限切れ。もう一度請求してください", code:"unauthorized"}
+    無 → 400(検証エラー。コードが無効/期限切れは「認証(401)」ではなく不正な入力)。
+         加えて総当たり防止に同一 (actor,resource,action) の未使用コードを焼く(再請求=再メールが必要)。
   - 実行(§5.2)→ audit_with_target(actor=owner, action='owner.stop_service' 等,
     target_resource=:id, target_user=対象ユーザ, detail)
   - 200 結果 DTO

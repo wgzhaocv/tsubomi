@@ -276,6 +276,38 @@ async fn stop_containers(state: &AppState, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// service の停止(deploy ロック取得 + コンテナ停止 + route 削除)。**所有権チェックも audit も
+/// しない素の操作** — ユーザ口(`stop`)と owner 代理(admin の最後の砦)が共有する(§5.2)。
+pub(crate) async fn stop_service(state: &AppState, id: Uuid) -> AppResult<()> {
+    // 並行 deploy / start と直列化(コンテナ / route の競合防止)。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+    stop_containers(state, id).await
+}
+
+/// service のソフト削除(停止 → deleted_at/purge_after)。**所有権も audit もしない素の操作**。
+/// lock を soft-delete まで保持(stop と delete の間に start が割り込んで孤児コンテナを作るのを防ぐ)。
+pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<()> {
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+    stop_containers(state, id).await?;
+    // service は永続データを持たない(コンテナは deploy で再生成)→ trash_meta は無し。
+    // **`deleted_at IS NULL` を条件に**:候補取得から実行までの間に並行削除が割り込んでも、
+    // 既削除を二度消して「成功」audit を出さない(rows_affected==0 → NotFound)。lock で直列化
+    // されるので、競合した 2 つの削除のうち後者がここで弾かれる。
+    let res = sqlx::query(
+        "UPDATE resources SET deleted_at = now(), purge_after = now() + interval '3 days'
+          WHERE id = $1 AND kind = 'service' AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
 /// `POST /api/services/:id/stop`:コンテナ停止 + route 削除(desired_state=stopped）。
 pub async fn stop(
     auth: AuthCtx,
@@ -283,10 +315,7 @@ pub async fn stop(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
-    // 並行 deploy / start と直列化(コンテナ / route の競合防止)。
-    let lock = state.deploy_lock(id);
-    let _guard = lock.lock().await;
-    stop_containers(&state, id).await?;
+    stop_service(&state, id).await?;
     audit(&state.db, Some(auth.user_id), "service.stop", id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -316,19 +345,7 @@ pub async fn delete_service(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
-    // lock を soft-delete まで保持(stop と delete の間に start が割り込んで孤児コンテナを
-    // 作るのを防ぐ)。stop_containers が phase=stopped にするので、復元後の状態も正確。
-    let lock = state.deploy_lock(id);
-    let _guard = lock.lock().await;
-    stop_containers(&state, id).await?;
-    // service は永続データを持たない(コンテナは deploy で再生成)→ trash_meta は無し。
-    sqlx::query(
-        "UPDATE resources SET deleted_at = now(), purge_after = now() + interval '3 days'
-          WHERE id = $1",
-    )
-    .bind(id)
-    .execute(&state.db)
-    .await?;
+    soft_delete(&state, id).await?;
     audit(&state.db, Some(auth.user_id), "service.delete", id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }

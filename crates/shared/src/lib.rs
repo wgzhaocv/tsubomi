@@ -489,6 +489,20 @@ pub struct AdminOverviewResp {
     pub kinds: Vec<AdminOverviewKind>,
 }
 
+/// `POST /api/admin/resources/:id/{stop|delete}`(最後の砦・S3)のリクエスト。
+/// code 無し = 1 段目(コードを生成して owner にメール)、code 有り = 2 段目(検証して実行)。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AdminActionReq {
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+/// 同レスポンス。`code_required=true` = 1 段目(メールのコードを入れて再送)、false = 実行済み。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminActionResp {
+    pub code_required: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -337,7 +337,34 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let host_path = fetch_volume_path(&state.db, auth.user_id, id).await?;
+    // 所有権チェック(他人の volume は 404)。実体の mv は soft_delete に委譲。
+    fetch_volume_path(&state.db, auth.user_id, id).await?;
+    let host_path = soft_delete(&state, id).await?;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "volume.delete",
+        id,
+        json!({ "host_path": host_path }),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// volume のソフト削除(実体を trash へ mv → deleted_at/trash_meta)。**所有権も audit も
+/// しない素の操作** — ユーザ口(`delete`)と owner 代理(admin の最後の砦)が共有する(§5.2)。
+/// id で引く(owner はどのユーザの volume も対象にできる)。host_path 文字列を返す(audit 用)。
+pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<String> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT d.host_path
+           FROM resources r
+           JOIN volume_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.kind = 'volume' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let host_path = PathBuf::from(row.ok_or(AppError::NotFound)?.0);
     let trash_path = state.config.trash_dir.join(id.to_string());
 
     // trash 親を用意し、実体を mv。実体が既に無ければ(不整合)mv はスキップして行だけ畳む。
@@ -361,16 +388,7 @@ pub async fn delete(
     .bind(meta)
     .execute(&state.db)
     .await?;
-
-    audit(
-        &state.db,
-        Some(auth.user_id),
-        "volume.delete",
-        id,
-        json!({ "host_path": host_path.to_string_lossy() }),
-    )
-    .await;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(host_path.to_string_lossy().into_owned())
 }
 
 // ===== ファイル API(全て safe_path を通す)=====
