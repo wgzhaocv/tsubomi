@@ -13,8 +13,14 @@ export type Me = {
   role: "user" | "owner";
 };
 
+// ログイン画面が表示する公開情報(許可された会社ドメイン)。
+export type AuthInfo = {
+  allowed_domains: string[];
+};
+
 export const authKeys = {
   me: ["auth", "me"] as const,
+  info: ["auth", "info"] as const,
 };
 
 export async function fetchMe(): Promise<Me | null> {
@@ -22,6 +28,12 @@ export async function fetchMe(): Promise<Me | null> {
   if (res.status === 401) return null; // 未ログインはエラーではなく null
   if (!res.ok) throw new Error(`/api/auth/me failed: ${res.status}`);
   return (await res.json()) as Me;
+}
+
+export async function fetchAuthInfo(): Promise<AuthInfo> {
+  const res = await fetch("/api/auth/info");
+  if (!res.ok) throw new Error(`/api/auth/info failed: ${res.status}`);
+  return (await res.json()) as AuthInfo;
 }
 
 async function postLogout(): Promise<void> {
@@ -34,6 +46,17 @@ export function useMeQuery() {
     queryKey: authKeys.me,
     queryFn: fetchMe,
     staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+// 許可された会社ドメイン。ログイン画面でのみ使う公開情報。めったに変わらない
+// ので長めに staleTime を取る。
+export function useAuthInfoQuery() {
+  return useQuery({
+    queryKey: authKeys.info,
+    queryFn: fetchAuthInfo,
+    staleTime: 60 * 60_000,
     retry: false,
   });
 }

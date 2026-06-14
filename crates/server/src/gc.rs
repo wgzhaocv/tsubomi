@@ -2,7 +2,7 @@
 //!
 //! - 認証まわりの期限切れ掃除(sessions / oauth_states / authcodes)
 //! - ゴミ箱の期限到来(purge_after)→ 物理削除(trash::purge_resource を共有)
-//! - 日次バックアップ(各テナント DB + 管制面の pg_dump、7 日保持)
+//! - 日次バックアップ(各テナント DB + 管制面の pg_dump + volumes の rsync、7 日保持)
 //!
 //! M3 でコンテナの存在収束・孤児掃除がここに合流する。
 
@@ -138,6 +138,13 @@ async fn run_backup(state: &AppState) -> anyhow::Result<()> {
         tracing::warn!(error = ?e, "gc: platform backup failed");
     }
 
+    // volumes の rsync スナップショット(§8)。失敗は log のみ(他を止めない)。
+    if state.config.volumes_dir.exists()
+        && let Err(e) = rsync_dir(&state.config.volumes_dir, &dir.join("volumes")).await
+    {
+        tracing::warn!(error = ?e, "gc: volumes backup failed");
+    }
+
     prune_old_backups(state);
     tracing::info!(
         date,
@@ -145,6 +152,25 @@ async fn run_backup(state: &AppState) -> anyhow::Result<()> {
         tenant_ok = ok,
         "gc: backup done"
     );
+    Ok(())
+}
+
+/// `rsync -a` でディレクトリ全体をバックアップ先へ複製する。pg_dump と同様に
+/// 外部コマンドを TCP/ファイル経由で叩く(docker exec ではない)。
+async fn rsync_dir(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    // 末尾スラッシュ = 「src の中身を dest 直下へ」。--delete は付けない
+    // (同日の再実行で消えても、削除済みファイルを残す方がバックアップとして保守的)。
+    let src_arg = format!("{}/", src.display());
+    let status = tokio::process::Command::new("rsync")
+        .arg("-a")
+        .arg(&src_arg)
+        .arg(dest)
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("rsync が異常終了しました: {status}");
+    }
     Ok(())
 }
 

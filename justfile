@@ -1,12 +1,14 @@
 default:
     @just --list
 
-# バックエンド + フロントエンドを同時起動。Ctrl-C で両方止まる
+# バックエンド + フロントエンドを同時起動。Ctrl-C で両方止まる。
+# サーバは cargo watch で自動再ビルド+再起動(Rust を触ったら勝手に反映される)。
+# web は vite が HMR するので watch 不要。
 dev:
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'kill 0' EXIT
-    cargo run -p tsubomi-server &
+    cargo watch -w crates -x 'run -p tsubomi-server' &
     (cd web && bun run dev) &
     wait
 

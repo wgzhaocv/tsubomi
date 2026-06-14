@@ -36,6 +36,7 @@ pub enum AuthSource {
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
+        .route("/auth/info", get(google::info))
         .route("/auth/google/start", get(google::start))
         .route("/auth/google/callback", get(google::callback))
         .route("/oauth/token", post(oauth::token))

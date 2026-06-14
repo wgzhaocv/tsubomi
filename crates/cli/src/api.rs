@@ -1,5 +1,10 @@
 use anyhow::{Context, Result};
-use tsubomi_shared::{ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, Health, Me};
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
+use tsubomi_shared::{
+    ConnectionUrlResp, CreateDatabaseReq, CreateVolumeReq, DatabaseDto, Health, ListDirResp, Me,
+    MoveReq, RenameVolumeReq, TrashItemDto, VolumeDto,
+};
 
 pub const ME_PATH: &str = "/api/auth/me";
 
@@ -167,6 +172,243 @@ pub async fn db_rotate(
 pub async fn db_delete(c: &reqwest::Client, server_url: &str, token: &str, id: &str) -> Result<()> {
     send_ok(
         c.delete(format!("{server_url}/api/databases/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+// ============ M2 volume ============
+// `?path=` は reqwest の .query() で URL エンコードする(特殊文字・日本語名対応)。
+
+pub async fn volume_list(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+) -> Result<Vec<VolumeDto>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/volumes"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse volumes response")
+}
+
+pub async fn volume_create(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<VolumeDto> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/volumes"))
+            .bearer_auth(token)
+            .json(&CreateVolumeReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse create response")
+}
+
+pub async fn volume_rename(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Result<VolumeDto> {
+    let resp = send_ok(
+        c.patch(format!("{server_url}/api/volumes/{id}"))
+            .bearer_auth(token)
+            .json(&RenameVolumeReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse rename response")
+}
+
+pub async fn volume_delete(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(format!("{server_url}/api/volumes/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+/// `/api/volumes/<id><sub>?path=<encoded>` の URL を組む。reqwest の query()
+/// (この最小ビルドでは無効)を使わず url crate でエンコードする
+/// (特殊文字・日本語名を安全に query 値へ)。
+fn vol_query_url(server_url: &str, id: &str, sub: &str, path: &str) -> Result<url::Url> {
+    let mut u = url::Url::parse(&format!("{server_url}/api/volumes/{id}{sub}"))
+        .context("invalid server url")?;
+    u.query_pairs_mut().append_pair("path", path);
+    Ok(u)
+}
+
+pub async fn volume_ls(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    path: &str,
+) -> Result<ListDirResp> {
+    let resp = send_ok(
+        c.get(vol_query_url(server_url, id, "/files", path)?)
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json().await.context("failed to parse ls response")
+}
+
+pub async fn volume_mkdir(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    path: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(vol_query_url(server_url, id, "/dirs", path)?)
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn volume_rm(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    path: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(vol_query_url(server_url, id, "/files", path)?)
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn volume_move(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/volumes/{id}/move"))
+            .bearer_auth(token)
+            .json(&MoveReq {
+                from: from.to_owned(),
+                to: to.to_owned(),
+            }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// ローカルファイルをストリームで PUT(全体をメモリに載せない)。返り値は送信バイト数。
+pub async fn volume_upload(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    path: &str,
+    local_file: &str,
+) -> Result<u64> {
+    let file = tokio::fs::File::open(local_file)
+        .await
+        .with_context(|| format!("ローカルファイルを開けません: {local_file}"))?;
+    let len = file
+        .metadata()
+        .await
+        .map(|m| m.len())
+        .with_context(|| format!("ローカルファイルの情報を取得できません: {local_file}"))?;
+    // ReaderStream でファイルを逐次読みし、reqwest のストリーム body にする(chunked)。
+    let body = reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+    send_ok(
+        c.put(vol_query_url(server_url, id, "/files", path)?)
+            .bearer_auth(token)
+            .body(body),
+    )
+    .await?;
+    Ok(len)
+}
+
+/// ダウンロードを dest へ逐次書き込み(全体をメモリに載せない)。返り値は書込バイト数。
+pub async fn volume_download(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    path: &str,
+    dest_local: &str,
+) -> Result<u64> {
+    let resp = send_ok(
+        c.get(vol_query_url(server_url, id, "/files/download", path)?)
+            .bearer_auth(token),
+    )
+    .await?;
+    let mut file = tokio::fs::File::create(dest_local)
+        .await
+        .with_context(|| format!("ローカルに作成できません: {dest_local}"))?;
+    let mut stream = resp.bytes_stream();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("ダウンロード読み取りエラー")?;
+        file.write_all(&chunk).await?;
+        total += chunk.len() as u64;
+    }
+    file.flush().await?;
+    Ok(total)
+}
+
+// ============ ゴミ箱(M1/M2 共通)============
+
+pub async fn trash_list(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+) -> Result<Vec<TrashItemDto>> {
+    let resp = send_ok(c.get(format!("{server_url}/api/trash")).bearer_auth(token)).await?;
+    resp.json().await.context("failed to parse trash response")
+}
+
+pub async fn trash_restore(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/trash/{id}/restore"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn trash_purge(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(format!("{server_url}/api/trash/{id}"))
             .bearer_auth(token),
     )
     .await?;

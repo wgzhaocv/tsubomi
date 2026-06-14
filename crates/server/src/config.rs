@@ -46,6 +46,14 @@ pub struct Config {
     /// pg_dump / psql は TENANT_ADMIN_URL 経由で TCP 直結する(docker exec ではない)。
     pub backup_dir: PathBuf,
     pub trash_dir: PathBuf,
+
+    // ===== M2 volume =====
+    /// volume 実体の置き場(server ホスト上)。各 volume は
+    /// `<volumes_dir>/<user_id>/<volume_id>/` の假根サンドボックス。
+    pub volumes_dir: PathBuf,
+    /// ファイルアップロードの 1 リクエスト上限(バイト)。無制限だと
+    /// メモリ/ディスクを一撃で食えるので硬上限を被せる(磁盘 quota は M4)。
+    pub max_upload_bytes: usize,
 }
 
 /// master key のラッパ。Config は Debug 派生なので、生鍵が `{:?}` で漏れないように
@@ -146,6 +154,14 @@ impl Config {
         let trash_dir = std::env::var("TSUBOMI_TRASH_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/trash"));
+        let volumes_dir = std::env::var("TSUBOMI_VOLUMES_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/volumes"));
+        // 既定 100 MiB。env で上書き可(将来の磁盘 quota とは別レイヤの即時防御)。
+        let max_upload_bytes: usize = std::env::var("TSUBOMI_MAX_UPLOAD_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100 * 1024 * 1024);
 
         Ok(Self {
             bind_addr,
@@ -166,6 +182,8 @@ impl Config {
             master_key,
             backup_dir,
             trash_dir,
+            volumes_dir,
+            max_upload_bytes,
         })
     }
 }

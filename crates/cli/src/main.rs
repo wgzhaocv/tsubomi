@@ -47,6 +47,16 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
+    /// ボリューム(作成 / 一覧 / 削除 + ファイル操作 ls/put/get/rm/mkdir/mv)
+    Volume {
+        #[command(subcommand)]
+        action: commands::volume::VolumeCmd,
+    },
+    /// ゴミ箱(一覧 / 復元 / 完全削除)— 4 種リソース共通
+    Trash {
+        #[command(subcommand)]
+        action: commands::trash::TrashCmd,
+    },
     /// 現在の認証ユーザを表示
     Whoami,
     /// ローカル設定を削除(サーバ側トークンは失効しない)
@@ -93,6 +103,8 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
+        Cmd::Volume { action } => commands::volume::run(action, cli.server, cli.token, out).await,
+        Cmd::Trash { action } => commands::trash::run(action, cli.server, cli.token, out).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,
         Cmd::Logout => commands::logout::run(cli.server, out).await,
         Cmd::Health => commands::health::run(cli.server, out).await,

@@ -70,6 +70,15 @@ pub struct Health {
     pub version: String,
 }
 
+/// `GET /api/auth/info` のレスポンスボディ。未ログインでも読める公開情報で、
+/// ログイン画面が「どの会社ドメインで入れるか」を表示するために使う。
+/// 秘密ではない(誰でもログイン可能なドメインは知れるべき情報)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthInfo {
+    /// ログインを許可された Google Workspace ドメイン(`TSUBOMI_ALLOWED_HD`)。
+    pub allowed_domains: Vec<String>,
+}
+
 /// `GET /api/auth/me` のレスポンスボディ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Me {
@@ -165,6 +174,68 @@ pub struct TrashItemDto {
     pub deleted_at: DateTime<Utc>,
     #[serde(default)]
     pub purge_after: Option<DateTime<Utc>>,
+}
+
+// ============ M2 volume(server ⇄ CLI / web の単一契約)============
+
+/// `GET /api/volumes` の各要素 / `POST /api/volumes` のレスポンス。
+/// volume は顶层リソース。host_path(物理パス)は公開しない — 假根の中だけを見せる。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeDto {
+    pub id: Uuid,
+    /// ユーザの自由名(改名は host_path に触れない)。
+    pub display_name: String,
+    /// 匿名番号(user+kind 内連番):volume1/2…
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /api/volumes` のリクエストボディ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateVolumeReq {
+    pub name: String,
+}
+
+/// `PATCH /api/volumes/:id`:表示名のリネーム(host_path は不変)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameVolumeReq {
+    pub name: String,
+}
+
+/// ディレクトリ内の 1 エントリ(`GET /api/volumes/:id/files`)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntryDto {
+    pub name: String,
+    pub is_dir: bool,
+    /// ファイルのバイト数(ディレクトリは 0)。
+    pub size: u64,
+    /// 最終更新時刻(取得不能なら None)。
+    #[serde(default)]
+    pub modified: Option<DateTime<Utc>>,
+}
+
+/// `GET /api/volumes/:id/files?path=` のレスポンス(ディレクトリ列挙)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListDirResp {
+    /// 假根からの正規化済み相対パス(root は "")。
+    pub path: String,
+    pub entries: Vec<FileEntryDto>,
+}
+
+/// `POST /api/volumes/:id/move`:同一 volume 内の rename / move。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveReq {
+    pub from: String,
+    pub to: String,
+}
+
+/// `GET /api/volumes/:id/usage`:卷の使用量(概要ページ用)。假根を再帰的に走査して
+/// 集計する(symlink は辿らない)。一覧では出さない — 全卷を走査すると高コストなので。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeUsageDto {
+    pub size_bytes: u64,
+    pub file_count: u64,
+    pub dir_count: u64,
 }
 
 #[cfg(test)]

@@ -2,8 +2,10 @@ pub mod db;
 pub mod health;
 pub mod login;
 pub mod logout;
+pub mod trash;
 pub mod uninstall;
 pub mod update;
+pub mod volume;
 pub mod whoami;
 
 use anyhow::{Context, Result};

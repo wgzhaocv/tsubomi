@@ -16,8 +16,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
-use serde_json::json;
 use futures_util::StreamExt;
+use serde_json::json;
 use sqlx::{Column, Connection, Executor, PgPool, Row};
 use tsubomi_shared::{
     ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, QueryResultSet,
@@ -119,9 +119,12 @@ fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> Stri
 
 /// sqlx の UNIQUE 制約違反(23505)を Conflict(409)へ変換し、それ以外は Sqlx(500)
 /// のまま返す。重複(同名)を「内部エラー」に潰さず、原因の分かる 4xx にするため。
-fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> AppError {
+/// volumes など他のリソースモジュールからも再利用する。
+pub(crate) fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> AppError {
     match &e {
-        sqlx::Error::Database(db) if db.is_unique_violation() => AppError::Conflict(conflict_msg.into()),
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            AppError::Conflict(conflict_msg.into())
+        }
         _ => AppError::Sqlx(e),
     }
 }
@@ -234,7 +237,12 @@ async fn insert_rows(
     .bind(anon_seq)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| map_unique(e, format!("データベース名 '{display_name}' は既に使われています")))?;
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("データベース名 '{display_name}' は既に使われています"),
+        )
+    })?;
 
     sqlx::query("INSERT INTO database_details (resource_id, pg_dbname) VALUES ($1, $2)")
         .bind(id)
@@ -310,7 +318,12 @@ pub async fn rename(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| map_unique(e, format!("データベース名 '{display_name}' は既に使われています")))?;
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("データベース名 '{display_name}' は既に使われています"),
+        )
+    })?;
 
     let row = row.ok_or(AppError::NotFound)?;
     audit(
@@ -442,7 +455,11 @@ pub async fn query(
                     }
                     total += 1;
                     if rows.len() < MAX_QUERY_ROWS {
-                        rows.push((0..row.len()).map(|i| tenant::col_to_string(&row, i)).collect());
+                        rows.push(
+                            (0..row.len())
+                                .map(|i| tenant::col_to_string(&row, i))
+                                .collect(),
+                        );
                     }
                 }
             }

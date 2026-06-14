@@ -13,7 +13,12 @@ import Login from "@/routes/Login";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
 import ResourcePage from "@/routes/ResourcePage";
+import Trash from "@/routes/Trash";
 import UiGallery from "@/routes/UiGallery";
+import VolumeFileBrowser from "@/routes/VolumeFileBrowser";
+import VolumeLayout from "@/routes/VolumeLayout";
+import VolumeOverview from "@/routes/VolumeOverview";
+import Volumes from "@/routes/Volumes";
 import Welcome from "@/routes/Welcome";
 
 export const router = createBrowserRouter([
@@ -44,7 +49,24 @@ export const router = createBrowserRouter([
           { path: "tables/:table", element: <DatabaseTables /> },
         ],
       },
-      ...RESOURCES.filter((r) => r.kind !== "database").map((r) => ({
+      // volume も実装済み(一覧 + 詳細:概要 / ファイルブラウザ)。
+      // ファイルブラウザは splat で假根内のパスを URL にそのまま持つ
+      // (/volumes/:id/files/path/to/dir)。
+      { path: "volumes", element: <Volumes /> },
+      {
+        path: "volumes/:id",
+        element: <VolumeLayout />,
+        children: [
+          { index: true, element: <VolumeOverview /> },
+          { path: "files", element: <VolumeFileBrowser /> },
+          { path: "files/*", element: <VolumeFileBrowser /> },
+        ],
+      },
+      // ゴミ箱は専用ページ(他の未実装リソースは当面 ResourcePage の骨格)。
+      { path: "trash", element: <Trash /> },
+      ...RESOURCES.filter(
+        (r) => r.kind !== "database" && r.kind !== "volume" && r.path !== "/trash",
+      ).map((r) => ({
         path: r.path.replace(/^\//, ""),
         element: <ResourcePage resource={r} />,
       })),

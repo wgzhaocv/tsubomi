@@ -51,6 +51,24 @@ fn dump_path(meta: &Option<Value>, trash_dir: &std::path::Path, id: Uuid) -> Pat
         .unwrap_or_else(|| trash_dir.join(format!("{id}.sql")))
 }
 
+/// volume の trash_meta から (host_path, trash_path) を取り出す。
+/// host_path は復元先(無ければ None)、trash_path は実体の現在地
+/// (無ければ trash_dir/<id> に既定)。
+fn volume_paths(
+    meta: &Option<Value>,
+    trash_dir: &std::path::Path,
+    id: Uuid,
+) -> (Option<PathBuf>, PathBuf) {
+    let get = |key: &str| {
+        meta.as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    };
+    let trash = get("trash_path").unwrap_or_else(|| trash_dir.join(id.to_string()));
+    (get("host_path"), trash)
+}
+
 /// trash 一覧の行(id, kind, display_name, deleted_at, purge_after)。
 type TrashRow = (Uuid, String, String, DateTime<Utc>, Option<DateTime<Utc>>);
 
@@ -92,15 +110,22 @@ pub async fn restore(
 ) -> AppResult<StatusCode> {
     let (kind, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
 
-    match kind.as_str() {
-        "database" => restore_database(&state, id, &trash_meta).await?,
+    let action = match kind.as_str() {
+        "database" => {
+            restore_database(&state, id, &trash_meta).await?;
+            "db.restore"
+        }
+        "volume" => {
+            restore_volume(&state, id, &trash_meta).await?;
+            "volume.restore"
+        }
         other => {
             return Err(AppError::BadRequest(format!("復元未対応の種別: {other}")));
         }
-    }
+    };
 
-    // 物理復元が成功してから resource を active に戻す。**これを dump 削除より先に**:
-    // ここで失敗しても dump が残り、gc に消されず再 restore できる(データを失わない)。
+    // 物理復元が成功してから resource を active に戻す。**これを実体の片付けより先に**:
+    // ここで失敗しても実体が残り、gc に消されず再 restore できる(データを失わない)。
     sqlx::query(
         "UPDATE resources SET deleted_at = NULL, purge_after = NULL, trash_meta = NULL WHERE id = $1",
     )
@@ -108,10 +133,13 @@ pub async fn restore(
     .execute(&state.db)
     .await?;
 
-    // active 化が確定したので dump を片付ける(残っても無害なのでベストエフォート)。
-    let _ = std::fs::remove_file(dump_path(&trash_meta, &state.config.trash_dir, id));
+    // database のみ:active 化確定後に dump を片付ける(残っても無害なのでベストエフォート)。
+    // volume は実体を mv で戻し済みなので片付ける残骸は無い。
+    if kind == "database" {
+        let _ = std::fs::remove_file(dump_path(&trash_meta, &state.config.trash_dir, id));
+    }
 
-    audit(&state.db, Some(auth.user_id), "db.restore", id, json!({})).await;
+    audit(&state.db, Some(auth.user_id), action, id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -147,6 +175,47 @@ async fn restore_database(state: &AppState, id: Uuid, trash_meta: &Option<Value>
         // reload 失敗 → 作りかけの DATABASE を落とす(role は残す)。
         let _ = tenant::drop_database(&state.tenant_admin, &names.dbname).await;
         return Err(e);
+    }
+    Ok(())
+}
+
+/// volume の復元:trash へ mv した実体を host_path へ mv で戻す。
+/// active 化は呼び出し側(deleted_at クリア)が行う。
+async fn restore_volume(state: &AppState, id: Uuid, trash_meta: &Option<Value>) -> AppResult<()> {
+    let (host, trash) = volume_paths(trash_meta, &state.config.trash_dir, id);
+    let host =
+        host.ok_or_else(|| AppError::BadRequest("復元に必要な host_path がありません".into()))?;
+
+    // trash_meta 破損による枠外操作を防ぐ:host は volumes_dir 配下、trash は trash_dir 配下。
+    if !host.starts_with(&state.config.volumes_dir) {
+        return Err(AppError::BadRequest("復元先パスが不正です".into()));
+    }
+    if !trash.starts_with(&state.config.trash_dir) {
+        return Err(AppError::BadRequest("ゴミ箱パスが不正です".into()));
+    }
+
+    match (trash.exists(), host.exists()) {
+        // 通常:trash の実体を host へ戻す(親を用意してから)。
+        (true, false) => {
+            if let Some(parent) = host.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&trash, &host)?;
+        }
+        // 既に戻っている(active 化前に落ちた再試行)— 冪等に成功扱い。
+        (false, true) => {}
+        // 両方在る(異常)— 活きた host を壊さないため拒否。
+        (true, true) => {
+            return Err(AppError::Conflict(
+                "復元先に既存のデータがあるため復元できません".into(),
+            ));
+        }
+        // どちらも無い(異常)— データを失わないため作り直さず明示エラー。
+        (false, false) => {
+            return Err(AppError::BadRequest(
+                "ゴミ箱の実体が見つからないため復元できません".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -197,6 +266,17 @@ pub(crate) async fn purge_resource(
         // dump ファイルの削除はベストエフォート(残っても無害)。
         let dump = dump_path(trash_meta, &state.config.trash_dir, id);
         let _ = std::fs::remove_file(&dump);
+    } else if kind == "volume" {
+        // 実体(trash へ mv 済みのディレクトリ)を消す。失敗したら **行を消さない**
+        // (取り残し防止 — db と同じ規律)。存在しなければスキップ。
+        let (_host, trash) = volume_paths(trash_meta, &state.config.trash_dir, id);
+        // 破壊操作の前に trash_dir 配下であることを必ず確認(trash_meta 破損時の暴走防止)。
+        if !trash.starts_with(&state.config.trash_dir) {
+            return Err(AppError::BadRequest("ゴミ箱パスが不正です".into()));
+        }
+        if trash.exists() {
+            std::fs::remove_dir_all(&trash)?;
+        }
     }
 
     sqlx::query("DELETE FROM resources WHERE id = $1")

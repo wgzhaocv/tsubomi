@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
 use serde::Deserialize;
 use sqlx::PgPool;
-use tsubomi_shared::{Me, random_b64};
+use tsubomi_shared::{AuthInfo, Me, random_b64};
 use uuid::Uuid;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -43,6 +43,13 @@ struct UserInfo {
     /// Google Workspace の hosted domain。個人アカウントには `hd` が無く、
     /// 下のドメイン制限で弾かれる。
     hd: Option<String>,
+}
+
+/// 未ログインでも読める公開情報。ログイン画面が許可ドメインを表示するため。
+pub async fn info(State(state): State<AppState>) -> Json<AuthInfo> {
+    Json(AuthInfo {
+        allowed_domains: state.config.allowed_hds.clone(),
+    })
 }
 
 pub async fn start(State(state): State<AppState>) -> AppResult<Response> {

@@ -16,6 +16,7 @@ mod state;
 mod tenant;
 mod trash;
 mod validate;
+mod volumes;
 
 use config::Config;
 use state::AppState;

@@ -380,7 +380,8 @@ tbm service create|list|status|logs|start|stop|delete
 tbm deploy [--local]
 tbm db create|list|url|rotate|delete
 tbm db connect <db>                              # 無密码:CLI 認証済み → human 外部文字列 → psql を exec(PGPASSWORD、履歴に残さない)
-tbm volume create|list|delete
+tbm volume create|list|delete|rename
+tbm volume ls|put|get|rm|mkdir|mv <vol> …        # 假根内のファイル操作(全て safe_path を通る)
 tbm cache create|…                               # M5
 tbm inject <resource> --into <service> [--as ENV] [--mount /path]
 tbm eject <injection>
@@ -439,7 +440,7 @@ audit。以後の各フェーズが自分の detail テーブルを足す。
 |---|---|---|
 | **M0 基盤** ✅ | infra compose(管制面 pg。**registry は M3 に先送り**)+ マイグレーション(アイデンティティ)+ Google ログイン(hd 検証)+ session + owner 種付け + CLI token(PKCE、loopback ログイン)+ dashboard 骨格 + **tbm 配布系**(4 ターゲットビルド / インストーラ 3 種 / 不可変リリース / 残留物ゼロ uninstall) | ブラウザでログインできる;`tbm login` はブラウザの「許可する」だけで完了;本番(香橙派)で稼働中 |
 | **M1 database** ✅ | DB 作成(CREATE DATABASE + 制限付き role)/ rotate / 接続文字列ページ(警告付き)+ web SQL クライアント(その DB 自身の資格情報で接続)+ conn limit + 日次バックアップ開始 + ゴミ箱(ソフト削除 → pg_dump を trash に → 同じパスワードで再作成して復元) | 社内ネットから `psql <接続文字列>` が通る;rotate で旧文字列は即死;削除 → 復元が「消さなかったかのよう」 |
-| **M2 volume(ファイルシステム)** | ファイル API(openat2 トラバーサル防御、ハード境界)+ web ファイルブラウザ(擬似ルート)+ ゴミ箱(trash へ mv / 復元) | トラバーサルのテストケース全拒否;ファイル置き場として日常に使える |
+| **M2 volume(ファイルシステム)** ✅ | ファイル API(openat2 トラバーサル防御、ハード境界。dev は canonicalize フォールバック)+ web ファイルブラウザ(擬似ルート、パスは URL の splat に持つ)+ `tbm volume` フル(create/list/rename/delete + ls/put/get/rm/mkdir/mv)+ ゴミ箱(trash へ mv / 復元)の web/CLI 入口 + volumes の日次 rsync バックアップ | トラバーサルのテストケース全拒否;ファイル置き場として日常に使える |
 | **M3 service** | registry 開始 + create(ユーザ gh オーケストレーション + workflow テンプレート)→ Action → hook(HMAC/nonce/digest)→ コンテナ + traefik ルーティング + limits + logs/start/stop + **注入機構**(db/volume → service;静的 env)+ reconcile v1(存在 + 孤児) | push から 30 秒で `https://myapp.<ドメイン>` が開く;`tbm inject` で app が DB / ボリュームに繋がる;ホスト再起動から自己回復 |
 | **M4 ガバナンス** | 管理画面(共有パスワードの読み取り専用ビュー / ランキング / 最後の砦の操作 + Resend 検証コード)+ ディスク警報 + audit_log 補完 | owner が見える・対処できる |
 | **M5 cache(valkey)** | ACL:namespace プレフィックス + コマンド許可リスト;REDIS_URL 注入 | 越境は NOPERM |

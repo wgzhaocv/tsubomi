@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Footer } from "@/components/ui/footer";
 import { Typewriter } from "@/components/ui/typewriter";
-import { useMeQuery } from "@/lib/auth";
+import { useAuthInfoQuery, useMeQuery } from "@/lib/auth";
 
 // ログイン画面。Google ログインのみ(社内アカウントに hd ドメイン制限あり)。
 // 認証状態は useMeQuery で読む:既にログイン済みなら管理画面(/)へ送る。
@@ -36,9 +36,12 @@ function GoogleMark() {
 
 export default function Login() {
   const { data: me, isPending, error } = useMeQuery();
+  const { data: authInfo } = useAuthInfoQuery();
 
   // ログイン済みなら管理画面へ。
   if (me) return <Navigate to="/" replace />;
+
+  const domains = authInfo?.allowed_domains ?? [];
 
   return (
     <main className="relative flex min-h-dvh flex-col items-center justify-center gap-8 overflow-hidden p-6">
@@ -81,9 +84,23 @@ export default function Login() {
             <a href="/api/auth/google/start">Google でログイン</a>
           </Button>
 
-          <p className="text-center text-xs text-muted-foreground">
-            許可されたドメインの会社アカウントのみログインできます。
-          </p>
+          <div className="flex flex-col items-center gap-2">
+            <p className="text-center text-xs text-muted-foreground">
+              次のドメインの会社アカウントのみログインできます。
+            </p>
+            {domains.length > 0 && (
+              <div className="flex flex-wrap justify-center gap-1.5">
+                {domains.map((d) => (
+                  <span
+                    key={d}
+                    className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-medium text-foreground/80"
+                  >
+                    @{d}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
 

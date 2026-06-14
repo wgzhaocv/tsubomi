@@ -1,4 +1,4 @@
-import { Activity, Database, HardDrive, Server, Zap, type LucideIcon } from "lucide-react";
+import { Activity, Database, HardDrive, Server, Trash2, Zap, type LucideIcon } from "lucide-react";
 
 import type { TitleColor } from "@/components/ui/title";
 
@@ -73,5 +73,16 @@ export const RESOURCES: ResourceNav[] = [
     ribbon: "purple",
     emptyTitle: "まだアクティビティがありません",
     emptyBody: "リソースの作成・削除や owner 操作などの履歴が、ここに時系列で表示されます。",
+  },
+  {
+    // ゴミ箱:リソースではないがサイドメニューの一項目。専用ページ(/trash)へ
+    // ルーティングする(ResourcePage のプレースホルダには落とさない)。
+    path: "/trash",
+    kind: null,
+    label: "ゴミ箱",
+    icon: Trash2,
+    ribbon: "brown",
+    emptyTitle: "ゴミ箱は空です",
+    emptyBody: "削除したリソースは 3 日間ここに保管され、復元できます。",
   },
 ];

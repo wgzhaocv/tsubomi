@@ -17,9 +17,9 @@ app をデプロイし、データベース / ボリュームを作る。
 ディスク)をそこへ収束させる**。注入はバインディングだけを保存し、値はコンテナ
 起動の瞬間に解決する(だから rotate 後は再デプロイして初めて効く — これは仕様)。
 
-## フェーズ(現在地:M1 完了)
+## フェーズ(現在地:M2 完了)
 
-M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → M2 volume → M3 service
+M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → **M2 volume(完了)** → M3 service
 (デプロイ経路+注入)→ M4 ガバナンス → M5 valkey。各フェーズ単体で使える状態にする。
 マイグレーションはフェーズ毎に追加。
 
@@ -28,6 +28,15 @@ M1 で入ったもの:`resources` スーパーテーブル + `database_details`/
 一覧/接続文字列/rotate/web SQL/ソフト削除→ゴミ箱→復元/日次バックアップ;at-rest
 暗号化(crypto.rs、XChaCha20-Poly1305);`tbm db` サブコマンド。**双 role**:app
 (内部、M3 で service に注入)+ human(外部、rotate 可)— 詳細は §2/§5。
+
+M2 で入ったもの:`volume_details`;**volume は顶层リソース**(service 所有ではない)。
+各 volume は独立した假根サンドボックス `volumes/<user>/<id>`。**唯一のハード境界 =
+パストラバーサル防御**(`volumes/safe_path.rs`:Linux=openat2 `RESOLVE_BENEATH|NO_SYMLINKS`、
+dev macOS=canonicalize フォールバック、`..`/絶対/NUL/symlink 越えを全拒否)。ファイル API
+(列挙/ダウンロード/アップロード=一時ファイル+atomic rename/削除/mkdir/move)+ web
+ファイルブラウザ(**パスは URL の splat に持つ** `/volumes/:id/files/<path>`)+ `tbm volume`
+フル + ゴミ箱(trash へ mv / 復元 / 完全削除)の web/CLI 入口 + volumes の日次 rsync。
+**注入(service への mount + `STORAGE_PATH`)は M3** — 動詞「注入」の相手は service。
 
 ## 重要な約束事
 

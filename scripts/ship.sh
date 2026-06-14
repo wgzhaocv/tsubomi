@@ -42,4 +42,12 @@ scp -q compose.prod.yml "$HOST:${DIR}/compose.prod.yml"
 
 echo "▶ ${HOST} で起動(${DIR}/compose.prod.yml)..."
 ssh "$HOST" "cd ${DIR} && TSUBOMI_IMAGE=${IMAGE} docker compose --env-file .env.production -f compose.prod.yml up -d"
+
+# 後始末:同じ tag を再ビルド/再 load する度、前の版が <none>(dangling)で残って
+# 溜まる。両側で dangling のみ掃除(-f = タグ付きには触れない ⇒ ロールバック用の
+# 旧版は安全)。失敗してもデプロイ自体は成功扱い(|| true)。
+echo "▶ dangling イメージを掃除(ビルド機 + ${HOST})..."
+docker image prune -f >/dev/null 2>&1 || true
+ssh "$HOST" 'docker image prune -f' >/dev/null 2>&1 || true
+
 echo "✅ ${HOST} に直接デプロイ完了 (image=${IMAGE})"
