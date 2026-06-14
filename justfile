@@ -16,9 +16,18 @@ dev:
 cli *args:
     cargo run -p tsubomi-cli -- {{args}}
 
-# infra 起動: pg-platform:5434 / pg-tenant:5435 / pgbouncer:6432(MIG は起動時に自動)
+# infra 起動: pg-platform:5434 / pg-tenant:5435 / pgbouncer:6432 / registry:5000 /
+#   traefik:8088(MIG は起動時に自動)。tsubomi-edge 網を先に作る(compose は external 参照)。
 db-up:
-    docker compose -f infra/docker-compose.yml up -d
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker network create tsubomi-edge 2>/dev/null || true
+    # traefik の動的設定ディレクトリを先に作る(無いと docker が root 所有で作り、平台が書けない)。
+    # パスは .env の TSUBOMI_TRAEFIK_DYNAMIC_DIR(dev は /tmp 配下、Mac 可書)。compose も同じ
+    # .env を --env-file で読み、server の書き込み先と mount を揃える。
+    dir=$(grep -E '^TSUBOMI_TRAEFIK_DYNAMIC_DIR=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+    mkdir -p "${dir:-/srv/tsubomi/traefik-dynamic}"
+    docker compose --env-file .env -f infra/docker-compose.yml up -d
 
 # infra を停止(データは volume に残る)
 db-down:

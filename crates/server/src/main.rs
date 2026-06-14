@@ -11,7 +11,9 @@ mod crypto;
 mod databases;
 mod error;
 mod gc;
+mod ipblock;
 mod routes;
+mod services;
 mod state;
 mod tenant;
 mod trash;
@@ -45,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(config).await?;
     gc::spawn(state.clone());
+    // 起動時に IP 許可リストを traefik へ収束させる(middleware を必ず定義済みにする。
+    // best-effort:書けなくてもサーバは起動する)。
+    ipblock::sync_traefik(&state).await;
     let app = routes::build_router(state);
     axum::serve(listener, app).await?;
     Ok(())

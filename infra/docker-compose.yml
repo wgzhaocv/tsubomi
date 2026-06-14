@@ -4,8 +4,8 @@
 # `docker compose -f infra/docker-compose.yml up -d` で立てる。
 #
 # 同じファイルが dev の Mac でも本番ホスト(香橙派 arm64 / 将来の x86_64 機)
-# でも動く(postgres / pgbouncer イメージは multi-arch)。
-# 後のフェーズで追加:traefik, registry, valkey。
+# でも動く(postgres / pgbouncer / registry / traefik イメージは multi-arch)。
+# M3 で traefik + registry + tsubomi-edge 網を追加。後のフェーズで追加:valkey(M5)。
 services:
   pg-platform:
     # 管制面メタデータ専用。loopback にバインド:bridge ネットワーク上の
@@ -66,7 +66,57 @@ services:
     volumes:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    # default = pg-tenant への到達。tsubomi-edge = M3 のユーザコンテナが
+    # `tsubomi-pgbouncer:6432`(docker DNS)で内部入口に届くため(m3-design §3.4 / §7.2)。
+    networks: [default, tsubomi-edge]
+
+  registry:
+    # M3:ユーザ app イメージの置き場。平台は digest 指定で 127.0.0.1:5000 から pull する
+    # (決定 #3。localhost は docker が insecure registry として許すので証明書不要)。
+    # 本番の push 入口(registry.<ドメイン> + basic auth、traefik 終端)は後チャンクで足す。
+    image: registry:2
+    container_name: tsubomi-registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"   # registry GC のため(未参照 blob を消せる)
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+
+  traefik:
+    # M3:ユーザ service の入口 + ルーティング。**file provider のみ**(docker provider は使わない)。
+    # 平台(ホスト直走り)が動的設定をここに書き、watch で即時ホットリロードする:会社 IP 許可
+    # リストの middleware(ipallow.yml、ipblock)+ 各 service の router/service(svc-<id>.yml、
+    # services/route.rs)。router はその middleware を <tsubomi-ipallow>@file で参照する。
+    # docker API を一切触らないので Docker Engine 29(最小 API 1.40。古い traefik の docker
+    # クライアントが 1.24 に落ちて弾かれ provider が全コンテナを見失う問題)を回避できる。後端へは
+    # コンテナ名 tsubomi-<id> を edge 網の docker DNS で解決して到達する(名前解決は provider と別)。
+    # dev は :80 を 8088 に publish、ホスト名は <subdomain>.localhost。本番の :443+LE は後チャンク。
+    image: traefik:v3.5
+    container_name: tsubomi-traefik
+    restart: unless-stopped
+    command:
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+    ports:
+      - "${TRAEFIK_BIND_ADDR:-127.0.0.1}:8088:80"
+    volumes:
+      # 平台が書き出すホストパスを read-only でマウント(docker.sock は不要)。
+      # TSUBOMI_TRAEFIK_DYNAMIC_DIR(server の env)と一致させること。dev は .env で /tmp 配下、
+      # compose は db-up が --env-file .env で同じ値を読む。
+      - ${TSUBOMI_TRAEFIK_DYNAMIC_DIR:-/srv/tsubomi/traefik-dynamic}:/etc/traefik/dynamic:ro
+    networks: [default, tsubomi-edge]
+
+# tsubomi-edge は external:平台(bollard)がユーザコンテナを attach する網。compose は
+# 参照するだけ。初回は justfile の db-up が `docker network create tsubomi-edge` する。
+networks:
+  tsubomi-edge:
+    external: true
+    name: tsubomi-edge
 
 volumes:
   pg_platform_data:
   pg_tenant_data:
+  registry_data:

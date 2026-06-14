@@ -3,7 +3,7 @@ pub mod web;
 use crate::auth;
 use crate::cli_release;
 use crate::state::AppState;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
 use tower_http::trace::TraceLayer;
 use tsubomi_shared::Health;
@@ -13,6 +13,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/cli/version", get(cli_release::version))
         .route("/cli/version/{target}", get(cli_release::version_target))
+        // deploy hook は HMAC = 権限。session/Bearer は通さない(IP 除外、決定 #4)。
+        .route("/hook/deploy", post(crate::services::deploy::deploy))
         .merge(auth::public_routes());
 
     // CLI リリースのアーカイブ本体。manifest の url(相対パス
@@ -29,6 +31,8 @@ pub fn build_router(state: AppState) -> Router {
     let protected = auth::protected_routes()
         .merge(crate::databases::routes())
         .merge(crate::volumes::routes())
+        .merge(crate::services::routes())
+        .merge(crate::ipblock::routes())
         .merge(crate::trash::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

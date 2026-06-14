@@ -9,6 +9,7 @@ import DatabaseOverview from "@/routes/DatabaseOverview";
 import Databases from "@/routes/Databases";
 import DatabaseTables from "@/routes/DatabaseTables";
 import Forbidden from "@/routes/Forbidden";
+import IpAllowlist from "@/routes/IpAllowlist";
 import Login from "@/routes/Login";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
@@ -64,6 +65,9 @@ export const router = createBrowserRouter([
       },
       // ゴミ箱は専用ページ(他の未実装リソースは当面 ResourcePage の骨格)。
       { path: "trash", element: <Trash /> },
+      // IP 許可リスト(owner 専用のガバナンス画面)。サイドメニューにも owner 限定で出す。
+      // バックエンドが 403 で守るので、ここはルート自体は誰でも辿れる(画面側で弾く)。
+      { path: "ip-allowlist", element: <IpAllowlist /> },
       ...RESOURCES.filter(
         (r) => r.kind !== "database" && r.kind !== "volume" && r.path !== "/trash",
       ).map((r) => ({

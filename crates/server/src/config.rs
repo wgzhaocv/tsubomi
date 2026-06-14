@@ -54,6 +54,22 @@ pub struct Config {
     /// ファイルアップロードの 1 リクエスト上限(バイト)。無制限だと
     /// メモリ/ディスクを一撃で食えるので硬上限を被せる(磁盘 quota は M4)。
     pub max_upload_bytes: usize,
+
+    // ===== M3 service =====
+    /// service の subdomain のルートドメイン。ルーティングは `<subdomain>.<domain>`。
+    /// dev=localhost(ブラウザが `*.localhost` を 127.0.0.1 に解決)、prod=会社ドメイン。
+    pub domain: String,
+    /// 平台が digest pull する registry の host:port。dev=127.0.0.1:5000
+    /// (localhost は docker が insecure registry として許すので証明書不要)。
+    pub registry_pull: String,
+    /// ユーザコンテナを attach する docker ネットワーク名(traefik も参加)。
+    pub edge_network: String,
+
+    // ===== ガバナンス:IP 許可リスト =====
+    /// 平台が traefik の動的設定(ipAllowList middleware)を書き出すディレクトリ。
+    /// traefik(compose)が file provider でこの同じホストパスを読む。会社 IP
+    /// 許可リストの変更はここへ書き直され、traefik がホットリロードする。
+    pub traefik_dynamic_dir: PathBuf,
 }
 
 /// master key のラッパ。Config は Debug 派生なので、生鍵が `{:?}` で漏れないように
@@ -163,6 +179,20 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100 * 1024 * 1024);
 
+        // ===== M3 service =====
+        let domain = std::env::var("TSUBOMI_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+        let registry_pull =
+            std::env::var("TSUBOMI_REGISTRY_PULL").unwrap_or_else(|_| "127.0.0.1:5000".to_string());
+        let edge_network =
+            std::env::var("TSUBOMI_EDGE_NETWORK").unwrap_or_else(|_| "tsubomi-edge".to_string());
+
+        // ===== ガバナンス:IP 許可リスト =====
+        // volumes_dir / backup_dir と同じ /srv/tsubomi 配下の規約。本番は compose の
+        // bind mount と一致させること(同じホストパスを traefik が file provider で読む)。
+        let traefik_dynamic_dir = std::env::var("TSUBOMI_TRAEFIK_DYNAMIC_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/traefik-dynamic"));
+
         Ok(Self {
             bind_addr,
             web_dir,
@@ -184,6 +214,10 @@ impl Config {
             trash_dir,
             volumes_dir,
             max_upload_bytes,
+            domain,
+            registry_pull,
+            edge_network,
+            traefik_dynamic_dir,
         })
     }
 }

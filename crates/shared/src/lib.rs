@@ -240,6 +240,72 @@ pub struct VolumeUsageDto {
     pub truncated: bool,
 }
 
+// ============ M3 service(server ⇄ CLI / web の単一契約)============
+
+/// `GET /api/services` の各要素 / service 詳細。秘密(deploy_key)は含まない —
+/// それは作成時のレスポンスでしか出さない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceDto {
+    pub id: Uuid,
+    /// ユーザの自由名(改名は subdomain / 接続に触れない)。
+    pub display_name: String,
+    /// 匿名番号(user+kind 内連番):service1/2…
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+    /// `<subdomain>.<domain>` の左辺。
+    pub subdomain: String,
+    /// 観測された実際の段階:created / deploying / running / stopped / failed。
+    pub phase: String,
+    /// 期望状態:running / stopped。
+    pub desired_state: String,
+    /// app が容器内で listen する port(traefik の転送先)。
+    pub container_port: i32,
+    /// 現在走るべきイメージ(まだ deploy していなければ None)。
+    #[serde(default)]
+    pub image_digest: Option<String>,
+    #[serde(default)]
+    pub last_deploy_at: Option<DateTime<Utc>>,
+}
+
+/// `POST /api/services` のリクエストボディ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateServiceReq {
+    pub name: String,
+}
+
+/// `POST /api/services` のレスポンス。**deploy_key は発行時の 1 回だけ**返る平文
+/// (HMAC の鍵 — 以後 API では出さない。表示箇所で警告すること)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateServiceResp {
+    #[serde(flatten)]
+    pub service: ServiceDto,
+    pub deploy_key: String,
+}
+
+// ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============
+
+/// `GET /api/ip-allowlist` の各要素。会社 IP 許可リストの 1 エントリ。
+/// 許可リストが空 = 制限なし(全 IP 許可、fail-open)。1 件以上ある時だけ、
+/// 列挙された CIDR だけが service に到達でき、他は traefik の ipAllowList で遮断される。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpAllowEntryDto {
+    pub id: Uuid,
+    /// 正規化済み CIDR(例:203.0.113.0/24 / 198.51.100.7/32)。
+    pub cidr: String,
+    /// 何の IP かの人間用メモ(空可)。
+    pub note: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// `POST /api/ip-allowlist` のリクエストボディ。`cidr` は単一 IP(/32・/128 に正規化)
+/// でも CIDR レンジでも受ける。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateIpAllowReq {
+    pub cidr: String,
+    #[serde(default)]
+    pub note: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

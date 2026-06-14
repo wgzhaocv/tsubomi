@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::crypto::Cipher;
+use anyhow::Context;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 use std::ops::Deref;
 use std::str::FromStr;
@@ -16,6 +17,9 @@ pub struct AppStateInner {
     /// at-rest 暗号化(DB パスワードの暗号化 / 復号)。
     pub crypto: Cipher,
     pub http: reqwest::Client,
+    /// docker.sock の async クライアント(M3)。コンテナの pull / 起動 / 停止 /
+    /// 一覧(後の reconcile)が使う。プラットフォームはホスト直走りで docker.sock を保持。
+    pub docker: bollard::Docker,
 }
 
 #[derive(Clone)]
@@ -56,12 +60,22 @@ impl AppState {
             .timeout(Duration::from_secs(10))
             .build()?;
 
+        // docker.sock(unix)/ DOCKER_HOST を既定で拾う。起動時に ping して疎通を確認する:
+        // docker 無しでは service フェーズは機能しないので、ここで早期に失敗させる。
+        let docker =
+            bollard::Docker::connect_with_local_defaults().context("docker.sock への接続に失敗")?;
+        docker
+            .ping()
+            .await
+            .context("docker daemon に ping できない(docker は起動しているか / DOCKER_HOST を確認)")?;
+
         Ok(Self(Arc::new(AppStateInner {
             config,
             db,
             tenant_admin,
             crypto,
             http,
+            docker,
         })))
     }
 }
