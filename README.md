@@ -79,6 +79,11 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    TSUBOMI_MASTER_KEY=<base64 32 bytes>   # head -c 32 /dev/urandom | base64
    TSUBOMI_DB_PUBLIC_HOST=<DB の到達先ホスト/IP>  # 接続文字列に出す。会社網から届く宛先
    PGBOUNCER_BIND_ADDR=0.0.0.0            # 外部接続を受ける(送信元制限は↓の柵で)
+   # ── M3 service(デプロイ経路 + ルーティング)──
+   TSUBOMI_DOMAIN=<ドメイン>                       # service は <subdomain>.<ドメイン> で公開
+   TSUBOMI_REGISTRY_PUSH=registry.<ドメイン>       # CI が push する公網 registry(pull と別 = 認証入口を張る)
+   # TSUBOMI_TLS:未設定=上流(CF Tunnel/逆代理)が TLS 終端し traefik は :80。
+   #   直 VPS で traefik 自身が :443+LE するなら =true(+ compose.prod.tls.yml を重ねる)。詳細は §13。
    ```
 
    `PG_PLATFORM_PASSWORD` と `DATABASE_URL`、`PG_TENANT_PASSWORD` と `TENANT_ADMIN_URL`
@@ -91,8 +96,15 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    ```bash
    docker compose --env-file .env.production -f compose.prod.yml up -d
    ```
-6. **TLS リバースプロキシ**を前段に置き、`<ドメイン>` → `127.0.0.1:9090` へ転送する。
-   例(Caddy):`<ドメイン> { reverse_proxy 127.0.0.1:9090 }`
+6. **前段ルーティング**。M3 で compose に traefik(`:80`、file provider)+ registry が入った。
+   2 モード(詳細は `paas-m3-design.md` §13):
+   - **(A) 上流が TLS 終端**(Cloudflare Tunnel / CF proxy / Caddy / nginx。`TSUBOMI_TLS` 未設定)—
+     前段から 3 系統を転送:`<ドメイン>` → `127.0.0.1:9090`(apex / server)、`*.<ドメイン>` → `127.0.0.1:80`
+     (traefik → service コンテナ)、`registry.<ドメイン>` → `127.0.0.1:80`(traefik → registry、basicAuth)。
+     例(cloudflared / Caddy も同様に host で分岐)。
+   - **(B) traefik 自身が :443 + Let's Encrypt**(直 VPS、`TSUBOMI_TLS=true`)— 前段プロキシ不要。
+     `*.<ドメイン>` / `registry.<ドメイン>` の A を VPS の公網 IP へ。起動は
+     `-f compose.prod.yml -f compose.prod.tls.yml`。
    - **M1 の DB 入口(pgbouncer :6432)を必ず会社 CIDR に絞る**(iptables の
      `DOCKER-USER` チェーン。ufw だけでは Docker を素通りする — design v2 §1)。
      `PGBOUNCER_BIND_ADDR=0.0.0.0` は「受ける」だけで、送信元制限はこの柵が担う。

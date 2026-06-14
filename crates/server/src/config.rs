@@ -77,10 +77,11 @@ pub struct Config {
     pub platforms: String,
     /// ユーザコンテナを attach する docker ネットワーク名(traefik も参加)。
     pub edge_network: String,
-    /// 本番 TLS フラグ(`TSUBOMI_TLS`)。true で route.rs が router を websecure + LE
-    /// (certResolver `le`)で書き、registry の basicAuth 入口(`registry.<domain>`)と
-    /// apex router(`<domain>` → server)も file provider に書く。dev=false(HTTP のまま)。
-    /// ACME メール等 traefik 側の値は compose が env(`TSUBOMI_ACME_EMAIL`)から直接読む。
+    /// 「**誰が** TLS を終端するか」(`TSUBOMI_TLS`)。true = traefik 自身が websecure + LE
+    /// (certResolver `le`)で終端(直 VPS)、route の router を websecure にし apex router も書く。
+    /// false(既定)= 上流(CF Tunnel / 逆代理)が終端 → router は web(HTTP)、apex は traefik を
+    /// 経由しない。**registry の push 入口の有無は tls ではなく `registry_ingress()`(push≠pull)が
+    /// 決める** — tunnel(tls=false)でも入口は書く。ACME メールは compose が env から直接読む。
     pub tls: bool,
 
     // ===== ガバナンス:IP 許可リスト =====
@@ -126,11 +127,29 @@ fn load_master_key() -> anyhow::Result<[u8; 32]> {
 }
 
 impl Config {
+    /// prod で registry の push 入口(traefik basicAuth)を書くか。push 先が pull(ローカル
+    /// 127.0.0.1:5000)と別ホスト = 公網の認証付き registry がある = prod、という自然な信号。
+    /// dev は両者一致なので false(registry は無認証ループバック直結で入口を書かない)。
+    /// TLS の有無(traefik 終端 / 上流終端)とは独立 — tunnel(tls=false)でも入口は要る。
+    pub fn registry_ingress(&self) -> bool {
+        self.registry_push != self.registry_pull
+    }
+
+    /// traefik の `Host(...)` ルール用の push ホスト名(`registry_push` から `:port` を落とす。
+    /// Host マッチはホスト名のみ。push 自体は docker login 用に port 付きでも可)。
+    pub fn registry_host(&self) -> &str {
+        self.registry_push
+            .split(':')
+            .next()
+            .unwrap_or(&self.registry_push)
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
-        // デフォルト 9090:8080 は同居する amber が使っている(香橙派でも
-        // ローカル dev でも衝突しないように)。
+        // 既定は **loopback** :9090(同居する amber は 8080)。本番は前段(CF Tunnel / 逆代理)が
+        // localhost へ転送する想定なので公網露出しないのが安全側。直 VPS で traefik コンテナが
+        // host-gateway 経由 apex を叩く場合だけ明示的に 0.0.0.0:9090 にし、:9090 は FW で塞ぐ(§13.B)。
         let bind_addr = std::env::var("TSUBOMI_BIND_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+            .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid TSUBOMI_BIND_ADDR: {e}"))?;
         let web_dir = std::env::var("TSUBOMI_WEB_DIR").unwrap_or_else(|_| "web/dist".to_string());
@@ -220,6 +239,17 @@ impl Config {
         // push 入口。未設定なら pull と同じ(dev の無認証 registry)。
         let registry_push = std::env::var("TSUBOMI_REGISTRY_PUSH")
             .unwrap_or_else(|_| registry_pull.clone());
+        // push host は registry.yml の traefik Host(...) ルールへ埋め込む(registry_host())。
+        // host[:port] のみ許可(scheme `//` / path `/` / 引用符 / 空白を弾く。注入・設定崩れ防止)。
+        if registry_push.is_empty()
+            || !registry_push
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+        {
+            anyhow::bail!(
+                "TSUBOMI_REGISTRY_PUSH must be host[:port]([a-zA-Z0-9.:-] のみ、scheme/path 不可): {registry_push}"
+            );
+        }
         let platforms =
             std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
         let edge_network =

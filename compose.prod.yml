@@ -119,9 +119,13 @@ services:
   # M3:ユーザ service / apex / registry の入口 + ルーティング。**file provider のみ**
   # (docker provider は Docker Engine 29 で壊れる)。平台(ホスト直走り)が動的設定を
   # TSUBOMI_TRAEFIK_DYNAMIC_DIR に書き、traefik が watch でホットリロードする:
-  # ipallow.yml(ipblock)/ svc-<id>.yml(route.rs)/ registry.yml(registry.rs)/ apex.yml。
-  # 本番:443 + Let's Encrypt(TLS-ALPN tlsChallenge、`le` resolver)。:80 は :443 へリダイレクト。
-  # apex(<ドメイン> → 平台 server)は host-gateway 経由で host ネットの server に届く。
+  # ipallow.yml(ipblock)/ svc-<id>.yml(route.rs)/ registry.yml(registry.rs)/ apex.yml(直VPSのみ)。
+  #
+  # **既定は HTTP :80 のみ**(上流 = Cloudflare Tunnel / CF proxy / 逆代理が TLS 終端する構成。
+  # cloudflared が localhost:80 へ転送し、traefik が Host で振り分ける)。`TSUBOMI_TLS=false` と対。
+  # **直 VPS で traefik 自身が :443 + Let's Encrypt** を終端する場合だけ、追加で compose.prod.tls.yml を
+  # 重ねる(`-f compose.prod.yml -f compose.prod.tls.yml`)+ `.env` に TSUBOMI_TLS=true / TSUBOMI_ACME_EMAIL。
+  # ports は loopback 既定(tunnel は cloudflared が localhost へ来るだけ)。直VPSは TRAEFIK_BIND_ADDR=0.0.0.0。
   traefik:
     image: traefik:v3.5
     container_name: tsubomi-traefik
@@ -130,21 +134,13 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
-      - --entrypoints.web.http.redirections.entrypoint.to=websecure
-      - --entrypoints.web.http.redirections.entrypoint.scheme=https
-      - --certificatesresolvers.le.acme.tlschallenge=true
-      - --certificatesresolvers.le.acme.email=${TSUBOMI_ACME_EMAIL:?set TSUBOMI_ACME_EMAIL in .env.production}
-      - --certificatesresolvers.le.acme.storage=/acme/acme.json
     ports:
-      - "80:80"
-      - "443:443"
+      - "${TRAEFIK_BIND_ADDR:-127.0.0.1}:80:80"
     volumes:
       # 平台が書き出すホストパスを read-only でマウント(docker.sock は不要)。
       # TSUBOMI_TRAEFIK_DYNAMIC_DIR(server の env)と一致させること。
       - ${TSUBOMI_TRAEFIK_DYNAMIC_DIR:-/srv/tsubomi/traefik-dynamic}:/etc/traefik/dynamic:ro
-      - traefik_acme:/acme   # LE 証明書の永続化(acme.json)
-    # apex router の後端 `host.docker.internal` を host ゲートウェイへ解決(server は host ネット)。
+    # apex router(直VPS時)の後端 host.docker.internal を host ゲートウェイへ(server は host ネット)。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [default, tsubomi-edge]
@@ -182,7 +178,7 @@ volumes:
   pg_tenant_data:
   pgb_tls:
   registry_data:
-  traefik_acme:
+  # traefik_acme(LE 証明書)は直VPS用 compose.prod.tls.yml が足す。
 
 # ===========================================================================
 # インライン設定(別ファイルを配らずに済ませるための埋め込み)。

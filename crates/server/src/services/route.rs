@@ -23,6 +23,20 @@ pub(crate) const ENTRYPOINT_HTTP: &str = "web";
 pub(crate) const ENTRYPOINT_TLS: &str = "websecure";
 pub(crate) const CERT_RESOLVER: &str = "le";
 
+/// router の entrypoint 名:tls(traefik 終端)= websecure、上流終端 = web。
+pub(crate) fn entrypoint(tls: bool) -> &'static str {
+    if tls { ENTRYPOINT_TLS } else { ENTRYPOINT_HTTP }
+}
+
+/// tls=true の router マッピングに tls/certResolver(LE)ブロックを足す(svc / apex / registry 共用)。
+/// YAML はキー順不問なので呼び出し位置は問わない。
+pub(crate) fn push_tls_block(doc: &mut String, tls: bool) {
+    if tls {
+        doc.push_str("      tls:\n");
+        doc.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
+    }
+}
+
 /// service の動的設定ファイルのパス(`<dir>/svc-<id>.yml`)。
 fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
     state
@@ -47,12 +61,7 @@ pub fn write(
     let host = format!("{}.{}", subdomain, state.config.domain);
     let backend = format!("http://{container_name}:{container_port}");
     let mw = crate::ipblock::TRAEFIK_MIDDLEWARE;
-    // 本番(tls=true)は websecure(:443)+ LE。dev は web(:80)のまま。
-    let entrypoint = if state.config.tls {
-        ENTRYPOINT_TLS
-    } else {
-        ENTRYPOINT_HTTP
-    };
+    let tls = state.config.tls;
 
     let mut doc = String::new();
     doc.push_str("# 平台が自動生成(services/route.rs)。手で編集しない(deploy ごとに上書き)。\n");
@@ -60,14 +69,10 @@ pub fn write(
     doc.push_str("  routers:\n");
     doc.push_str(&format!("    {name}:\n"));
     doc.push_str(&format!("      rule: \"Host(`{host}`)\"\n"));
-    doc.push_str(&format!("      entryPoints: [\"{entrypoint}\"]\n"));
+    doc.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(tls)));
     doc.push_str(&format!("      service: \"{name}\"\n"));
     doc.push_str(&format!("      middlewares: [\"{mw}@file\"]\n"));
-    if state.config.tls {
-        // LE で証明書を取得(certResolver は compose の traefik が定義する `le`)。
-        doc.push_str("      tls:\n");
-        doc.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
-    }
+    push_tls_block(&mut doc, tls);
     doc.push_str("  services:\n");
     doc.push_str(&format!("    {name}:\n"));
     doc.push_str("      loadBalancer:\n");
@@ -105,10 +110,9 @@ pub fn write_apex(state: &AppState) -> AppResult<()> {
     doc.push_str("  routers:\n");
     doc.push_str("    tsubomi-apex:\n");
     doc.push_str(&format!("      rule: \"Host(`{domain}`)\"\n"));
-    doc.push_str(&format!("      entryPoints: [\"{ENTRYPOINT_TLS}\"]\n"));
+    doc.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(true)));
     doc.push_str("      service: \"tsubomi-apex\"\n");
-    doc.push_str("      tls:\n");
-    doc.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
+    push_tls_block(&mut doc, true); // apex は tls=true 時のみ書かれる(直 VPS)
     doc.push_str("  services:\n");
     doc.push_str("    tsubomi-apex:\n");
     doc.push_str("      loadBalancer:\n");

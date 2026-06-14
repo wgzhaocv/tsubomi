@@ -688,63 +688,81 @@ Button/Dialog を踏襲(frontend 規約)。
 
 ## 13. prod-infra デプロイ手順(本番 = 香橙派 arm64、将来 x86)
 
-決定:**入口/TLS = traefik 自跑 Let's Encrypt(TLS-ALPN tlsChallenge、子域ごと按需)**、**プラットフォーム
-イメージ = arm64+amd64 双架**(`release-image.sh` 既定)、**ユーザ service イメージ = ホスト arch 追随**
-(`TSUBOMI_PLATFORMS`、今 arm64)。registry の push 認証 = **traefik basicAuth**(平台が `registry_accounts` を
-bcrypt して `registry.yml` に出す。registry 自体は無認証ループバック :5000、平台 pull はそのまま)。
+**TLS 終端を誰がやるかで 2 モード**(`TSUBOMI_TLS` で切替。tsubomi は前段が何かを問わない):
 
-### 13.1 前提(あなたが用意)
+- **(A) 上流終端 = `TSUBOMI_TLS=false`(既定)**:Cloudflare Tunnel / CF proxy / nginx / caddy 等が前段で TLS を
+  終端し、HTTP を traefik(:80)へ流す。**香橙派(公網 IP 無し・CF Tunnel)はこれ**。base = `compose.prod.yml` のみ。
+- **(B) traefik 終端 = `TSUBOMI_TLS=true`**:直 VPS(公網 IP)で traefik 自身が :443 + Let's Encrypt。
+  `compose.prod.yml` に `compose.prod.tls.yml` を重ねる。
 
-- **DNS(A レコード、香橙派の公網 IP へ)**:`<ドメイン>`(apex)、`*.<ドメイン>`(service 子域)、
-  `registry.<ドメイン>`(push 入口)。tlsChallenge は :443 で各 host を検証するので **ワイルドカード A だけで足り、
-  DNS provider の API token は不要**(DNS-01 ワイルドカード証に上げるなら token が要る — §11 決定 G)。
-  registry は **Cloudflare proxy を通さない**(直 :443・LE。CF proxy は upload 100MB 上限で push が割れる)。
-- **公網到達**:香橙派の :80 / :443 が外から届く。:80 は :443 へリダイレクト。
-- **ファイアウォール**:公開するのは traefik の :80/:443 だけ。平台 server の :9090 は公網から塞ぐ
-  (traefik が `host.docker.internal`(host-gateway)経由で内部的に :9090 を叩くだけ)。pgbouncer :6432 の
-  送信元 CIDR 制限は iptables `DOCKER-USER`(§1)。
+共通:**プラットフォームイメージ = arm64+amd64 双架**(`release-image.sh` 既定)、**ユーザ service イメージ =
+ホスト arch 追随**(`TSUBOMI_PLATFORMS`、今 arm64)。registry の push 認証 = **traefik basicAuth**(平台が
+`registry_accounts` を bcrypt して `registry.yml` に出す。`REGISTRY_PUSH≠PULL` なら TLS 有無に関わらず書く。
+registry 自体は無認証ループバック :5000、平台 pull はそのまま)。registry / hook は IP 許可リスト免除(決定 #4)。
 
-### 13.2 `.env.production` に必要なキー(M3 + prod-infra)
+### 13.A モード A:Cloudflare Tunnel(香橙派の実態)
 
-`.env.example` がひな形。**この本番ファイルは M1/M2 時点のままだと M3 キーが抜けている**ので、最低限以下を足す/確認:
+**1. cloudflared の ingress に 2 行足す**(apex は既存の `→ localhost:9090` のまま。tunnel が apex を直接 server へ
+   流すので **traefik を経由しない**:apex.yml は書かれない = それで正しい):
 
+```yaml
+ingress:
+  - hostname: tsubomi.wgzhao.me
+    service: http://localhost:9090          # apex(既存。平台 server 直結)
+  - hostname: "*.tsubomi.wgzhao.me"
+    service: http://localhost:80            # service 子域 → traefik(web)→ コンテナ
+  - hostname: registry.tsubomi.wgzhao.me
+    service: http://localhost:80            # registry push → traefik(web + basicAuth)→ registry:5000
+  - service: http_status:404
+```
+   + CF DNS を作る:`cloudflared tunnel route dns <tunnel> "*.tsubomi.wgzhao.me"` と `... registry.tsubomi.wgzhao.me`
+   (`*.` は CF Tunnel のワイルドカード public hostname。CF ダッシュボードからでも可)。
+   ※ cloudflared が **コンテナ**なら `localhost` はコンテナ自身を指すので、host-gateway か host ネットで Pi の
+     :80/:9090 へ届かせる(host プロセスなら `localhost` で OK)。
+
+**2. `.env.production` に M3 キーを足す**(M1/M2 時点のファイルは M3 キーが抜けている)。`.env.example` がひな形:
 ```
 TSUBOMI_DOMAIN=tsubomi.wgzhao.me
 TSUBOMI_SERVER_URL=https://tsubomi.wgzhao.me
-TSUBOMI_TLS=true                                   # ← route.rs / registry を websecure+LE 形へ
-TSUBOMI_ACME_EMAIL=<LE 通知メール>                  # ← traefik が直接読む(tls 時 compose が必須化)
 TSUBOMI_COOKIE_SECURE=true
-TSUBOMI_BIND_ADDR=0.0.0.0:9090                      # ← apex を traefik 前段にするため(:9090 は要 FW)
-TSUBOMI_REGISTRY_PULL=127.0.0.1:5000               # 平台のローカル pull(無認証ループバック)
-TSUBOMI_REGISTRY_PUSH=registry.tsubomi.wgzhao.me   # CI が docker login + push する公網入口
-TSUBOMI_PLATFORMS=linux/arm64                       # ホスト arch。x86 機を足したら linux/arm64,linux/amd64
+TSUBOMI_BIND_ADDR=127.0.0.1:9090                   # tunnel は cloudflared(host)が localhost へ来る
+# TSUBOMI_TLS は未設定(= false。上流 = CF が TLS 終端)。TSUBOMI_ACME_EMAIL も不要。
+TSUBOMI_REGISTRY_PULL=127.0.0.1:5000
+TSUBOMI_REGISTRY_PUSH=registry.tsubomi.wgzhao.me   # ← これが pull と別 = registry 入口を書く合図
+TSUBOMI_PLATFORMS=linux/arm64
 TSUBOMI_EDGE_NETWORK=tsubomi-edge
-TSUBOMI_TRAEFIK_DYNAMIC_DIR=/srv/tsubomi/traefik-dynamic   # compose の traefik mount と一致
+TSUBOMI_TRAEFIK_DYNAMIC_DIR=/srv/tsubomi/traefik-dynamic
 TSUBOMI_DB_INTERNAL_HOST=tsubomi-pgbouncer
 TSUBOMI_DB_INTERNAL_PORT=6432
-TSUBOMI_DB_PUBLIC_HOST=<外部接続用ホスト>            # human 接続文字列に載る
+TSUBOMI_DB_PUBLIC_HOST=<外部接続用ホスト>
 TSUBOMI_DB_SSLMODE=require
 ```
+(既存の `PG_*` / `PGBOUNCER_*` / `TENANT_ADMIN_URL` / `TSUBOMI_MASTER_KEY` / `GOOGLE_*` / `TSUBOMI_ALLOWED_HD` /
+`TSUBOMI_OWNER_EMAILS` / `PGBOUNCER_BIND_ADDR=0.0.0.0` はそのまま。)
 
-(既存の `PG_PLATFORM_PASSWORD` / `PG_TENANT_PASSWORD` / `PGBOUNCER_AUTH_PASSWORD` / `TENANT_ADMIN_URL` /
-`TSUBOMI_MASTER_KEY` / `GOOGLE_*` / `TSUBOMI_ALLOWED_HD` / `TSUBOMI_OWNER_EMAILS` はそのまま。`PGBOUNCER_BIND_ADDR=0.0.0.0`。)
-
-### 13.3 手順
-
-1. 開発機で **`just release-image`**(既定で amd64+arm64 manifest list を push。`REGISTRY=...` 指定)。香橙派は
-   その tag を pull すれば自動で arm64 を取る(将来 x86 機は同 tag で amd64)。`compose.prod.yml` の
+**3. 起こす**:
+1. 開発機で `just release-image`(既定 amd64+arm64。`REGISTRY=docker.io/<you>` 等)→ `compose.prod.yml` の
    `TSUBOMI_IMAGE` を出したタグに。
 2. 香橙派で `docker network create tsubomi-edge`(冪等)+ `mkdir -p /srv/tsubomi/{traefik-dynamic,backups,trash,volumes}`。
-3. 香橙派で `docker compose --env-file .env.production -f compose.prod.yml pull && up -d`
-   (pg-platform / pg-tenant / pgbouncer / registry / traefik / server)。server 起動時に migration 自動 +
-   `ipblock`/`registry`/`apex` の traefik 動的設定を書く。
-4. traefik が apex / registry の LE 証明書を取得(初回アクセス時)。`https://tsubomi.wgzhao.me` /
-   `https://registry.tsubomi.wgzhao.me` を確認。
+3. 香橙派で `docker compose --env-file .env.production -f compose.prod.yml pull && up -d`(base = traefik :80)。
+   server 起動時に migration 自動 + `ipblock` / `registry`(web + basicAuth)の動的設定を書く(apex は tunnel 直結)。
 
-### 13.4 検証(§12 の本番依存 2 行)
+**⚠ CF の制約**:proxied トラフィックは **リクエスト body 上限**(無料/Pro ≈100MB)。`docker push` の大きな層は
+割れうる(小イメージ = node:alpine 等は通る)。回避は CF Enterprise / 層を小さく / 別 registry。
 
-- `tbm service create demo` → 表示された gh 手順(`gh repo create` + secret/variable)→ `git push`。
-  CI が `docker login registry.tsubomi.wgzhao.me`(basicAuth)→ 双架不要(`TSUBOMI_PLATFORMS=linux/arm64`)で
-  build+push → hook → 香橙派が `127.0.0.1:5000` から pull → 起動 → **30 秒で `https://demo.tsubomi.wgzhao.me`**。
-- `tbm deploy --local` も同じ registry に push して同結果(GitHub 非依存)。
+### 13.B モード B:直 VPS(公網 IP + traefik LE)
+
+- DNS:`*.<域名>` と `registry.<域名>` の **A レコードを VPS の公網 IP へ**(`tlsChallenge` は :443 で各 host を
+  検証 = ワイルドカード A だけで足り、DNS provider token 不要。§11 決定 G)。:80/:443 公網到達。
+- `.env`:`TSUBOMI_TLS=true` / `TSUBOMI_ACME_EMAIL=<LE メール>` / `TRAEFIK_BIND_ADDR=0.0.0.0`。apex も traefik
+  前段にするなら `TSUBOMI_BIND_ADDR=0.0.0.0:9090` + ファイアウォールで :9090 を公網から塞ぐ(公開は :80/:443 だけ)。
+- 起こす:base + override → `docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.tls.yml up -d`。
+  traefik が apex / registry / 各 service の LE 証明書を初回アクセス時に取得。
+
+### 13.C 検証(§12 の本番依存 2 行)
+
+- `tbm service create demo`(対象 = prod の **M3 入り**新 server)→ 表示された gh 手順 → `git push`。CI が
+  `docker login registry.<域名>`(basicAuth)→ build+push → hook → 香橙派が `127.0.0.1:5000` から pull → 起動 →
+  **30 秒で `https://demo.<域名>`**(A は CF が、B は traefik が TLS)。
+- `tbm deploy --local` も同じ registry へ push して同結果(GitHub 非依存)。
 - `tbm inject` / `stop` / `start` / ホスト再起動回復が本番でも効く。

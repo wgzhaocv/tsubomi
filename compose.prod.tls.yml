@@ -1,0 +1,31 @@
+# 直 VPS で **traefik 自身が :443 + Let's Encrypt** を終端する場合の上書き。
+# 上流(Cloudflare Tunnel / CF proxy / nginx / caddy 等)が TLS 終端する構成では **使わない**
+# (その場合は base = compose.prod.yml だけで :80。TSUBOMI_TLS は未設定/false)。
+#
+# 使い方(直 VPS):
+#   .env: TSUBOMI_TLS=true / TSUBOMI_ACME_EMAIL=<LE 通知メール> / TRAEFIK_BIND_ADDR=0.0.0.0
+#         (+ `*.<域名>` と registry.<域名> の A レコードを VPS の公網 IP へ。:80/:443 公網到達)
+#   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.tls.yml up -d
+#
+# ※ compose は `command`(リスト)を **後勝ちで全置換** するので、base の :80 行もここに再掲する。
+#   ports / volumes はマージ(:443 と acme volume が base に足される)。
+services:
+  traefik:
+    command:
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # :80 は :443 へリダイレクト(LE は TLS-ALPN-01 = :443 上なので干渉しない)。
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.email=${TSUBOMI_ACME_EMAIL:?set TSUBOMI_ACME_EMAIL in .env (直VPS の LE 通知先)}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+    ports:
+      - "${TRAEFIK_BIND_ADDR:-0.0.0.0}:443:443"
+    volumes:
+      - traefik_acme:/acme   # LE 証明書の永続化(acme.json)
+
+volumes:
+  traefik_acme:

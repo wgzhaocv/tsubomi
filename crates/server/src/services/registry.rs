@@ -62,7 +62,17 @@ pub async fn ensure_account(state: &AppState, user_id: Uuid) -> AppResult<Regist
 /// IP 許可リスト middleware は付けない(決定 #4:registry は免除)。dev(tls=false)は何もしない。
 /// 起動時 + `ensure_account` の新規時に呼ぶ(traefik file provider がホットリロード、SIGHUP 不要)。
 pub async fn sync_traefik(state: &AppState) {
-    if !state.config.tls {
+    // prod(push 先が公網の別ホスト)でのみ入口を書く。dev / 単機無認証では何もしない。
+    // TLS の有無(traefik 終端 / 上流終端)とは独立 — tunnel(tls=false)でも入口は要る。
+    if !state.config.registry_ingress() {
+        // tls=true なのに push==pull は本番の設定漏れ(REGISTRY_PUSH 未設定)。push 入口が
+        // 書かれず CI の docker login が 404 で黙って割れるので警告する。
+        if state.config.tls {
+            tracing::warn!(
+                "TSUBOMI_TLS=true だが REGISTRY_PUSH==PULL — registry push 入口を書きません。\
+                 TSUBOMI_REGISTRY_PUSH=registry.<域名> を設定してください"
+            );
+        }
         return;
     }
     // best-effort:失敗しても account 行は DB にあり、起動時 / 次の create で再同期して収束する
@@ -89,34 +99,35 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     }
 
     let target = state.config.traefik_dynamic_dir.join("registry.yml");
-    crate::services::route::write_atomic(&target, &render(&state.config.domain, &users))?;
+    let doc = render(state.config.registry_host(), &users, state.config.tls);
+    crate::services::route::write_atomic(&target, &doc)?;
     tracing::info!(accounts = users.len(), "registry の traefik 入口を同期した");
     Ok(())
 }
 
 /// traefik 動的設定(registry router + basicAuth middleware + service)を組み立てる。
+/// `push_host` = 公網の push ホスト(`registry_push`、例 registry.<域名>)。`tls`=true なら traefik 終端
+/// (websecure + LE)、false なら上流終端(web、HTTP。CF Tunnel / 逆代理の後ろ)。
 /// bcrypt ハッシュは `$`/`.`/`/` のみ(引用符・バックスラッシュ無し)なので二重引用符で安全に包める。
 /// file provider なので compose の `$$` 二重化は不要。
-/// **users 空(アカウント未作成)→ router を書かない**:registry.<domain> は 404 = push 不可(fail-closed)。
+/// **users 空(アカウント未作成)→ router を書かない**:push 入口は 404 = push 不可(fail-closed)。
 /// 空の basicAuth `users` が traefik で allow-all に倒れて push 入口が開く事故を避ける。
-fn render(domain: &str, users: &[String]) -> String {
-    use crate::services::route::{CERT_RESOLVER, ENTRYPOINT_TLS};
+fn render(push_host: &str, users: &[String], tls: bool) -> String {
+    use crate::services::route::{entrypoint, push_tls_block};
     let mut s = String::new();
     s.push_str("# 平台が自動生成(services/registry.rs)。手で編集しない。\n");
     if users.is_empty() {
         s.push_str("# (registry アカウント未作成 — push 入口は未公開 = fail-closed)\n");
         return s;
     }
-    let host = format!("registry.{domain}");
     s.push_str("http:\n");
     s.push_str("  routers:\n");
     s.push_str("    tsubomi-registry:\n");
-    s.push_str(&format!("      rule: \"Host(`{host}`)\"\n"));
-    s.push_str(&format!("      entryPoints: [\"{ENTRYPOINT_TLS}\"]\n"));
+    s.push_str(&format!("      rule: \"Host(`{push_host}`)\"\n"));
+    s.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(tls)));
     s.push_str("      service: \"tsubomi-registry\"\n");
     s.push_str("      middlewares: [\"tsubomi-registry-auth@file\"]\n");
-    s.push_str("      tls:\n");
-    s.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
+    push_tls_block(&mut s, tls);
     s.push_str("  middlewares:\n");
     s.push_str("    tsubomi-registry-auth:\n");
     s.push_str("      basicAuth:\n");
@@ -136,20 +147,35 @@ fn render(domain: &str, users: &[String]) -> String {
 mod tests {
     use super::render;
 
+    const USER: &str = "u-abc:$2b$12$hashhashhash";
+
     #[test]
-    fn render_has_router_auth_and_backend() {
-        let doc = render("example.com", &["u-abc:$2b$12$hashhashhash".to_string()]);
+    fn render_tls_uses_websecure_and_le() {
+        // 直 VPS(tls=true):websecure + certResolver。Host は push ホストをそのまま。
+        let doc = render("registry.example.com", &[USER.to_string()], true);
         assert!(doc.contains("Host(`registry.example.com`)"));
-        assert!(doc.contains("tsubomi-registry-auth@file"));
-        assert!(doc.contains("u-abc:$2b$12$hashhashhash"));
-        assert!(doc.contains("http://tsubomi-registry:5000"));
+        assert!(doc.contains("entryPoints: [\"websecure\"]"));
         assert!(doc.contains("certResolver: le"));
+        assert!(doc.contains("tsubomi-registry-auth@file"));
+        assert!(doc.contains(USER));
+        assert!(doc.contains("http://tsubomi-registry:5000"));
+    }
+
+    #[test]
+    fn render_no_tls_uses_web_and_no_certresolver() {
+        // 上流終端(tls=false。CF Tunnel/逆代理):web エントリ・tls ブロック無し。basicAuth は付ける。
+        let doc = render("registry.example.com", &[USER.to_string()], false);
+        assert!(doc.contains("entryPoints: [\"web\"]"));
+        assert!(!doc.contains("certResolver"));
+        assert!(!doc.contains("tls:"));
+        assert!(doc.contains("tsubomi-registry-auth@file"));
+        assert!(doc.contains(USER));
     }
 
     #[test]
     fn render_empty_is_fail_closed() {
-        // アカウント 0 → router も basicAuth も書かない(registry.<domain> は 404 = push 不可)。
-        let doc = render("example.com", &[]);
+        // アカウント 0 → router も basicAuth も書かない(push 入口は 404 = push 不可)。tls 不問。
+        let doc = render("registry.example.com", &[], false);
         assert!(!doc.contains("routers"));
         assert!(!doc.contains("basicAuth"));
         assert!(!doc.contains("Host("));
