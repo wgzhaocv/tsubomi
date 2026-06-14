@@ -38,6 +38,8 @@ pub struct RunSpec {
     pub memory_mb: i32,
     pub cpu_shares: i32,
     pub env: Vec<(String, String)>,
+    /// volume 注入のバインドマウント(`"<host_path>:<mount_path>"`)。空なら無し。
+    pub binds: Vec<String>,
 }
 
 /// digest 指定で registry から pull する(決定 #3:tag ではなく内容アドレス)。
@@ -70,6 +72,8 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
     let host_config = HostConfig {
         // tsubomi-edge のみ:infra 内部網には繋がない(隔離の一線)。
         network_mode: Some(cfg.edge_network.clone()),
+        // volume 注入のバインドマウント(`<host_path>:<mount_path>`。S6)。無ければ付けない。
+        binds: (!spec.binds.is_empty()).then(|| spec.binds.clone()),
         // --memory 硬上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
         memory: Some((spec.memory_mb as i64) * 1024 * 1024),
         cpu_shares: Some(spec.cpu_shares as i64),

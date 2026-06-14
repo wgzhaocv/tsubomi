@@ -39,7 +39,12 @@ pub struct Config {
     pub db_public_host: String,
     pub db_public_port: u16,
     /// 接続文字列の sslmode。dev=disable(pgbouncer に TLS なし)、prod は env で調整。
+    /// 外部(human)も内部(注入する app)も同じ pgbouncer なので sslmode を共有する。
     pub db_sslmode: String,
+    /// service へ注入する **内部**接続文字列のホスト / ポート(コンテナが docker DNS で引く
+    /// pgbouncer)。外部入口 db_public_host とは別 — コンテナは社外に出ず内部路径で繋ぐ(§7.2)。
+    pub db_internal_host: String,
+    pub db_internal_port: u16,
     /// at-rest 暗号化の master key(32 bytes)。DB パスワードの暗号化に使う。
     pub master_key: MasterKey,
     /// 日次バックアップの置き場 / ゴミ箱(dump)の置き場(server ホスト上)。
@@ -171,6 +176,13 @@ impl Config {
             .unwrap_or(6432);
         let db_sslmode =
             std::env::var("TSUBOMI_DB_SSLMODE").unwrap_or_else(|_| "disable".to_string());
+        // 注入する内部入口(コンテナ → edge 上の pgbouncer を docker DNS で)。§7.2。
+        let db_internal_host = std::env::var("TSUBOMI_DB_INTERNAL_HOST")
+            .unwrap_or_else(|_| "tsubomi-pgbouncer".to_string());
+        let db_internal_port: u16 = std::env::var("TSUBOMI_DB_INTERNAL_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6432);
         let master_key = MasterKey(load_master_key()?);
         let backup_dir = std::env::var("TSUBOMI_BACKUP_DIR")
             .map(PathBuf::from)
@@ -222,6 +234,8 @@ impl Config {
             db_public_host,
             db_public_port,
             db_sslmode,
+            db_internal_host,
+            db_internal_port,
             master_key,
             backup_dir,
             trash_dir,

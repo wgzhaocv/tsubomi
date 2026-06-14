@@ -1,6 +1,8 @@
 pub mod db;
 pub mod deploy;
+pub mod env;
 pub mod health;
+pub mod inject;
 pub mod login;
 pub mod logout;
 pub mod service;
@@ -12,6 +14,7 @@ pub mod whoami;
 
 use anyhow::{Context, Result};
 
+use crate::api;
 use crate::config::Config;
 
 /// 出力形式。text=人間向けの整形、json=機械(AI/スクリプト)向けの構造化出力。
@@ -74,4 +77,25 @@ pub fn resolve_server_from(over: Option<&str>, cfg: Option<&Config>) -> String {
 pub fn resolve_token_from(over: Option<String>, cfg: Option<Config>) -> Result<String> {
     over.or_else(|| cfg.and_then(|c| c.token))
         .context("not logged in (run: tbm login)")
+}
+
+/// サービスの表示名 → id を一覧から解決する(service / inject / env が共有。専用エンドポイント
+/// を増やさない)。見つからなければ機械可読な not_found コードを付けて返す。
+pub async fn resolve_service_id(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<String> {
+    let svcs = api::service_list(c, server_url, token).await?;
+    svcs.iter()
+        .find(|s| s.display_name == name)
+        .map(|s| s.id.to_string())
+        .ok_or_else(|| {
+            api::ApiError {
+                code: "not_found",
+                message: format!("サービス '{name}' が見つかりません(`tbm service list` で確認)"),
+            }
+            .into()
+        })
 }

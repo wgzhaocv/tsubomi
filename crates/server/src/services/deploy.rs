@@ -14,6 +14,7 @@
 use crate::databases::{audit, map_unique};
 use crate::error::{AppError, AppResult};
 use crate::services::docker::{self, RunSpec};
+use crate::services::inject;
 use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -198,6 +199,13 @@ async fn run_digest_inner(
     let image_ref = docker::pull(state, service_id, image_digest).await?;
 
     set_status(state, deploy_id, "starting").await;
+    // 注入を起動の瞬間に解決(静的 env + database/volume、+ volume の bind。決定 #5)。
+    // PORT は最後に足す。重複キーは **後勝ち**で畳む(injection が static を、PORT が両方を
+    // 上書き)。Docker の重複 env の扱い(実装依存)に頼らず、ここで決定的にする。
+    let (mut env, binds) = inject::resolve(state, service_id).await?;
+    env.push(("PORT".to_string(), container_port.to_string()));
+    let env = dedup_env_last(env);
+
     // start-first:新コンテナを deploy 一意名で起こす(旧は触らない)。
     let new_name = format!(
         "tsubomi-{}-{}",
@@ -212,8 +220,8 @@ async fn run_digest_inner(
         container_port,
         memory_mb,
         cpu_shares,
-        // 注入は S6。S5 は PORT のみ(app が $PORT を読む流儀向け)。
-        env: vec![("PORT".to_string(), container_port.to_string())],
+        env,
+        binds,
     };
 
     // 新コンテナを起こし存活を確認する(create+start → is_live)。失敗したら新コンテナだけ
@@ -333,6 +341,17 @@ async fn set_status(state: &AppState, deploy_id: Uuid, status: &str) {
         .await;
 }
 
+/// env の重複キーを「後勝ち」で畳む(後ろの要素が優先。env は集合なので順序は不問)。
+/// service_env(静的)→ injection → PORT の順で積んであるので、injection が static を、
+/// PORT が両方を上書きする。Docker の重複 env の扱い(実装依存)に頼らない。
+fn dedup_env_last(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (k, v) in env {
+        map.insert(k, v);
+    }
+    map.into_iter().collect()
+}
+
 /// `sha256:` + 64 桁 16 進かどうか。tag や任意文字列を弾く(決定 #3 の digest ピン留め)。
 fn is_sha256_digest(s: &str) -> bool {
     s.strip_prefix("sha256:")
@@ -360,6 +379,21 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn dedup_env_keeps_last() {
+        // 同じ KEY は後勝ち(injection が static を、PORT が両方を上書きする想定)。
+        let env = vec![
+            ("DATABASE_URL".to_string(), "static".to_string()),
+            ("PORT".to_string(), "3000".to_string()),
+            ("DATABASE_URL".to_string(), "injected".to_string()),
+            ("PORT".to_string(), "8080".to_string()),
+        ];
+        let out: std::collections::HashMap<_, _> = dedup_env_last(env).into_iter().collect();
+        assert_eq!(out.get("DATABASE_URL").unwrap(), "injected");
+        assert_eq!(out.get("PORT").unwrap(), "8080");
+        assert_eq!(out.len(), 2);
     }
 
     #[test]

@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq,
-    DatabaseDto, DeployConfig, DeployDto, Health, ListDirResp, Me, MoveReq, RenameVolumeReq,
-    ServiceDto, TrashItemDto, VolumeDto,
+    ConnectionUrlResp, CreateDatabaseReq, CreateInjectionReq, CreateServiceReq, CreateServiceResp,
+    CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto, Health, InjectionDto, ListDirResp, Me,
+    MoveReq, RenameVolumeReq, ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -497,6 +497,114 @@ pub async fn deploy_config(
     resp.json()
         .await
         .context("failed to parse deploy-config response")
+}
+
+// ============ M3 注入 / 静的 env ============
+
+pub async fn inject_list(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+) -> Result<Vec<InjectionDto>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{service_id}/injections"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse injections response")
+}
+
+pub async fn inject_create(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+    resource_id: &str,
+    env_var: Option<&str>,
+    mount_path: Option<&str>,
+) -> Result<InjectionDto> {
+    let req = CreateInjectionReq {
+        resource_id: resource_id.parse().context("invalid resource id")?,
+        env_var: env_var.map(str::to_owned),
+        mount_path: mount_path.map(str::to_owned),
+    };
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services/{service_id}/injections"))
+            .bearer_auth(token)
+            .json(&req),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse injection response")
+}
+
+pub async fn inject_delete(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    injection_id: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(format!("{server_url}/api/injections/{injection_id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn env_keys(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+) -> Result<Vec<String>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{service_id}/env"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json().await.context("failed to parse env response")
+}
+
+pub async fn env_set(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/services/{service_id}/env"))
+            .bearer_auth(token)
+            .json(&SetEnvReq {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            }),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn env_unset(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+    key: &str,
+) -> Result<()> {
+    // key は任意文字を含みうるのでパスセグメントとしてエンコードする。
+    let mut url =
+        url::Url::parse(&format!("{server_url}/api/services/{service_id}/env")).context("invalid server url")?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow::anyhow!("invalid url base"))?
+        .push(key);
+    send_ok(c.delete(url).bearer_auth(token)).await?;
+    Ok(())
 }
 
 /// deploy hook を叩く(no-auth、HMAC)。**署名済みの生バイトをそのまま**送る

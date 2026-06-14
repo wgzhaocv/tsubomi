@@ -375,6 +375,41 @@ pub struct DeployConfig {
     pub platforms: String,
 }
 
+/// `GET /api/services/:id/injections` の各要素 / `POST` のレスポンス。注入の **バインディング**
+/// (値はコンテナ起動の瞬間に解決 — 決定 #5)。秘密(解決後の接続文字列)は含まない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectionDto {
+    pub id: Uuid,
+    /// 注入元リソース(database / volume)。
+    pub resource_id: Uuid,
+    pub resource_kind: String,
+    pub resource_name: String,
+    /// 注入先 env 変数名(database 既定 DATABASE_URL / volume 既定 STORAGE_PATH)。
+    pub env_var: String,
+    /// volume のみ:コンテナ内マウント先。
+    #[serde(default)]
+    pub mount_path: Option<String>,
+    /// 注入元が生きているか(ソフト削除済み = false = 失効。service は起動するが env は出ない)。
+    pub valid: bool,
+}
+
+/// `POST /api/services/:id/injections` のリクエスト。env_var / mount_path 省略時は kind 既定。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateInjectionReq {
+    pub resource_id: Uuid,
+    #[serde(default)]
+    pub env_var: Option<String>,
+    #[serde(default)]
+    pub mount_path: Option<String>,
+}
+
+/// `POST /api/services/:id/env` のリクエスト(静的 env を 1 件 upsert。値は暗号化保存)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetEnvReq {
+    pub key: String,
+    pub value: String,
+}
+
 // ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============
 
 /// `GET /api/ip-allowlist` の各要素。会社 IP 許可リストの 1 エントリ。

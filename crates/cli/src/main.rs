@@ -54,6 +54,18 @@ enum Cmd {
     },
     /// デプロイ(`--local`:ローカルで build+push して hook を叩く。GitHub 非依存の退路)
     Deploy(commands::deploy::DeployArgs),
+    /// リソース(database / volume)を service に注入する
+    Inject(commands::inject::InjectArgs),
+    /// 注入を外す(injection-id は `tbm service status` で確認)
+    Eject {
+        /// 外す注入の id
+        id: String,
+    },
+    /// 静的 env(set / unset / list)。反映には再デプロイが必要
+    Env {
+        #[command(subcommand)]
+        action: commands::env::EnvCmd,
+    },
     /// ボリューム(作成 / 一覧 / 削除 + ファイル操作 ls/put/get/rm/mkdir/mv)
     Volume {
         #[command(subcommand)]
@@ -114,6 +126,9 @@ async fn main() -> Result<()> {
             commands::service::run(action, cli.server, cli.token, out).await
         }
         Cmd::Deploy(args) => commands::deploy::run(args, cli.server, cli.token, out).await,
+        Cmd::Inject(args) => commands::inject::run_inject(args, cli.server, cli.token, out).await,
+        Cmd::Eject { id } => commands::inject::run_eject(id, cli.server, cli.token, out).await,
+        Cmd::Env { action } => commands::env::run(action, cli.server, cli.token, out).await,
         Cmd::Volume { action } => commands::volume::run(action, cli.server, cli.token, out).await,
         Cmd::Trash { action } => commands::trash::run(action, cli.server, cli.token, out).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,

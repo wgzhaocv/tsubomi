@@ -5,9 +5,11 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::api;
-use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
+use crate::commands::{
+    OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
+};
 use crate::config;
-use tsubomi_shared::{CreateServiceResp, ServiceDto, WORKFLOW_PATH};
+use tsubomi_shared::{CreateServiceResp, InjectionDto, ServiceDto, WORKFLOW_PATH};
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
 /// create だけは API の後にユーザ自身の `gh` で GitHub 連携を組み立てる(平台は GitHub に
@@ -54,13 +56,21 @@ pub async fn run(
             }
         }
         ServiceCmd::Status { name } => {
-            let id = resolve_id(&c, &server_url, &token, &name).await?;
-            let svc = api::service_get(&c, &server_url, &token, &id).await?;
-            let deploys = api::service_deploys(&c, &server_url, &token, &id).await?;
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            // 4 つの読み取りは独立なので並行取得する(逐次 4 往復 → 1 往復ぶん)。
+            let (svc, deploys, injections, env) = tokio::join!(
+                api::service_get(&c, &server_url, &token, &id),
+                api::service_deploys(&c, &server_url, &token, &id),
+                api::inject_list(&c, &server_url, &token, &id),
+                api::env_keys(&c, &server_url, &token, &id),
+            );
+            let (svc, deploys, injections, env) = (svc?, deploys?, injections?, env?);
             if json {
-                print_json(&json!({ "service": svc, "deploys": deploys }))?;
+                print_json(
+                    &json!({ "service": svc, "deploys": deploys, "injections": injections, "env_keys": env }),
+                )?;
             } else {
-                print_status(&svc, &deploys);
+                print_status(&svc, &deploys, &injections, &env);
             }
         }
         ServiceCmd::Create { name } => {
@@ -78,21 +88,13 @@ pub async fn run(
     Ok(())
 }
 
-/// 表示名 → id を一覧から解決する(db.rs と同じ作法。専用エンドポイントを増やさない)。
-async fn resolve_id(c: &reqwest::Client, server_url: &str, token: &str, name: &str) -> Result<String> {
-    let svcs = api::service_list(c, server_url, token).await?;
-    match svcs.iter().find(|s: &&ServiceDto| s.display_name == name) {
-        Some(s) => Ok(s.id.to_string()),
-        None => Err(api::ApiError {
-            code: "not_found",
-            message: format!("サービス '{name}' が見つかりません(`tbm service list` で確認)"),
-        }
-        .into()),
-    }
-}
-
-/// status の text 表示(phase / desired / digest / 直近のデプロイ履歴)。
-fn print_status(svc: &ServiceDto, deploys: &[tsubomi_shared::DeployDto]) {
+/// status の text 表示(phase / desired / digest / 注入 / env keys / 直近のデプロイ履歴)。
+fn print_status(
+    svc: &ServiceDto,
+    deploys: &[tsubomi_shared::DeployDto],
+    injections: &[InjectionDto],
+    env_keys: &[String],
+) {
     println!(
         "{} (service{})  phase={} desired={}",
         svc.display_name, svc.anon_seq, svc.phase, svc.desired_state
@@ -103,6 +105,19 @@ fn print_status(svc: &ServiceDto, deploys: &[tsubomi_shared::DeployDto]) {
     }
     if let Some(t) = &svc.last_deploy_at {
         println!("  last deploy: {t}");
+    }
+    if !injections.is_empty() {
+        println!("  注入(反映には再デプロイ):");
+        for i in injections {
+            let stale = if i.valid { "" } else { "  [失効]" };
+            println!(
+                "    {} ← {} ({}){}  id={}",
+                i.env_var, i.resource_name, i.resource_kind, stale, i.id
+            );
+        }
+    }
+    if !env_keys.is_empty() {
+        println!("  env: {}", env_keys.join(", "));
     }
     if deploys.is_empty() {
         println!("  (まだデプロイがありません。`tbm deploy --local` か git push で開始)");

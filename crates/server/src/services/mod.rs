@@ -7,6 +7,7 @@
 
 pub mod deploy;
 pub mod docker;
+pub mod inject;
 pub mod registry;
 pub mod route;
 pub mod workflow;
@@ -20,12 +21,13 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{delete, get};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
-    CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ServiceDto,
+    CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, InjectionDto,
+    ServiceDto, SetEnvReq,
 };
 use uuid::Uuid;
 
@@ -41,6 +43,13 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}", get(get_one))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
+        .route(
+            "/services/{id}/injections",
+            get(list_injections).post(create_injection),
+        )
+        .route("/injections/{id}", delete(delete_injection))
+        .route("/services/{id}/env", get(list_env).post(set_env))
+        .route("/services/{id}/env/{key}", delete(unset_env))
 }
 
 /// list / get_one が共有する行(resources + service_details の join)。
@@ -189,6 +198,216 @@ pub async fn deploy_config(
         hook_url,
         platforms: state.config.platforms.clone(),
     }))
+}
+
+// ===== 注入(database / volume → service。バインディングだけ保存、値は起動時解決)=====
+
+/// 注入一覧の行(id, resource_id, kind, display_name, env_var, mount_path, valid)。
+type InjectionRow = (Uuid, Uuid, String, String, String, Option<String>, bool);
+
+fn injection_row_to_dto(r: InjectionRow) -> InjectionDto {
+    InjectionDto {
+        id: r.0,
+        resource_id: r.1,
+        resource_kind: r.2,
+        resource_name: r.3,
+        env_var: r.4,
+        mount_path: r.5,
+        valid: r.6,
+    }
+}
+
+/// `GET /api/services/:id/injections`:注入一覧(失効 = valid:false も含む)。
+pub async fn list_injections(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<InjectionDto>>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let rows: Vec<InjectionRow> = sqlx::query_as(
+        "SELECT i.id, i.resource_id, r.kind, r.display_name, i.env_var, i.mount_path,
+                (r.deleted_at IS NULL) AS valid
+           FROM injections i JOIN resources r ON r.id = i.resource_id
+          WHERE i.service_id = $1
+          ORDER BY i.env_var",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows.into_iter().map(injection_row_to_dto).collect()))
+}
+
+/// `POST /api/services/:id/injections`:database / volume を service に注入する(バインディング)。
+/// 反映には再デプロイ(値は起動の瞬間に解決 — 決定 #5)。
+pub async fn create_injection(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CreateInjectionReq>,
+) -> AppResult<(StatusCode, Json<InjectionDto>)> {
+    ensure_owned(&state, auth.user_id, id).await?;
+
+    // 注入元は本人の database / volume(未削除)。kind と表示名を取る。
+    let resource: Option<(String, String)> = sqlx::query_as(
+        "SELECT kind, display_name FROM resources
+          WHERE id=$1 AND user_id=$2 AND kind IN ('database','volume') AND deleted_at IS NULL",
+    )
+    .bind(req.resource_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (kind, name) = resource.ok_or(AppError::NotFound)?;
+
+    // env_var / mount_path の既定を kind で決める。
+    let (env_var, mount_path) = if kind == "database" {
+        (req.env_var.unwrap_or_else(|| "DATABASE_URL".into()), None)
+    } else {
+        // volume
+        let ev = req.env_var.unwrap_or_else(|| "STORAGE_PATH".into());
+        let mp = req.mount_path.unwrap_or_else(|| format!("/data/{name}"));
+        validate_mount_path(&mp)?;
+        (ev, Some(mp))
+    };
+    validate_env_key(&env_var)?;
+
+    let new_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO injections (service_id, resource_id, env_var, mount_path)
+              VALUES ($1, $2, $3, $4) RETURNING id",
+    )
+    .bind(id)
+    .bind(req.resource_id)
+    .bind(&env_var)
+    .bind(&mount_path)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("env 変数 '{env_var}' はこの service で既に使われています"),
+        )
+    })?;
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.inject",
+        id,
+        json!({ "resource_id": req.resource_id, "env_var": env_var }),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(InjectionDto {
+            id: new_id,
+            resource_id: req.resource_id,
+            resource_kind: kind,
+            resource_name: name,
+            env_var,
+            mount_path,
+            valid: true,
+        }),
+    ))
+}
+
+/// `DELETE /api/injections/:id`:注入を外す(所有権は service 経由で確認)。
+pub async fn delete_injection(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let owned: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM injections i JOIN resources r ON r.id = i.service_id
+                        WHERE i.id = $1 AND r.user_id = $2)",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !owned {
+        return Err(AppError::NotFound);
+    }
+    sqlx::query("DELETE FROM injections WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ===== 静的 env(値は暗号化保存。GET は key のみ — 値は秘密)=====
+
+/// `GET /api/services/:id/env`:env の key 一覧。
+pub async fn list_env(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<String>>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT key FROM service_env WHERE service_id = $1 ORDER BY key")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
+    Ok(Json(rows.into_iter().map(|(k,)| k).collect()))
+}
+
+/// `POST /api/services/:id/env`:静的 env を 1 件 upsert(値は暗号化)。反映には再デプロイ。
+pub async fn set_env(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetEnvReq>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    validate_env_key(&req.key)?;
+    let value_enc = state.crypto.encrypt(&req.value)?;
+    sqlx::query(
+        "INSERT INTO service_env (service_id, key, value_enc) VALUES ($1, $2, $3)
+              ON CONFLICT (service_id, key) DO UPDATE SET value_enc = EXCLUDED.value_enc",
+    )
+    .bind(id)
+    .bind(&req.key)
+    .bind(&value_enc)
+    .execute(&state.db)
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/services/:id/env/:key`:静的 env を 1 件削除。
+pub async fn unset_env(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path((id, key)): Path<(Uuid, String)>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    sqlx::query("DELETE FROM service_env WHERE service_id = $1 AND key = $2")
+        .bind(id)
+        .bind(&key)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// env 変数名の検査(空 / `=` / NUL を弾く)。
+fn validate_env_key(key: &str) -> AppResult<()> {
+    if key.is_empty() || key.contains('=') || key.contains('\0') {
+        return Err(AppError::BadRequest(
+            "env のキーが不正です(空 / '=' / NUL は不可)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// マウント先パスの検査(絶対パス + NUL / `:` なし)。`:` を弾くのは、bind 文字列
+/// `<host_path>:<mount_path>` に `:ro` / `:rshared` などの bind オプション・伝播モードを
+/// 注入されるのを防ぐため(オプション注入 → ホスト mount namespace への伝播の足場になりうる)。
+fn validate_mount_path(path: &str) -> AppResult<()> {
+    if !path.starts_with('/') || path.contains('\0') || path.contains(':') {
+        return Err(AppError::BadRequest(
+            "mount パスは絶対パスで、':' / NUL を含めないでください".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// `POST /api/services`:service の平台側メタを作る(resources + service_details +
