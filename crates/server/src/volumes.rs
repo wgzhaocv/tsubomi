@@ -247,21 +247,29 @@ pub async fn usage(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<VolumeUsageDto>> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let (size_bytes, file_count, dir_count) = tokio::task::spawn_blocking(move || dir_usage(&root))
-        .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("使用量の集計に失敗しました: {e}")))??;
+    let (size_bytes, file_count, dir_count, truncated) =
+        tokio::task::spawn_blocking(move || dir_usage(&root))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("使用量の集計に失敗しました: {e}")))??;
     Ok(Json(VolumeUsageDto {
         size_bytes,
         file_count,
         dir_count,
+        truncated,
     }))
 }
 
-/// 假根を再帰走査して (合計バイト, ファイル数, ディレクトリ数) を返す。
+/// 走査の時間予算。これを超えたら打ち切り、truncated=true で下限値を返す
+/// (巨大な卷や遅いストレージで 1 リクエストが長引くのを防ぐ。精密な集計は M4)。
+const USAGE_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// 假根を再帰走査して (合計バイト, ファイル数, ディレクトリ数, 打ち切りか) を返す。
 /// symlink は辿らない(read_dir の file_type はエントリ自身の型 — symlink は file/dir
 /// どちらにも該当せず素通り)。スタックで回し、深いツリーでも再帰オーバーフローしない。
-fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64)> {
-    let (mut size, mut files, mut dirs) = (0u64, 0u64, 0u64);
+/// 時間予算を超えたら途中で打ち切る(値は下限、truncated=true)。
+fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64, bool)> {
+    let start = std::time::Instant::now();
+    let (mut size, mut files, mut dirs, mut seen) = (0u64, 0u64, 0u64, 0u64);
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
@@ -274,9 +282,14 @@ fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64)> {
                 files += 1;
                 size += entry.metadata().map(|m| m.len()).unwrap_or(0);
             }
+            // 毎回 Instant を読むのは過剰なので一定間隔だけ時間予算を確認する。
+            seen += 1;
+            if seen.is_multiple_of(2048) && start.elapsed() > USAGE_TIME_BUDGET {
+                return Ok((size, files, dirs, true));
+            }
         }
     }
-    Ok((size, files, dirs))
+    Ok((size, files, dirs, false))
 }
 
 /// `PATCH /api/volumes/:id`:表示名のリネーム(host_path は不変)。

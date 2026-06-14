@@ -236,6 +236,8 @@ pub struct VolumeUsageDto {
     pub size_bytes: u64,
     pub file_count: u64,
     pub dir_count: u64,
+    /// 走査が時間予算を超えて打ち切られた = 値は下限(UI は「≥」表示)。
+    pub truncated: bool,
 }
 
 #[cfg(test)]

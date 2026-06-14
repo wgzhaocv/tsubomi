@@ -34,8 +34,14 @@ export default function VolumeOverview() {
               利用可能
             </span>
           </Stat>
-          <Stat label="合計サイズ">{usage ? formatBytes(usage.size_bytes) : "…"}</Stat>
-          <Stat label="ファイル数">{usage ? usage.file_count.toLocaleString("ja-JP") : "…"}</Stat>
+          <Stat label="合計サイズ">
+            {usage ? `${usage.truncated ? "≥ " : ""}${formatBytes(usage.size_bytes)}` : "…"}
+          </Stat>
+          <Stat label="ファイル数">
+            {usage
+              ? `${usage.file_count.toLocaleString("ja-JP")}${usage.truncated ? "+" : ""}`
+              : "…"}
+          </Stat>
           <Stat label="作成日">
             {vol ? new Date(vol.created_at).toLocaleDateString("ja-JP") : "…"}
           </Stat>

@@ -30,6 +30,8 @@ export type VolumeUsage = {
   size_bytes: number;
   file_count: number;
   dir_count: number;
+  // 走査が時間予算で打ち切られた = 値は下限(UI は「≥」表示)。
+  truncated: boolean;
 };
 
 export const volumeKeys = {
@@ -144,6 +146,9 @@ export function useVolumeUsage(id: string) {
       if (!res.ok) return failBody(res);
       return (await res.json()) as VolumeUsage;
     },
+    // 60 秒は再計算しない(画面を行き来しても走盘を繰り返さない)。ファイル操作で
+    // detail(id) が無効化されればその時に取り直す(staleTime より invalidate が優先)。
+    staleTime: 60_000,
   });
 }
 
