@@ -19,15 +19,15 @@ use crate::state::AppState;
 use crate::validate;
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, InjectionDto,
-    ServiceDto, SetEnvReq,
+    LogsResp, RollbackReq, ServiceDto, SetEnvReq,
 };
 use uuid::Uuid;
 
@@ -40,7 +40,11 @@ const DEPLOY_KEY_BYTES: usize = 32;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/services", get(list).post(create))
-        .route("/services/{id}", get(get_one))
+        .route("/services/{id}", get(get_one).delete(delete_service))
+        .route("/services/{id}/start", post(start))
+        .route("/services/{id}/stop", post(stop))
+        .route("/services/{id}/logs", get(logs))
+        .route("/services/{id}/rollback", post(rollback))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
         .route(
@@ -198,6 +202,148 @@ pub async fn deploy_config(
         hook_url,
         platforms: state.config.platforms.clone(),
     }))
+}
+
+// ===== lifecycle(start / stop / logs / delete / rollback)=====
+
+/// 指定 digest を新しい deploy として起こす(start / rollback が共有)。deploys 行を received で
+/// 作り、run_digest を **await**(run_digest 内で deploy_lock + start-first swap + 状態記録)。
+async fn redeploy(
+    state: &AppState,
+    service_id: Uuid,
+    image_digest: &str,
+    git_sha: &str,
+) -> AppResult<()> {
+    let deploy_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO deploys (service_id, git_sha, image_digest, status)
+              VALUES ($1, $2, $3, 'received') RETURNING id",
+    )
+    .bind(service_id)
+    .bind(git_sha)
+    .bind(image_digest)
+    .fetch_one(&state.db)
+    .await?;
+    deploy::run_digest(state, deploy_id, service_id, image_digest, git_sha).await
+}
+
+/// `POST /api/services/:id/start`:現 image_digest を再起動(desired_state=running)。
+/// 未デプロイ(digest なし)は 400。run_digest を await し、起動できたら 204。
+pub async fn start(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    // 直近に成功した deploy の (digest, git_sha) を再起動する(両者が同じ行 = 整合)。
+    // 1 件も無ければ未デプロイ。
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT image_digest, git_sha FROM deploys
+          WHERE service_id = $1 AND status = 'succeeded'
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (digest, git_sha) = row.ok_or_else(|| {
+        AppError::BadRequest(
+            "まだデプロイされていません(git push か `tbm deploy --local` でデプロイしてください)".into(),
+        )
+    })?;
+    redeploy(&state, id, &digest, &git_sha).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// コンテナを停止 + route を消し、phase/desired を stopped にする(stop / delete が共有)。
+/// **deploy_lock は呼び出し側が取る**(delete は soft-delete まで lock を保持して start と競合しない)。
+async fn stop_containers(state: &AppState, id: Uuid) -> AppResult<()> {
+    docker::stop_remove(state, id).await?;
+    route::remove(state, id)?;
+    sqlx::query(
+        "UPDATE service_details SET desired_state='stopped', phase='stopped' WHERE resource_id=$1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// `POST /api/services/:id/stop`:コンテナ停止 + route 削除(desired_state=stopped）。
+pub async fn stop(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    // 並行 deploy / start と直列化(コンテナ / route の競合防止)。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+    stop_containers(&state, id).await?;
+    audit(&state.db, Some(auth.user_id), "service.stop", id, json!({})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `?tail=N`。
+#[derive(serde::Deserialize)]
+pub struct LogsQuery {
+    tail: Option<usize>,
+}
+
+/// `GET /api/services/:id/logs?tail=N`:走っているコンテナの直近ログ(stdout+stderr)。
+pub async fn logs(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<LogsQuery>,
+) -> AppResult<Json<LogsResp>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let logs = docker::logs(&state, id, q.tail).await?;
+    Ok(Json(LogsResp { logs }))
+}
+
+/// `DELETE /api/services/:id`:ソフト削除(コンテナ/route を消し、ゴミ箱へ。3 日で purge)。
+pub async fn delete_service(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    // lock を soft-delete まで保持(stop と delete の間に start が割り込んで孤児コンテナを
+    // 作るのを防ぐ)。stop_containers が phase=stopped にするので、復元後の状態も正確。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+    stop_containers(&state, id).await?;
+    // service は永続データを持たない(コンテナは deploy で再生成)→ trash_meta は無し。
+    sqlx::query(
+        "UPDATE resources SET deleted_at = now(), purge_after = now() + interval '3 days'
+          WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+    audit(&state.db, Some(auth.user_id), "service.delete", id, json!({})).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/services/:id/rollback`:履歴の指定 deploy の digest を新 deploy として再起動
+/// (再 build なし — §6.8)。指定 deploy が他 service / 不在なら 404。
+pub async fn rollback(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RollbackReq>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    // 指定 deploy はこの service のものに限る(IDOR 防止)。
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT image_digest, git_sha FROM deploys WHERE id = $1 AND service_id = $2",
+    )
+    .bind(req.deploy_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (digest, git_sha) = row.ok_or(AppError::NotFound)?;
+    redeploy(&state, id, &digest, &git_sha).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ===== 注入(database / volume → service。バインディングだけ保存、値は起動時解決)=====

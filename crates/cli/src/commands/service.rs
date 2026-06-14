@@ -28,6 +28,36 @@ pub enum ServiceCmd {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
     },
+    /// サービスを開始(現 image_digest で再起動)
+    Start {
+        /// 対象サービスの表示名
+        name: String,
+    },
+    /// サービスを停止(コンテナ停止 + ルート削除)
+    Stop {
+        /// 対象サービスの表示名
+        name: String,
+    },
+    /// コンテナの直近ログを表示
+    Logs {
+        /// 対象サービスの表示名
+        name: String,
+        /// 取得する行数(既定 200)
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+    /// サービスを削除(ゴミ箱へ。3 日間は復元可能)
+    Delete {
+        /// 対象サービスの表示名
+        name: String,
+    },
+    /// 指定したデプロイに戻す(再ビルドなし。deploy-id は `tbm service status` で確認)
+    Rollback {
+        /// 対象サービスの表示名
+        name: String,
+        /// 戻し先のデプロイ id
+        deploy_id: String,
+    },
 }
 
 pub async fn run(
@@ -71,6 +101,53 @@ pub async fn run(
                 )?;
             } else {
                 print_status(&svc, &deploys, &injections, &env);
+            }
+        }
+        ServiceCmd::Start { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_start(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "status": "running" }))?;
+            } else {
+                println!("起動しました(running)。");
+            }
+        }
+        ServiceCmd::Stop { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_stop(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "status": "stopped" }))?;
+            } else {
+                println!("停止しました。");
+            }
+        }
+        ServiceCmd::Logs { name, tail } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let logs = api::service_logs(&c, &server_url, &token, &id, tail).await?;
+            if json {
+                print_json(&json!({ "logs": logs }))?;
+            } else if logs.is_empty() {
+                println!("(ログがありません。コンテナが走っていない可能性があります)");
+            } else {
+                print!("{logs}");
+            }
+        }
+        ServiceCmd::Delete { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_delete(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "status": "deleted", "recoverable_days": 3 }))?;
+            } else {
+                println!("削除しました(ゴミ箱へ。3 日間は復元可能)。");
+            }
+        }
+        ServiceCmd::Rollback { name, deploy_id } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_rollback(&c, &server_url, &token, &id, &deploy_id).await?;
+            if json {
+                print_json(&json!({ "status": "running", "rolled_back_to": deploy_id }))?;
+            } else {
+                println!("ロールバックしました(running)。");
             }
         }
         ServiceCmd::Create { name } => {
@@ -123,10 +200,17 @@ fn print_status(
         println!("  (まだデプロイがありません。`tbm deploy --local` か git push で開始)");
         return;
     }
-    println!("  デプロイ履歴(新しい順):");
+    println!("  デプロイ履歴(新しい順。rollback は id を使う):");
     for d in deploys.iter().take(10) {
         let err = d.error.as_deref().map(|e| format!("  — {e}")).unwrap_or_default();
-        println!("    {}  {:<9} {}{}", d.created_at, d.status, short_sha(&d.git_sha), err);
+        println!(
+            "    {}  {:<9} {}  id={}{}",
+            d.created_at,
+            d.status,
+            short_sha(&d.git_sha),
+            d.id,
+            err
+        );
     }
 }
 

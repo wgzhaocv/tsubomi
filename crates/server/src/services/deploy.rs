@@ -162,6 +162,26 @@ pub async fn run_digest(
     let lock = state.deploy_lock(service_id);
     let _guard = lock.lock().await;
 
+    // ロック取得待ちの間に service が削除された可能性(start/rollback/hook と delete の競合)。
+    // 削除済みなら起動せず終える — 削除済み service に孤児コンテナ / route を作らない。
+    let alive: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1 AND kind='service' AND deleted_at IS NULL)",
+    )
+    .bind(service_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !alive {
+        tracing::warn!(%service_id, %deploy_id, "deploy 対象が削除済み — スキップ(孤児防止)");
+        let _ = sqlx::query(
+            "UPDATE deploys SET status='failed', error='service は削除済みです', finished_at=now()
+              WHERE id=$1 AND status NOT IN ('succeeded','failed')",
+        )
+        .bind(deploy_id)
+        .execute(&state.db)
+        .await;
+        return Ok(());
+    }
+
     let _ = sqlx::query(
         "UPDATE service_details SET phase='deploying', phase_detail=NULL WHERE resource_id=$1",
     )

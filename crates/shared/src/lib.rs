@@ -410,6 +410,18 @@ pub struct SetEnvReq {
     pub value: String,
 }
 
+/// `GET /api/services/:id/logs` のレスポンス。コンテナの直近ログ(text)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogsResp {
+    pub logs: String,
+}
+
+/// `POST /api/services/:id/rollback` のリクエスト。`deploys` 履歴の戻し先。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackReq {
+    pub deploy_id: Uuid,
+}
+
 // ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============
 
 /// `GET /api/ip-allowlist` の各要素。会社 IP 許可リストの 1 エントリ。

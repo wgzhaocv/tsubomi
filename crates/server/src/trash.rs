@@ -119,6 +119,9 @@ pub async fn restore(
             restore_volume(&state, id, &trash_meta).await?;
             "volume.restore"
         }
+        // service は永続実体が無い(コンテナは deploy で再生成)。下の deleted_at=NULL の
+        // 共通処理が行を active 化し、`tbm service start` で再起動できる。
+        "service" => "service.restore",
         other => {
             return Err(AppError::BadRequest(format!("復元未対応の種別: {other}")));
         }
@@ -277,6 +280,11 @@ pub(crate) async fn purge_resource(
         if trash.exists() {
             std::fs::remove_dir_all(&trash)?;
         }
+    } else if kind == "service" {
+        // service の永久削除:コンテナ + route を掃除する(掃除が失敗したら行を消さない =
+        // db/volume と同じ規律。管理対象外の活きたコンテナを取り残さない)。
+        crate::services::docker::stop_remove(state, id).await?;
+        crate::services::route::remove(state, id)?;
     }
 
     sqlx::query("DELETE FROM resources WHERE id = $1")

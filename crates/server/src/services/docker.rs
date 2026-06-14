@@ -15,7 +15,7 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -136,13 +136,17 @@ async fn list_by_service(state: &AppState, service_id: Uuid) -> AppResult<Vec<Co
         .map_err(|e| AppError::Other(anyhow!("コンテナ一覧に失敗: {e}")))
 }
 
-/// 名前 or id でコンテナを停止 + 強制削除(冪等。失敗はログだけ — 呼び出しを止めない)。
-async fn force_remove(state: &AppState, name_or_id: &str) {
+/// 名前 or id でコンテナを停止 + 強制削除(冪等)。**削除の失敗は伝播する**(stop / delete /
+/// purge が孤児を取り残さないため。stop は既に止まっていてもよいので無視)。swap の片付けだけは
+/// best-effort にしたいので呼び出し側(remove_one / run_digest の remove_others)で握り潰す。
+async fn force_remove(state: &AppState, name_or_id: &str) -> AppResult<()> {
     let _ = state.docker.stop_container(name_or_id, None).await;
     let rm = RemoveContainerOptionsBuilder::default().force(true).build();
-    if let Err(e) = state.docker.remove_container(name_or_id, Some(rm)).await {
-        tracing::warn!(error = ?e, container = %name_or_id, "コンテナ削除に失敗(続行)");
-    }
+    state
+        .docker
+        .remove_container(name_or_id, Some(rm))
+        .await
+        .map_err(|e| AppError::Other(anyhow!("コンテナ削除に失敗({name_or_id}): {e}")))
 }
 
 /// 指定 service の管理コンテナを停止 + 削除する(冪等)。`keep=Some(name)` ならその名前だけ
@@ -165,14 +169,13 @@ async fn remove_service_containers(
             continue;
         }
         if let Some(id) = c.id {
-            force_remove(state, &id).await;
+            force_remove(state, &id).await?;
         }
     }
     Ok(())
 }
 
-/// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 = S7 / 失敗時の全掃除)。冪等。
-#[allow(dead_code)] // S7(service delete / stop)で使用予定
+/// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 / stop / 失敗時の全掃除)。冪等。
 pub async fn stop_remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
     remove_service_containers(state, service_id, None).await
 }
@@ -183,9 +186,40 @@ pub async fn remove_others(state: &AppState, service_id: Uuid, keep_name: &str) 
     remove_service_containers(state, service_id, Some(keep_name)).await
 }
 
-/// 名前指定で 1 つだけ停止 + 削除(start-first 失敗時の新コンテナ片付け。冪等)。
+/// 名前指定で 1 つだけ停止 + 削除(start-first 失敗時の新コンテナ片付け)。best-effort
+/// (失敗しても reconcile が孤児として後で掃除する。ここで失敗を伝播させない)。
 pub async fn remove_one(state: &AppState, name: &str) {
-    force_remove(state, name).await;
+    let _ = force_remove(state, name).await;
+}
+
+/// 指定 service の(現行)コンテナの直近ログを text で返す(stdout+stderr、tail 行)。
+/// コンテナが無い(stopped / 未デプロイ)→ 空文字。stream を行ごとに集約する(follow はしない)。
+pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> AppResult<String> {
+    // service のコンテナ(start-first 後は通常 1 つ)。無ければ空。
+    let Some(name) = list_by_service(state, service_id)
+        .await?
+        .into_iter()
+        .find_map(|c| c.id)
+    else {
+        return Ok(String::new());
+    };
+
+    // tail に上限(既定 200、最大 2000)。巨大 tail で docker ログ全量をメモリに載せない。
+    let tail_s = tail.unwrap_or(200).min(2000).to_string();
+    let opts = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .tail(&tail_s)
+        .build();
+    let mut stream = state.docker.logs(&name, Some(opts));
+    let mut out = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(line) => out.push_str(&line.to_string()),
+            Err(e) => return Err(AppError::Other(anyhow!("ログ取得に失敗: {e}"))),
+        }
+    }
+    Ok(out)
 }
 
 /// 新コンテナが「起動直後に落ちていない」ことを確認する(就緒ではなく **存活** 判定。

@@ -3,8 +3,9 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
     ConnectionUrlResp, CreateDatabaseReq, CreateInjectionReq, CreateServiceReq, CreateServiceResp,
-    CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto, Health, InjectionDto, ListDirResp, Me,
-    MoveReq, RenameVolumeReq, ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
+    CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto, Health, InjectionDto, ListDirResp,
+    LogsResp, Me, MoveReq, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto,
+    VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -497,6 +498,85 @@ pub async fn deploy_config(
     resp.json()
         .await
         .context("failed to parse deploy-config response")
+}
+
+// ============ M3 service lifecycle ============
+
+pub async fn service_start(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/services/{id}/start"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn service_stop(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/services/{id}/stop"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn service_delete(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(format!("{server_url}/api/services/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn service_logs(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    tail: Option<usize>,
+) -> Result<String> {
+    // この最小ビルドの reqwest は .query() が無効なので URL に直接組む。
+    let url = match tail {
+        Some(n) => format!("{server_url}/api/services/{id}/logs?tail={n}"),
+        None => format!("{server_url}/api/services/{id}/logs"),
+    };
+    let resp = send_ok(c.get(url).bearer_auth(token)).await?;
+    let r: LogsResp = resp.json().await.context("failed to parse logs response")?;
+    Ok(r.logs)
+}
+
+pub async fn service_rollback(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    deploy_id: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/services/{id}/rollback"))
+            .bearer_auth(token)
+            .json(&RollbackReq {
+                deploy_id: deploy_id.parse().context("invalid deploy id")?,
+            }),
+    )
+    .await?;
+    Ok(())
 }
 
 // ============ M3 注入 / 静的 env ============

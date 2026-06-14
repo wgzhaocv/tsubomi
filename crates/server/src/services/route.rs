@@ -68,8 +68,7 @@ pub fn write(
     Ok(())
 }
 
-/// service 削除時にルートファイルを消す(無ければ無視)。lifecycle(S7)で使う。
-#[allow(dead_code)]
+/// service の stop / 削除時にルートファイルを消す(無ければ無視)。
 pub fn remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
     match std::fs::remove_file(route_path(state, service_id)) {
         Ok(()) => Ok(()),
