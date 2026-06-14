@@ -26,6 +26,10 @@ pub const AUTHCODE_PREFIX: &str = "tbmc_";
 /// CLI トークン平文のプレフィックス(GitHub 流のリーク検出マーカー)。
 pub const CLI_TOKEN_PREFIX: &str = "tbm_";
 
+/// ユーザの repo に置く GitHub Actions workflow のパス(サーバ / CLI の単一真源)。
+/// サーバは setup_commands のコメントで参照、CLI は実ファイルの書き出し先に使う。
+pub const WORKFLOW_PATH: &str = ".github/workflows/tsubomi-deploy.yml";
+
 /// インストーラ(install.sh)がシェル rc に書く PATH ブロックの目印。
 /// `tbm uninstall` がこれを手がかりにブロックを丸ごと取り除く。
 /// ★ シェルスクリプトは Rust の const を import できないため、
@@ -273,13 +277,44 @@ pub struct CreateServiceReq {
     pub name: String,
 }
 
-/// `POST /api/services` のレスポンス。**deploy_key は発行時の 1 回だけ**返る平文
-/// (HMAC の鍵 — 以後 API では出さない。表示箇所で警告すること)。
+/// service の registry 資格情報(GitHub Actions が docker login + push に使う)。
+/// **per-user**(per-service ではない — digest ピン留めで per-repo ACL 不要。決定 #3)。
+/// `pass` は平文で、**作成レスポンスにだけ**載る。ただし per-user なので、同じユーザが
+/// 2 個目以降の service を作るたびに**同じ pass が再度**返る(2 個目の repo の gh secret
+/// 設定に要るため。deploy_key の「per-service 1 回限り」とはここが違う)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryCreds {
+    /// push 先 host(dev=127.0.0.1:5000・認証なし / prod=registry.<domain>)。
+    pub host: String,
+    pub user: String,
+    pub pass: String,
+}
+
+/// `POST /api/services` のレスポンス。秘密(deploy_key / registry.pass)は平文で、この
+/// レスポンスにだけ載る(他の API では出さない。表示箇所で警告すること)。
+/// - **deploy_key は per-service の 1 回限り**(service ごとに新規。以後取得不可)。
+/// - **registry.pass は per-user**(同ユーザの各 service 作成で同じ値が再度返る — RegistryCreds)。
+///
+/// CLI / web はこの DTO で GitHub 連携(repo / secret / variable / workflow)を組み立てる —
+/// 平台は GitHub に一切触れない(ユーザ自身の gh が実行する)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServiceResp {
     #[serde(flatten)]
     pub service: ServiceDto,
+    /// HMAC の鍵(GitHub Secret `TSUBOMI_DEPLOY_KEY`)。
     pub deploy_key: String,
+    /// registry 資格情報(GitHub Secret `TSUBOMI_REGISTRY_USER` / `TSUBOMI_REGISTRY_PASS`)。
+    pub registry: RegistryCreds,
+    /// deploy hook の URL(GitHub Variable `TSUBOMI_HOOK_URL`)。
+    pub hook_url: String,
+    /// build 対象 arch(GitHub Variable `TSUBOMI_PLATFORMS`、例 `linux/arm64`。§6.6)。
+    pub platforms: String,
+    /// `.github/workflows/tsubomi-deploy.yml` のテンプレ(平台が単一真源として配る)。
+    pub workflow_yaml: String,
+    /// GitHub 連携の手順コマンド列(リポジトリ直下で実行)。平台が **単一真源**として
+    /// 組み立てる(workflow_yaml と同じく GitHub 連携契約の一部)。CLI(json の steps /
+    /// gh 不在時のフォールバック表示)と web がそのまま表示に使う — 文字列を二重定義しない。
+    pub setup_commands: Vec<String>,
 }
 
 // ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============

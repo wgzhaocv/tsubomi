@@ -1,0 +1,122 @@
+//! `.github/workflows/tsubomi-deploy.yml` のテンプレート(平台が単一真源として配る)。
+//!
+//! 平台は GitHub に一切触れない:このテンプレを service create のレスポンスで返し、
+//! CLI(ユーザの gh)/ web(コピペ)がユーザの repo に置く。テンプレは gh の
+//! `vars` / `secrets` を参照するので、service ごとの展開は不要な**静的テキスト**
+//! (service_id / registry / hook_url / platforms はすべて gh variable で渡る)。
+//!
+//! 流れ(paas-m3-design §5.5 / §6):buildx で `TSUBOMI_PLATFORMS` の arch だけ build
+//! → registry へ push → manifest digest を捕まえる → 生 body に HMAC-SHA256 を付けて
+//! hook を叩く(ts ± 300s + nonce でリプレイ防御。HMAC = 送る生バイトそのもの)。
+
+/// `tsubomi-deploy.yml` の中身。CLI / web がそのままファイルに書く。
+pub const TEMPLATE: &str = r##"name: tsubomi deploy
+on: { push: { branches: [main] } }
+jobs:
+  deploy:
+    # 既定は amd64 ランナー + QEMU。arm64 を原生で速くしたいなら ubuntu-24.04-arm に。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.TSUBOMI_REGISTRY }}
+          username: ${{ secrets.TSUBOMI_REGISTRY_USER }}
+          password: ${{ secrets.TSUBOMI_REGISTRY_PASS }}
+      # build:Dockerfile があればそれ、無ければ nixpacks。--platform は平台が公布する
+      # arch だけ(既定 linux/arm64)。GHA 層キャッシュで再 build は数十秒。
+      - id: build
+        run: |
+          IMAGE=${{ vars.TSUBOMI_REGISTRY }}/${{ vars.TSUBOMI_SERVICE_ID }}:${{ github.sha }}
+          if [ -f Dockerfile ]; then
+            docker buildx build --platform "${{ vars.TSUBOMI_PLATFORMS }}" \
+              --cache-from type=gha --cache-to type=gha,mode=max \
+              --push -t "$IMAGE" --metadata-file meta.json .
+            DIGEST=$(jq -r '."containerimage.digest"' meta.json)
+          else
+            npx -y @railway/nixpacks build . --name "$IMAGE" \
+              --platform "${{ vars.TSUBOMI_PLATFORMS }}" --push
+            DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: notify tsubomi
+        run: |
+          BODY=$(jq -nc --arg s "${{ vars.TSUBOMI_SERVICE_ID }}" \
+            --arg sha "${{ github.sha }}" --arg d "${{ steps.build.outputs.digest }}" \
+            --argjson ts "$(date +%s)" --arg n "$(openssl rand -hex 16)" \
+            '{service_id:$s, git_sha:$sha, image_digest:$d, ts:$ts, nonce:$n}')
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.TSUBOMI_DEPLOY_KEY }}" -hex | sed 's/^.* //')
+          curl -fsS -X POST "${{ vars.TSUBOMI_HOOK_URL }}" \
+            -H "content-type: application/json" -H "x-tsubomi-signature: $SIG" -d "$BODY"
+"##;
+
+use tsubomi_shared::{RegistryCreds, ServiceDto, WORKFLOW_PATH};
+
+/// GitHub 連携の手順コマンド列(ユーザがリポジトリ直下で実行 / AI が実行 / web が表示)。
+/// 平台が **単一真源**として組み立て、CreateServiceResp.setup_commands に載せる
+/// (CLI / web はこの文字列をそのまま使い、各々で gh コマンドを再構築しない)。
+///
+/// 安全のための 2 点(CLI の自動実行路径 commands/service.rs と揃える):
+/// - **`-R "$TSUBOMI_REPO"` を全 gh コマンドに付ける**:カレントが別の GitHub repo でも、
+///   secret/variable が必ず新しい tsubomi repo に書かれる(既存 repo への誤書込み防止)。
+/// - **secret は `printf | gh secret set` の stdin 渡し**(argv に値を載せない = `gh`
+///   プロセス引数として ps から見えない)。`--body <secret>` は使わない。
+///   ※ 値は乱数 base64url / uuid / DNS slug なので単引用符で安全に括れる。
+pub fn setup_commands(
+    service: &ServiceDto,
+    deploy_key: &str,
+    registry: &RegistryCreds,
+    hook_url: &str,
+    platforms: &str,
+) -> Vec<String> {
+    let sub = &service.subdomain;
+    vec![
+        format!("gh repo create {sub} --private --source=. --remote=tsubomi"),
+        // 以降の gh が必ず新しい tsubomi repo を対象にするよう repo を固定する。
+        format!("TSUBOMI_REPO=\"$(gh api user -q .login)/{sub}\""),
+        format!("printf %s '{deploy_key}' | gh secret set TSUBOMI_DEPLOY_KEY -R \"$TSUBOMI_REPO\""),
+        format!(
+            "printf %s '{}' | gh secret set TSUBOMI_REGISTRY_USER -R \"$TSUBOMI_REPO\"",
+            registry.user
+        ),
+        format!(
+            "printf %s '{}' | gh secret set TSUBOMI_REGISTRY_PASS -R \"$TSUBOMI_REPO\"",
+            registry.pass
+        ),
+        format!(
+            "gh variable set TSUBOMI_SERVICE_ID -R \"$TSUBOMI_REPO\" --body '{}'",
+            service.id
+        ),
+        format!(
+            "gh variable set TSUBOMI_REGISTRY -R \"$TSUBOMI_REPO\" --body '{}'",
+            registry.host
+        ),
+        format!("gh variable set TSUBOMI_HOOK_URL -R \"$TSUBOMI_REPO\" --body '{hook_url}'"),
+        format!("gh variable set TSUBOMI_PLATFORMS -R \"$TSUBOMI_REPO\" --body '{platforms}'"),
+        format!("# {WORKFLOW_PATH} を workflow_yaml の内容で作成 → git add/commit/push で自動デプロイ"),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TEMPLATE;
+
+    /// テンプレが hook 契約の必須要素を持つことを固定する(占位の取りこぼし防止)。
+    #[test]
+    fn template_has_required_pieces() {
+        for needle in [
+            "vars.TSUBOMI_REGISTRY",
+            "vars.TSUBOMI_SERVICE_ID",
+            "vars.TSUBOMI_HOOK_URL",
+            "vars.TSUBOMI_PLATFORMS",
+            "secrets.TSUBOMI_DEPLOY_KEY",
+            "secrets.TSUBOMI_REGISTRY_USER",
+            "secrets.TSUBOMI_REGISTRY_PASS",
+            "x-tsubomi-signature",
+            "image_digest",
+        ] {
+            assert!(TEMPLATE.contains(needle), "workflow テンプレに {needle} が無い");
+        }
+    }
+}

@@ -47,6 +47,11 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
+    /// サービス(作成 + GitHub 連携 / 一覧)
+    Service {
+        #[command(subcommand)]
+        action: commands::service::ServiceCmd,
+    },
     /// ボリューム(作成 / 一覧 / 削除 + ファイル操作 ls/put/get/rm/mkdir/mv)
     Volume {
         #[command(subcommand)]
@@ -103,6 +108,9 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
+        Cmd::Service { action } => {
+            commands::service::run(action, cli.server, cli.token, out).await
+        }
         Cmd::Volume { action } => commands::volume::run(action, cli.server, cli.token, out).await,
         Cmd::Trash { action } => commands::trash::run(action, cli.server, cli.token, out).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,

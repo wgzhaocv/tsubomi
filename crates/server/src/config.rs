@@ -62,6 +62,14 @@ pub struct Config {
     /// 平台が digest pull する registry の host:port。dev=127.0.0.1:5000
     /// (localhost は docker が insecure registry として許すので証明書不要)。
     pub registry_pull: String,
+    /// GitHub Actions が docker login + push する registry の host。dev=registry_pull
+    /// と同じ(127.0.0.1:5000・認証なし)、prod=registry.<domain>。service create が
+    /// 返す DTO の `registry.host` に載る(digest 内容アドレスなので push/pull の host が
+    /// 違っても問題ない — 決定 #3)。
+    pub registry_push: String,
+    /// build 対象の arch(GitHub Variable `TSUBOMI_PLATFORMS`)。§6.6 のデータ駆動:
+    /// 将来 x86_64 host を足したら `linux/arm64,linux/amd64` に変えるだけ。
+    pub platforms: String,
     /// ユーザコンテナを attach する docker ネットワーク名(traefik も参加)。
     pub edge_network: String,
 
@@ -183,6 +191,11 @@ impl Config {
         let domain = std::env::var("TSUBOMI_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
         let registry_pull =
             std::env::var("TSUBOMI_REGISTRY_PULL").unwrap_or_else(|_| "127.0.0.1:5000".to_string());
+        // push 入口。未設定なら pull と同じ(dev の無認証 registry)。
+        let registry_push = std::env::var("TSUBOMI_REGISTRY_PUSH")
+            .unwrap_or_else(|_| registry_pull.clone());
+        let platforms =
+            std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
         let edge_network =
             std::env::var("TSUBOMI_EDGE_NETWORK").unwrap_or_else(|_| "tsubomi-edge".to_string());
 
@@ -216,6 +229,8 @@ impl Config {
             max_upload_bytes,
             domain,
             registry_pull,
+            registry_push,
+            platforms,
             edge_network,
             traefik_dynamic_dir,
         })

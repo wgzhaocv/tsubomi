@@ -14,6 +14,7 @@ import Login from "@/routes/Login";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
 import ResourcePage from "@/routes/ResourcePage";
+import Services from "@/routes/Services";
 import Trash from "@/routes/Trash";
 import UiGallery from "@/routes/UiGallery";
 import VolumeFileBrowser from "@/routes/VolumeFileBrowser";
@@ -37,6 +38,8 @@ export const router = createBrowserRouter([
     element: <DashboardLayout />,
     children: [
       { index: true, element: <Welcome /> },
+      // service 一覧 + 作成導線(M3 S4)。詳細・ログ・停止/再開は後フェーズ。
+      { path: "services", element: <Services /> },
       // database は実装済み(一覧 + 詳細 3 ページ)。他の種別は当面 ResourcePage の骨格。
       { path: "databases", element: <Databases /> },
       {
@@ -69,7 +72,11 @@ export const router = createBrowserRouter([
       // バックエンドが 403 で守るので、ここはルート自体は誰でも辿れる(画面側で弾く)。
       { path: "ip-allowlist", element: <IpAllowlist /> },
       ...RESOURCES.filter(
-        (r) => r.kind !== "database" && r.kind !== "volume" && r.path !== "/trash",
+        (r) =>
+          r.kind !== "service" &&
+          r.kind !== "database" &&
+          r.kind !== "volume" &&
+          r.path !== "/trash",
       ).map((r) => ({
         path: r.path.replace(/^\//, ""),
         element: <ResourcePage resource={r} />,

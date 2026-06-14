@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, CreateVolumeReq, DatabaseDto, Health, ListDirResp, Me,
-    MoveReq, RenameVolumeReq, TrashItemDto, VolumeDto,
+    ConnectionUrlResp, CreateDatabaseReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq,
+    DatabaseDto, Health, ListDirResp, Me, MoveReq, RenameVolumeReq, ServiceDto, TrashItemDto,
+    VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -413,4 +414,42 @@ pub async fn trash_purge(
     )
     .await?;
     Ok(())
+}
+
+// ============ M3 service ============
+
+pub async fn service_list(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+) -> Result<Vec<ServiceDto>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse services response")
+}
+
+/// service を作成し、GitHub 連携に必要な全値(deploy_key / registry creds / workflow など)を
+/// 受け取る。deploy_key / registry.pass はこの 1 回しか平文で返らない。
+pub async fn service_create(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<CreateServiceResp> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services"))
+            .bearer_auth(token)
+            .json(&CreateServiceReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse create service response")
 }

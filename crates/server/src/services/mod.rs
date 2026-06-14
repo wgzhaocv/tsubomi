@@ -7,7 +7,9 @@
 
 pub mod deploy;
 pub mod docker;
+pub mod registry;
 pub mod route;
+pub mod workflow;
 
 use crate::auth::AuthCtx;
 use crate::databases::{audit, map_unique};
@@ -16,9 +18,9 @@ use crate::state::AppState;
 use crate::validate;
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::get;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
@@ -32,7 +34,74 @@ const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "ap
 const DEPLOY_KEY_BYTES: usize = 32;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/services", post(create))
+    Router::new()
+        .route("/services", get(list).post(create))
+        .route("/services/{id}", get(get_one))
+}
+
+/// list / get_one が共有する行(resources + service_details の join)。
+type ServiceRow = (
+    Uuid,              // id
+    String,            // display_name
+    i32,               // anon_seq
+    DateTime<Utc>,     // created_at
+    String,            // subdomain
+    String,            // phase
+    String,            // desired_state
+    i32,               // container_port
+    Option<String>,    // image_digest
+    Option<DateTime<Utc>>, // last_deploy_at
+);
+
+fn service_row_to_dto(r: ServiceRow) -> ServiceDto {
+    ServiceDto {
+        id: r.0,
+        display_name: r.1,
+        anon_seq: r.2,
+        created_at: r.3,
+        subdomain: r.4,
+        phase: r.5,
+        desired_state: r.6,
+        container_port: r.7,
+        image_digest: r.8,
+        last_deploy_at: r.9,
+    }
+}
+
+/// `GET /api/services`:自分の service 一覧(ゴミ箱内は除く)。秘密は含まない。
+pub async fn list(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Json<Vec<ServiceDto>>> {
+    let rows: Vec<ServiceRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at
+           FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.user_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL
+          ORDER BY r.anon_seq",
+    )
+    .bind(auth.user_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows.into_iter().map(service_row_to_dto).collect()))
+}
+
+/// `GET /api/services/:id`:単一 service の詳細(所有者チェック。無 / 他人 / 削除済みは 404)。
+pub async fn get_one(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ServiceDto>> {
+    let row: Option<ServiceRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at
+           FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'service' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    row.map(service_row_to_dto)
+        .map(Json)
+        .ok_or(AppError::NotFound)
 }
 
 /// `POST /api/services`:service の平台側メタを作る(resources + service_details +
@@ -58,6 +127,12 @@ pub async fn create(
             "サービス名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
         )));
     }
+
+    // registry アカウントは service 行を作る **前**に用意する(per-user で service に
+    // 依存しない)。ここで失敗しても service の孤児行は残らない — 失敗後に同名で再作成
+    // できる(insert を先にすると、ensure_account 失敗で service だけ残り deploy_key を
+    // 二度と返せず、再作成も 409 で詰む)。
+    let registry = registry::ensure_account(&state, auth.user_id).await?;
 
     let deploy_key = tsubomi_shared::random_b64(DEPLOY_KEY_BYTES);
     let deploy_key_enc = state.crypto.encrypt(&deploy_key)?;
@@ -102,11 +177,23 @@ pub async fn create(
     )
     .await;
 
+    // GitHub 連携に必要な残りの値(平台は GitHub に触れない — CLI/web がこの値で組み立てる)。
+    // setup_commands は平台が単一真源として作る(CLI/web は文字列を再構築しない)。registry は
+    // service 作成より前に用意済み(上)。
+    let hook_url = format!("{}/api/hook/deploy", state.config.server_url);
+    let platforms = state.config.platforms.clone();
+    let setup_commands = workflow::setup_commands(&dto, &deploy_key, &registry, &hook_url, &platforms);
+
     Ok((
         StatusCode::CREATED,
         Json(CreateServiceResp {
             service: dto,
             deploy_key,
+            registry,
+            hook_url,
+            platforms,
+            workflow_yaml: workflow::TEMPLATE.to_string(),
+            setup_commands,
         }),
     ))
 }

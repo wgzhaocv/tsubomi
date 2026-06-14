@@ -2,6 +2,7 @@ pub mod db;
 pub mod health;
 pub mod login;
 pub mod logout;
+pub mod service;
 pub mod trash;
 pub mod uninstall;
 pub mod update;
