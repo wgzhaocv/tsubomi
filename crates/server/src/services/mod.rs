@@ -24,7 +24,9 @@ use axum::routing::get;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
-use tsubomi_shared::{CreateServiceReq, CreateServiceResp, ServiceDto};
+use tsubomi_shared::{
+    CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ServiceDto,
+};
 use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
@@ -37,6 +39,8 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/services", get(list).post(create))
         .route("/services/{id}", get(get_one))
+        .route("/services/{id}/deploys", get(deploys))
+        .route("/services/{id}/deploy-config", get(deploy_config))
 }
 
 /// list / get_one が共有する行(resources + service_details の join)。
@@ -102,6 +106,89 @@ pub async fn get_one(
     row.map(service_row_to_dto)
         .map(Json)
         .ok_or(AppError::NotFound)
+}
+
+/// 自分の service か確認する(他人 / 不在 / 削除済みは 404)。所有権ゲート。
+async fn ensure_owned(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<()> {
+    let ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resources
+          WHERE id=$1 AND user_id=$2 AND kind='service' AND deleted_at IS NULL)",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if ok { Ok(()) } else { Err(AppError::NotFound) }
+}
+
+/// deploys 行(id, git_sha, image_digest, status, error, created_at, finished_at)。
+type DeployRow = (
+    Uuid,
+    String,
+    String,
+    String,
+    Option<String>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+fn deploy_row_to_dto(r: DeployRow) -> DeployDto {
+    DeployDto {
+        id: r.0,
+        git_sha: r.1,
+        image_digest: r.2,
+        status: r.3,
+        error: r.4,
+        created_at: r.5,
+        finished_at: r.6,
+    }
+}
+
+/// `GET /api/services/:id/deploys`:デプロイ履歴(新しい順、最大 50。所有者チェック)。
+pub async fn deploys(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<DeployDto>>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let rows: Vec<DeployRow> = sqlx::query_as(
+        "SELECT id, git_sha, image_digest, status, error, created_at, finished_at
+           FROM deploys WHERE service_id = $1 ORDER BY created_at DESC LIMIT 50",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows.into_iter().map(deploy_row_to_dto).collect()))
+}
+
+/// `GET /api/services/:id/deploy-config`:`tbm deploy --local` 用の全値(所有者のみ)。
+/// deploy_key / registry.pass を **再度平文で返す**(設計 §4b の退路。自分の service にだけ)。
+pub async fn deploy_config(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<DeployConfig>> {
+    // 所有権チェックと deploy_key 取得を一度に(他人 / 不在は 404)。
+    let key_enc: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT s.deploy_key_enc FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.id=$1 AND r.user_id=$2 AND r.kind='service' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let key_enc = key_enc.ok_or(AppError::NotFound)?;
+    let deploy_key = state.crypto.decrypt(&key_enc)?;
+    let registry = registry::ensure_account(&state, auth.user_id).await?;
+    let hook_url = format!("{}/api/hook/deploy", state.config.server_url);
+
+    Ok(Json(DeployConfig {
+        service_id: id,
+        registry,
+        deploy_key,
+        hook_url,
+        platforms: state.config.platforms.clone(),
+    }))
 }
 
 /// `POST /api/services`:service の平台側メタを作る(resources + service_details +

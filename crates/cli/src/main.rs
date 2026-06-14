@@ -47,11 +47,13 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
-    /// サービス(作成 + GitHub 連携 / 一覧)
+    /// サービス(作成 + GitHub 連携 / 一覧 / 状態)
     Service {
         #[command(subcommand)]
         action: commands::service::ServiceCmd,
     },
+    /// デプロイ(`--local`:ローカルで build+push して hook を叩く。GitHub 非依存の退路)
+    Deploy(commands::deploy::DeployArgs),
     /// ボリューム(作成 / 一覧 / 削除 + ファイル操作 ls/put/get/rm/mkdir/mv)
     Volume {
         #[command(subcommand)]
@@ -111,6 +113,7 @@ async fn main() -> Result<()> {
         Cmd::Service { action } => {
             commands::service::run(action, cli.server, cli.token, out).await
         }
+        Cmd::Deploy(args) => commands::deploy::run(args, cli.server, cli.token, out).await,
         Cmd::Volume { action } => commands::volume::run(action, cli.server, cli.token, out).await,
         Cmd::Trash { action } => commands::trash::run(action, cli.server, cli.token, out).await,
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,

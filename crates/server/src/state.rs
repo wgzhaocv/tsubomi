@@ -2,10 +2,12 @@ use crate::config::Config;
 use crate::crypto::Cipher;
 use anyhow::Context;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use uuid::Uuid;
 
 pub struct AppStateInner {
     pub config: Config,
@@ -20,6 +22,13 @@ pub struct AppStateInner {
     /// docker.sock の async クライアント(M3)。コンテナの pull / 起動 / 停止 /
     /// 一覧(後の reconcile)が使う。プラットフォームはホスト直走りで docker.sock を保持。
     pub docker: bollard::Docker,
+    /// service 単位のデプロイ直列化ロック(単機運用なのでインメモリで足りる)。
+    /// 同一 service への同時 deploy(hook / `--local`)はここで順番待ちし、コンテナ /
+    /// route / 状態への競合を防ぐ。S7/S8 の start/stop/reconcile も同 service を触る時は
+    /// このロックを取るべき(現状は run_digest だけが使う)。外側 = map を守る std Mutex、
+    /// 中身 = 各 service の tokio Mutex(.await をまたいで保持するため)。
+    /// map は service 数ぶんしか増えない(小さな Arc が残るだけ。単機規模では掃除不要)。
+    pub deploy_locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -76,7 +85,19 @@ impl AppState {
             crypto,
             http,
             docker,
+            deploy_locks: Mutex::new(HashMap::new()),
         })))
+    }
+
+    /// service のデプロイ直列化ロックを取得(無ければ作る)。同一 service の
+    /// 並行 deploy はこの tokio Mutex で順番待ちする(run_digest が先頭で .lock().await)。
+    pub fn deploy_lock(&self, service_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        // poison しても map 自体は壊れない(値は Arc だけ)。回復して使い続ける —
+        // bookkeeping mutex の poison で全 service の deploy を巻き込まない。
+        let mut map = self.0.deploy_locks.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(service_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 }
 

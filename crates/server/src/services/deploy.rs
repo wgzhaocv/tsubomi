@@ -3,7 +3,13 @@
 //! build と run は別部分(m3-design §6.8 / 決定 #3):平台は **build しない**。CI か
 //! `tbm deploy --local` が registry に push し、hook が digest を運んでくる。平台の仕事は
 //! 「digest を受けて起こす」だけ。run_digest は hook / --local / start / rollback /
-//! reconcile が共有する(S3 では hook 経路だけを通す。注入は S6 — ここは PORT のみ)。
+//! reconcile が共有する(注入は S6 — ここは PORT のみ)。
+//!
+//! swap は **start-first**(S5、決定 E を翻案):新コンテナを deploy 一意名で起こし、存活を
+//! 確認し、route を新へ切り替えてから旧を消す。pull / create / start / 存活のどこで失敗しても
+//! **旧コンテナと route は触らない**ので、失敗したデプロイは「旧版が生き続ける」で着地する
+//! (m3-design §6.4。旧停止→新起動だと失敗時に旧版が消えるという §6.4/§6.5 の矛盾を解消)。
+//! 同一 service の並行 deploy は `state.deploy_lock` で直列化する。
 
 use crate::databases::{audit, map_unique};
 use crate::error::{AppError, AppResult};
@@ -12,9 +18,11 @@ use crate::state::AppState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
+use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use std::panic::AssertUnwindSafe;
+use tsubomi_shared::hmac_sha256;
 use uuid::Uuid;
 
 const SIGNATURE_HEADER: &str = "x-tsubomi-signature";
@@ -63,8 +71,7 @@ pub async fn deploy(
         return Err(AppError::Unauthorized);
     }
 
-    // 認証済み。image_digest が本物の digest か検証する:平台は digest でしか pull しない
-    // (決定 #3 の内容アドレス invariant)。tag や不正参照を受けると invariant が崩れるので弾く。
+    // 認証済み。image_digest が本物の digest か検証する(決定 #3 の内容アドレス invariant)。
     if !is_sha256_digest(&body.image_digest) {
         return Err(AppError::BadRequest(
             "image_digest は sha256:<64桁16進> 形式の digest である必要があります(tag は不可 — 決定 #3)"
@@ -72,21 +79,23 @@ pub async fn deploy(
         ));
     }
 
-    // 3. リプレイ防御:時刻窓 + nonce 一意。
+    // 3. リプレイ防御(時刻窓)。
     let now = chrono::Utc::now().timestamp();
     if (now - body.ts).abs() > MAX_SKEW_SECS {
         return Err(AppError::BadRequest(format!(
             "ts が許容窓(±{MAX_SKEW_SECS}s)の外です。送信側とサーバの時刻ずれを確認してください"
         )));
     }
+
+    // 4. nonce 消費 + deploys(received) 記録を **1 トランザクション**で(nonce が消費された
+    //    ⟺ deploy が記録された、を原子に保つ。片方だけ commit されてリトライ不能になるのを防ぐ)。
+    let mut tx = state.db.begin().await?;
     sqlx::query("INSERT INTO deploy_nonces (service_id, nonce) VALUES ($1, $2)")
         .bind(body.service_id)
         .bind(&body.nonce)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| map_unique(e, "この nonce は既に使われています(リプレイ)"))?;
-
-    // 4. deploys を received で記録 → 非同期パイプラインへ。GH Action を待たせず 202。
     let deploy_id: Uuid = sqlx::query_scalar(
         "INSERT INTO deploys (service_id, git_sha, image_digest, status)
               VALUES ($1, $2, $3, 'received') RETURNING id",
@@ -94,28 +103,53 @@ pub async fn deploy(
     .bind(body.service_id)
     .bind(&body.git_sha)
     .bind(&body.image_digest)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
+    // 非同期パイプラインへ。GH Action / --local を待たせず 202。
     let state2 = state.clone();
     let service_id = body.service_id;
     let image_digest = body.image_digest.clone();
     let git_sha = body.git_sha.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            run_digest(&state2, deploy_id, service_id, &image_digest, &git_sha).await
-        {
-            tracing::error!(error = ?e, %deploy_id, %service_id, "deploy パイプライン失敗");
+        // パイプラインを panic 包囲する(spawn 内の panic はタスクを黙って殺し、deploy が
+        // deploying のまま残るため)。panic 時は **まだ deploying のものだけ** failed にする
+        // (条件付き UPDATE。commit 済みの running は触らない)。
+        let outcome =
+            AssertUnwindSafe(run_digest(&state2, deploy_id, service_id, &image_digest, &git_sha))
+                .catch_unwind()
+                .await;
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(error = ?e, %deploy_id, %service_id, "deploy パイプライン失敗")
+            }
+            Err(_) => {
+                tracing::error!(%deploy_id, %service_id, "deploy タスクが panic");
+                let _ = sqlx::query(
+                    "UPDATE service_details SET phase='failed', phase_detail='内部エラー(panic)'
+                       WHERE resource_id=$1 AND phase='deploying'",
+                )
+                .bind(service_id)
+                .execute(&state2.db)
+                .await;
+                let _ = sqlx::query(
+                    "UPDATE deploys SET status='failed', error='内部エラー(panic)', finished_at=now()
+                       WHERE id=$1 AND status NOT IN ('succeeded','failed')",
+                )
+                .bind(deploy_id)
+                .execute(&state2.db)
+                .await;
+            }
         }
     });
 
     Ok(StatusCode::ACCEPTED)
 }
 
-/// build 済みイメージ(digest)を起こす単一操作。失敗は deploys / service_details に記録する。
-/// pull を stop_remove より先に行うので、**pull 失敗(最も多い失敗)では旧コンテナは無傷**。
-/// pull 後の create/start 失敗は単純 swap の瞬断中に当たり旧は既に無い(chunk 1 は §6.5 の
-/// 旧停止→新起動のまま。start-first 化 + 並行 deploy の直列化 + reconcile 復帰は S5/S8)。
+/// build 済みイメージ(digest)を起こす単一操作。同一 service の並行 deploy を直列化し、
+/// 失敗は deploys / service_details に記録する(start-first なので失敗時も旧版は無傷)。
 pub async fn run_digest(
     state: &AppState,
     deploy_id: Uuid,
@@ -123,6 +157,10 @@ pub async fn run_digest(
     image_digest: &str,
     git_sha: &str,
 ) -> AppResult<()> {
+    // 同一 service の deploy を直列化(コンテナ / route / 状態の競合を防ぐ。単機インメモリ)。
+    let lock = state.deploy_lock(service_id);
+    let _guard = lock.lock().await;
+
     let _ = sqlx::query(
         "UPDATE service_details SET phase='deploying', phase_detail=NULL WHERE resource_id=$1",
     )
@@ -131,22 +169,10 @@ pub async fn run_digest(
     .await;
 
     let outcome = run_digest_inner(state, deploy_id, service_id, image_digest, git_sha).await;
-    if let Err(e) = &outcome {
-        let msg = e.to_string();
-        let _ = sqlx::query(
-            "UPDATE deploys SET status='failed', error=$2, finished_at=now() WHERE id=$1",
-        )
-        .bind(deploy_id)
-        .bind(&msg)
-        .execute(&state.db)
-        .await;
-        let _ = sqlx::query(
-            "UPDATE service_details SET phase='failed', phase_detail=$2 WHERE resource_id=$1",
-        )
-        .bind(service_id)
-        .bind(&msg)
-        .execute(&state.db)
-        .await;
+    if let Err(e) = &outcome
+        && let Err(e2) = mark_failed(state, deploy_id, service_id, &e.to_string()).await
+    {
+        tracing::error!(error = ?e2, %deploy_id, "deploy 失敗の記録に失敗");
     }
     outcome
 }
@@ -172,38 +198,62 @@ async fn run_digest_inner(
     let image_ref = docker::pull(state, service_id, image_digest).await?;
 
     set_status(state, deploy_id, "starting").await;
-    // swap:旧停止 → 新起動(瞬断許容、health ゲートなし。m3-design §6.5)。
-    docker::stop_remove(state, service_id).await?;
-    // 注入は S6。S3 は PORT だけ(app が $PORT を読む流儀向け)。
+    // start-first:新コンテナを deploy 一意名で起こす(旧は触らない)。
+    let new_name = format!(
+        "tsubomi-{}-{}",
+        service_id.simple(),
+        &deploy_id.simple().to_string()[..8]
+    );
     let spec = RunSpec {
         service_id,
+        container_name: new_name.clone(),
         subdomain,
         git_sha: git_sha.to_string(),
         container_port,
         memory_mb,
         cpu_shares,
+        // 注入は S6。S5 は PORT のみ(app が $PORT を読む流儀向け)。
         env: vec![("PORT".to_string(), container_port.to_string())],
     };
-    docker::run(state, &spec, &image_ref).await?;
 
-    // traefik の file provider 用ルート(router + service)を書く。これでホスト名で到達可能になる。
-    crate::services::route::write(state, service_id, &spec.subdomain, spec.container_port)?;
+    // 新コンテナを起こし存活を確認する(create+start → is_live)。失敗したら新コンテナだけ
+    // 片付けて Err(旧コンテナ / route は無傷なので旧版が生き続ける = §6.4)。
+    if let Err(e) = start_container(state, &spec, &image_ref).await {
+        docker::remove_one(state, &new_name).await;
+        return Err(e);
+    }
 
-    // 成功:現行 digest / phase=running / desired_state=running を記録。
-    sqlx::query(
-        "UPDATE service_details
-            SET image_digest=$2, phase='running', desired_state='running',
-                phase_detail=NULL, last_deploy_at=now()
-          WHERE resource_id=$1",
-    )
-    .bind(service_id)
-    .bind(image_digest)
-    .execute(&state.db)
-    .await?;
-    sqlx::query("UPDATE deploys SET status='succeeded', finished_at=now() WHERE id=$1")
-        .bind(deploy_id)
-        .execute(&state.db)
-        .await?;
+    // 成功を **route 切替の前に** DB へ記録する。DB 書き込み(最も多い失敗点)は route がまだ
+    // 旧を指す段階で起き、失敗しても旧版がそのまま生き続ける(§6.4 の安全な失敗点)。失敗時は
+    // 新コンテナを片付けて Err。
+    if let Err(e) = commit_success(state, deploy_id, service_id, image_digest).await {
+        docker::remove_one(state, &new_name).await;
+        return Err(e);
+    }
+
+    // ★ ここから先は「成功確定」点を越えている(DB 上 new が正、新コンテナは起動済み)。route
+    //   切替・旧削除の失敗は **致命にしない**:failed と誤記録すると「実際は成功した deploy」を
+    //   巻き戻すことになる。不整合は reconcile(S8)/ 再 deploy が収束させる。
+    match crate::services::route::write(
+        state,
+        service_id,
+        &spec.subdomain,
+        &new_name,
+        spec.container_port,
+    ) {
+        Ok(()) => {
+            // route が新を指したので旧を消してよい(失敗しても新は稼働中。reconcile が掃除)。
+            if let Err(e) = docker::remove_others(state, service_id, &new_name).await {
+                tracing::warn!(error = ?e, %service_id, "旧コンテナの掃除に失敗(新は稼働中。reconcile が後で掃除)");
+            }
+        }
+        Err(e) => {
+            // route 切替失敗:旧を消すと route→消えた旧 で 502 になるため旧を **残す**
+            // (旧版が当面トラフィックを受ける。reconcile / 再 deploy が route を直す)。
+            tracing::error!(error = ?e, %service_id, "route 切替に失敗。旧版を温存(reconcile / 再 deploy で収束)");
+        }
+    }
+
     audit(
         &state.db,
         None,
@@ -215,39 +265,72 @@ async fn run_digest_inner(
     Ok(())
 }
 
+/// 新コンテナを create+start し、存活(restart_count==0 等)を確認する(route はまだ切らない)。
+/// 失敗は呼び出し側が新コンテナを掃除する(旧は無傷)。
+async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<()> {
+    docker::run(state, spec, image_ref).await?;
+    if !docker::is_live(state, &spec.container_name).await {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "新コンテナが起動直後に終了しました(イメージ / $PORT のリッスンを確認してください)"
+        )));
+    }
+    Ok(())
+}
+
+/// 成功を 1 tx で記録(image_digest=new / phase=running / desired=running / deploys=succeeded)。
+async fn commit_success(
+    state: &AppState,
+    deploy_id: Uuid,
+    service_id: Uuid,
+    image_digest: &str,
+) -> AppResult<()> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE service_details
+            SET image_digest=$2, phase='running', desired_state='running',
+                phase_detail=NULL, last_deploy_at=now()
+          WHERE resource_id=$1",
+    )
+    .bind(service_id)
+    .bind(image_digest)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE deploys SET status='succeeded', finished_at=now() WHERE id=$1")
+        .bind(deploy_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// 失敗の記録(deploys=failed + service_details phase=failed を 1 tx で一致させる)。
+async fn mark_failed(
+    state: &AppState,
+    deploy_id: Uuid,
+    service_id: Uuid,
+    msg: &str,
+) -> AppResult<()> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE deploys SET status='failed', error=$2, finished_at=now() WHERE id=$1")
+        .bind(deploy_id)
+        .bind(msg)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE service_details SET phase='failed', phase_detail=$2 WHERE resource_id=$1")
+        .bind(service_id)
+        .bind(msg)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn set_status(state: &AppState, deploy_id: Uuid, status: &str) {
     let _ = sqlx::query("UPDATE deploys SET status=$2 WHERE id=$1")
         .bind(deploy_id)
         .bind(status)
         .execute(&state.db)
         .await;
-}
-
-// ===== HMAC-SHA256(既存の sha2 0.11 を直接使う。hmac crate を足さず版衝突を避ける)=====
-
-/// RFC 2104 の HMAC-SHA256。block=64。鍵が block より長ければ一度ハッシュする。
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut k = [0u8; BLOCK];
-    if key.len() > BLOCK {
-        k[..32].copy_from_slice(&Sha256::digest(key));
-    } else {
-        k[..key.len()].copy_from_slice(key);
-    }
-    let mut ipad = [0x36u8; BLOCK];
-    let mut opad = [0x5cu8; BLOCK];
-    for i in 0..BLOCK {
-        ipad[i] ^= k[i];
-        opad[i] ^= k[i];
-    }
-    let mut inner = Sha256::new();
-    inner.update(ipad);
-    inner.update(msg);
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(opad);
-    outer.update(inner);
-    outer.finalize().into()
 }
 
 /// `sha256:` + 64 桁 16 進かどうか。tag や任意文字列を弾く(決定 #3 の digest ピン留め)。
@@ -271,17 +354,6 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// RFC 4231 Test Case 2(key="Jefe", data="what do ya want for nothing?")の
-    /// HMAC-SHA256 既知ベクタ。手書き HMAC が正しいことを固定する。
-    #[test]
-    fn hmac_sha256_rfc4231_case2() {
-        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
-        assert_eq!(
-            hex::encode(mac),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
 
     #[test]
     fn ct_eq_basic() {

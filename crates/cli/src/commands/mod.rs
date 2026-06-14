@@ -1,4 +1,5 @@
 pub mod db;
+pub mod deploy;
 pub mod health;
 pub mod login;
 pub mod logout;

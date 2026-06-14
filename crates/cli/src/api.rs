@@ -3,8 +3,8 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
     ConnectionUrlResp, CreateDatabaseReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq,
-    DatabaseDto, Health, ListDirResp, Me, MoveReq, RenameVolumeReq, ServiceDto, TrashItemDto,
-    VolumeDto,
+    DatabaseDto, DeployConfig, DeployDto, Health, ListDirResp, Me, MoveReq, RenameVolumeReq,
+    ServiceDto, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -452,4 +452,81 @@ pub async fn service_create(
     resp.json()
         .await
         .context("failed to parse create service response")
+}
+
+pub async fn service_get(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<ServiceDto> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json().await.context("failed to parse service response")
+}
+
+pub async fn service_deploys(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<Vec<DeployDto>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/deploys"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json().await.context("failed to parse deploys response")
+}
+
+/// `tbm deploy --local` 用の build+hook 情報(deploy_key / registry creds を含む。自分の service のみ)。
+pub async fn deploy_config(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<DeployConfig> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/deploy-config"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse deploy-config response")
+}
+
+/// deploy hook を叩く(no-auth、HMAC)。**署名済みの生バイトをそのまま**送る
+/// (再シリアライズすると署名が割れる)。受理は 202、それ以外は ApiError。
+pub async fn post_deploy_hook(
+    c: &reqwest::Client,
+    hook_url: &str,
+    signature_hex: &str,
+    body: Vec<u8>,
+) -> Result<()> {
+    let resp = c
+        .post(hook_url)
+        .header("content-type", "application/json")
+        .header("x-tsubomi-signature", signature_hex)
+        .body(body)
+        .send()
+        .await
+        .context("hook の送信に失敗しました")?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Err(ApiError {
+        code: code_for(status),
+        message: if text.is_empty() {
+            format!("hook が失敗しました(HTTP {status})")
+        } else {
+            text
+        },
+    }
+    .into())
 }

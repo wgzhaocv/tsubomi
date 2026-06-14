@@ -10,7 +10,9 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
-use bollard::models::{ContainerCreateBody, HostConfig, RestartPolicy, RestartPolicyNameEnum};
+use bollard::models::{
+    ContainerCreateBody, ContainerSummary, HostConfig, RestartPolicy, RestartPolicyNameEnum,
+};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder,
@@ -27,6 +29,9 @@ const LABEL_MANAGED: &str = "tsubomi.managed";
 /// 起動に必要な service の確定値(run_digest が DB から読んで渡す)。
 pub struct RunSpec {
     pub service_id: Uuid,
+    /// このコンテナの名前。start-first swap のため **deploy ごとに一意**
+    /// (`tsubomi-<id>-<deploy 短码>`):新旧が一瞬共存するので同名衝突を避ける。
+    pub container_name: String,
     pub subdomain: String,
     pub git_sha: String,
     pub container_port: i32,
@@ -57,7 +62,7 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
 /// 起動した container 名を返す。
 pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<String> {
     let cfg = &state.config;
-    let name = format!("tsubomi-{}", spec.service_id);
+    let name = spec.container_name.clone();
 
     let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let labels = mgmt_labels(spec);
@@ -109,9 +114,8 @@ fn mgmt_labels(spec: &RunSpec) -> HashMap<String, String> {
     m
 }
 
-/// 指定 service の現行コンテナを全て停止 + 削除(swap の旧側 / service 削除で使う)。
-/// 既に停止 / 消滅していても続行する(冪等)。
-pub async fn stop_remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
+/// 指定 service の管理コンテナ一覧(`tsubomi.service_id` ラベルで引く。停止中も含む)。
+async fn list_by_service(state: &AppState, service_id: Uuid) -> AppResult<Vec<ContainerSummary>> {
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
     filters.insert(
         "label".into(),
@@ -121,18 +125,92 @@ pub async fn stop_remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
         .all(true)
         .filters(&filters)
         .build();
-    let list = state
+    state
         .docker
         .list_containers(Some(opts))
         .await
-        .map_err(|e| AppError::Other(anyhow!("コンテナ一覧に失敗: {e}")))?;
-    for c in list {
-        let Some(id) = c.id else { continue };
-        let _ = state.docker.stop_container(&id, None).await;
-        let rm = RemoveContainerOptionsBuilder::default().force(true).build();
-        if let Err(e) = state.docker.remove_container(&id, Some(rm)).await {
-            tracing::warn!(error = ?e, container = %id, "旧コンテナの削除に失敗(続行)");
+        .map_err(|e| AppError::Other(anyhow!("コンテナ一覧に失敗: {e}")))
+}
+
+/// 名前 or id でコンテナを停止 + 強制削除(冪等。失敗はログだけ — 呼び出しを止めない)。
+async fn force_remove(state: &AppState, name_or_id: &str) {
+    let _ = state.docker.stop_container(name_or_id, None).await;
+    let rm = RemoveContainerOptionsBuilder::default().force(true).build();
+    if let Err(e) = state.docker.remove_container(name_or_id, Some(rm)).await {
+        tracing::warn!(error = ?e, container = %name_or_id, "コンテナ削除に失敗(続行)");
+    }
+}
+
+/// 指定 service の管理コンテナを停止 + 削除する(冪等)。`keep=Some(name)` ならその名前だけ
+/// 残す(start-first swap の収尾)、`keep=None` なら全部消す(service 削除 = S7 / 失敗時の全掃除)。
+async fn remove_service_containers(
+    state: &AppState,
+    service_id: Uuid,
+    keep: Option<&str>,
+) -> AppResult<()> {
+    for c in list_by_service(state, service_id).await? {
+        // docker の名前は "/name" 形式で入るので先頭スラッシュを外して比較する。
+        let is_keep = keep.is_some_and(|k| {
+            c.names
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|n| n.trim_start_matches('/') == k)
+        });
+        if is_keep {
+            continue;
+        }
+        if let Some(id) = c.id {
+            force_remove(state, &id).await;
         }
     }
     Ok(())
+}
+
+/// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 = S7 / 失敗時の全掃除)。冪等。
+#[allow(dead_code)] // S7(service delete / stop)で使用予定
+pub async fn stop_remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
+    remove_service_containers(state, service_id, None).await
+}
+
+/// 指定 service の **keep_name 以外** を停止 + 削除(start-first swap の収尾:新コンテナを
+/// 起こして route を切り替えた後に、旧コンテナだけを消す)。冪等。
+pub async fn remove_others(state: &AppState, service_id: Uuid, keep_name: &str) -> AppResult<()> {
+    remove_service_containers(state, service_id, Some(keep_name)).await
+}
+
+/// 名前指定で 1 つだけ停止 + 削除(start-first 失敗時の新コンテナ片付け。冪等)。
+pub async fn remove_one(state: &AppState, name: &str) {
+    force_remove(state, name).await;
+}
+
+/// 新コンテナが「起動直後に落ちていない」ことを確認する(就緒ではなく **存活** 判定。
+/// 決定 E:HTTP ready 探针は持たない)。起動してすぐ exit する壊れたイメージを swap の
+/// **前**に弾き、§6.4「失敗時は旧版を生かす」を守る。少し間を空けて複数回 inspect する。
+///
+/// ★ RestartPolicy=unless-stopped を付けているので、クラッシュするコンテナは docker に
+///   自動再起動され、inspect の瞬間だけ Running=true に見えうる(= 存活と誤判)。これを
+///   防ぐため Running だけでなく **restart_count==0 かつ restarting==false** も要求する:
+///   起動直後に一度でも再起動していればクラッシュループ = 不健全と判定する。
+pub async fn is_live(state: &AppState, name: &str) -> bool {
+    for attempt in 0..3 {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        match state.docker.inspect_container(name, None).await {
+            Ok(info) => {
+                let restart_count = info.restart_count.unwrap_or(0);
+                let st = info.state.as_ref();
+                let running = st.and_then(|s| s.running).unwrap_or(false);
+                let restarting = st.and_then(|s| s.restarting).unwrap_or(false);
+                // exit 済み / 再起動中 / 一度でも再起動した → クラッシュ(ループ)と見なす。
+                if !running || restarting || restart_count > 0 {
+                    return false;
+                }
+                if attempt == 2 {
+                    return true; // 窓の間ずっと running・無再起動を確認できた
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
 }

@@ -65,6 +65,34 @@ pub fn pkce_challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
+/// RFC 2104 の HMAC-SHA256(block=64、鍵が block より長ければ一度ハッシュ)。
+/// deploy hook の署名で server(検証側、生 body に対して計算)と CLI の
+/// `tbm deploy --local`(生成側)が**同じ実装**を使う(片方だけ変えると署名が割れる)。
+/// hmac crate を足さず、既存の sha2 を直接使う(版衝突回避)。
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
 // ============ API レスポンス型 ============
 
 /// `GET /api/health` のレスポンスボディ。
@@ -317,6 +345,36 @@ pub struct CreateServiceResp {
     pub setup_commands: Vec<String>,
 }
 
+/// `GET /api/services/:id/deploys` の各要素。デプロイ履歴の 1 行(秘密は含まない)。
+/// `tbm service status` / 将来の web 詳細が phase 遷移と履歴を見せるのに使う。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployDto {
+    pub id: Uuid,
+    pub git_sha: String,
+    pub image_digest: String,
+    /// received / pulling / starting / succeeded / failed(deploys.status)。
+    pub status: String,
+    /// 失敗理由(人間可読、失敗時のみ)。
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+/// `GET /api/services/:id/deploy-config` のレスポンス。`tbm deploy --local` が
+/// 自分の service を **GitHub 抜き**で build+push+hook するのに要る全値。
+/// **deploy_key / registry.pass を再度平文で返す**(owner 自身の service にだけ。設計 §4b
+/// が許す退路 — CI が無い / 緊急時の経路)。表示・ログに残さないこと。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeployConfig {
+    pub service_id: Uuid,
+    pub registry: RegistryCreds,
+    pub deploy_key: String,
+    pub hook_url: String,
+    pub platforms: String,
+}
+
 // ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============
 
 /// `GET /api/ip-allowlist` の各要素。会社 IP 許可リストの 1 エントリ。
@@ -362,6 +420,17 @@ mod tests {
         assert_eq!(a.len(), 43);
         assert_ne!(a, b);
         assert_eq!(random_b64(16).len(), 22);
+    }
+
+    /// RFC 4231 Test Case 2(key="Jefe")の HMAC-SHA256 既知ベクタ。
+    /// server / CLI 共有の実装が正しいことを固定する。
+    #[test]
+    fn hmac_sha256_rfc4231_case2() {
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            hex::encode(mac),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
     }
 
     #[test]

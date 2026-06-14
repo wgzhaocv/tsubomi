@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
+use serde_json::json;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::api;
 use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
 use crate::config;
-use tsubomi_shared::{CreateServiceResp, WORKFLOW_PATH};
+use tsubomi_shared::{CreateServiceResp, ServiceDto, WORKFLOW_PATH};
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
 /// create だけは API の後にユーザ自身の `gh` で GitHub 連携を組み立てる(平台は GitHub に
@@ -20,6 +21,11 @@ pub enum ServiceCmd {
     },
     /// サービス一覧
     List,
+    /// サービスの状態(phase / desired / digest)とデプロイ履歴を表示
+    Status {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+    },
 }
 
 pub async fn run(
@@ -47,6 +53,16 @@ pub async fn run(
                 }
             }
         }
+        ServiceCmd::Status { name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let svc = api::service_get(&c, &server_url, &token, &id).await?;
+            let deploys = api::service_deploys(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "service": svc, "deploys": deploys }))?;
+            } else {
+                print_status(&svc, &deploys);
+            }
+        }
         ServiceCmd::Create { name } => {
             let resp = api::service_create(&c, &server_url, &token, &name).await?;
             if json {
@@ -60,6 +76,55 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// 表示名 → id を一覧から解決する(db.rs と同じ作法。専用エンドポイントを増やさない)。
+async fn resolve_id(c: &reqwest::Client, server_url: &str, token: &str, name: &str) -> Result<String> {
+    let svcs = api::service_list(c, server_url, token).await?;
+    match svcs.iter().find(|s: &&ServiceDto| s.display_name == name) {
+        Some(s) => Ok(s.id.to_string()),
+        None => Err(api::ApiError {
+            code: "not_found",
+            message: format!("サービス '{name}' が見つかりません(`tbm service list` で確認)"),
+        }
+        .into()),
+    }
+}
+
+/// status の text 表示(phase / desired / digest / 直近のデプロイ履歴)。
+fn print_status(svc: &ServiceDto, deploys: &[tsubomi_shared::DeployDto]) {
+    println!(
+        "{} (service{})  phase={} desired={}",
+        svc.display_name, svc.anon_seq, svc.phase, svc.desired_state
+    );
+    println!("  subdomain:   {}", svc.subdomain);
+    if let Some(d) = &svc.image_digest {
+        println!("  digest:      {}", short_digest(d));
+    }
+    if let Some(t) = &svc.last_deploy_at {
+        println!("  last deploy: {t}");
+    }
+    if deploys.is_empty() {
+        println!("  (まだデプロイがありません。`tbm deploy --local` か git push で開始)");
+        return;
+    }
+    println!("  デプロイ履歴(新しい順):");
+    for d in deploys.iter().take(10) {
+        let err = d.error.as_deref().map(|e| format!("  — {e}")).unwrap_or_default();
+        println!("    {}  {:<9} {}{}", d.created_at, d.status, short_sha(&d.git_sha), err);
+    }
+}
+
+/// `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。
+fn short_digest(d: &str) -> String {
+    match d.split_once(':') {
+        Some((algo, hex)) => format!("{algo}:{}", &hex[..hex.len().min(12)]),
+        None => d.chars().take(19).collect(),
+    }
+}
+
+fn short_sha(s: &str) -> String {
+    s.chars().take(12).collect()
 }
 
 /// text モード:ローカル workflow を置き、gh が使えれば repo/secret/variable を組み立てる。

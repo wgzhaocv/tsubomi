@@ -26,18 +26,20 @@ fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
 }
 
 /// router + service を 1 ファイル原子的に書く(traefik が watch してホットリロード)。
-/// router/service 名 = `svc-<id>`、後端 = `http://tsubomi-<id>:<port>`、middleware は
-/// 会社 IP 許可リスト(ipblock、`@file`)。値は全て平台生成(uuid / DNS slug / 数値 /
-/// 設定ドメイン)なので YAML へそのまま埋めて安全。
+/// router/service 名 = `svc-<id>`(安定、ファイルは service ごと 1 枚)、**後端 = 渡された
+/// コンテナ名**。start-first swap では deploy ごとにコンテナ名が変わる(新旧が一瞬共存
+/// するため一意名)ので、後端 URL も deploy のたびに書き換わる。middleware は会社 IP 許可
+/// リスト(ipblock、`@file`)。値は全て平台生成なので YAML へそのまま埋めて安全。
 pub fn write(
     state: &AppState,
     service_id: Uuid,
     subdomain: &str,
+    container_name: &str,
     container_port: i32,
 ) -> AppResult<()> {
     let name = format!("svc-{service_id}");
     let host = format!("{}.{}", subdomain, state.config.domain);
-    let backend = format!("http://tsubomi-{service_id}:{container_port}");
+    let backend = format!("http://{container_name}:{container_port}");
     let mw = crate::ipblock::TRAEFIK_MIDDLEWARE;
 
     let mut doc = String::new();
