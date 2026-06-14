@@ -17,6 +17,12 @@ use crate::state::AppState;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// traefik の entrypoint / certResolver 名。**compose.prod.yml の traefik command で定義する名前と
+/// 一致させること**(static = compose が定義、dynamic = 平台が参照、の契約点)。ここを変えたら compose も。
+pub(crate) const ENTRYPOINT_HTTP: &str = "web";
+pub(crate) const ENTRYPOINT_TLS: &str = "websecure";
+pub(crate) const CERT_RESOLVER: &str = "le";
+
 /// service の動的設定ファイルのパス(`<dir>/svc-<id>.yml`)。
 fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
     state
@@ -41,6 +47,12 @@ pub fn write(
     let host = format!("{}.{}", subdomain, state.config.domain);
     let backend = format!("http://{container_name}:{container_port}");
     let mw = crate::ipblock::TRAEFIK_MIDDLEWARE;
+    // 本番(tls=true)は websecure(:443)+ LE。dev は web(:80)のまま。
+    let entrypoint = if state.config.tls {
+        ENTRYPOINT_TLS
+    } else {
+        ENTRYPOINT_HTTP
+    };
 
     let mut doc = String::new();
     doc.push_str("# 平台が自動生成(services/route.rs)。手で編集しない(deploy ごとに上書き)。\n");
@@ -48,24 +60,61 @@ pub fn write(
     doc.push_str("  routers:\n");
     doc.push_str(&format!("    {name}:\n"));
     doc.push_str(&format!("      rule: \"Host(`{host}`)\"\n"));
-    doc.push_str("      entryPoints: [\"web\"]\n");
+    doc.push_str(&format!("      entryPoints: [\"{entrypoint}\"]\n"));
     doc.push_str(&format!("      service: \"{name}\"\n"));
     doc.push_str(&format!("      middlewares: [\"{mw}@file\"]\n"));
+    if state.config.tls {
+        // LE で証明書を取得(certResolver は compose の traefik が定義する `le`)。
+        doc.push_str("      tls:\n");
+        doc.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
+    }
     doc.push_str("  services:\n");
     doc.push_str(&format!("    {name}:\n"));
     doc.push_str("      loadBalancer:\n");
     doc.push_str("        servers:\n");
     doc.push_str(&format!("          - url: \"{backend}\"\n"));
 
-    let path = route_path(state, service_id);
+    write_atomic(&route_path(state, service_id), &doc)
+}
+
+/// 動的設定ファイルを原子的に置換する(tmp + rename。traefik が半端な内容を読まないように)。
+/// route / registry が共有(`<name>.yml.tmp` は .yml で終わらないので traefik の glob 対象外)。
+pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // tmp + rename:traefik が半端な内容を読まないように原子的に置換する。
     let tmp = path.with_extension("yml.tmp");
-    std::fs::write(&tmp, doc)?;
-    std::fs::rename(&tmp, &path)?;
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// 本番(tls)で apex(`<domain>` → 平台 server)を traefik に出す。server は host ネットなので
+/// host-gateway 経由で届く(compose の traefik に `extra_hosts: host.docker.internal:host-gateway`)。
+/// IP 許可リスト middleware は付けない(ログイン / owner 操作が届く必要があるため。registry と同じ免除)。
+/// dev(tls=false)は何もしない(apex は vite / 直アクセス)。起動時に 1 回呼ぶ。
+pub fn write_apex(state: &AppState) -> AppResult<()> {
+    if !state.config.tls {
+        return Ok(());
+    }
+    let domain = &state.config.domain;
+    let port = state.config.bind_addr.port();
+    let mut doc = String::new();
+    doc.push_str("# 平台が自動生成(services/route.rs::write_apex)。手で編集しない。\n");
+    doc.push_str("http:\n");
+    doc.push_str("  routers:\n");
+    doc.push_str("    tsubomi-apex:\n");
+    doc.push_str(&format!("      rule: \"Host(`{domain}`)\"\n"));
+    doc.push_str(&format!("      entryPoints: [\"{ENTRYPOINT_TLS}\"]\n"));
+    doc.push_str("      service: \"tsubomi-apex\"\n");
+    doc.push_str("      tls:\n");
+    doc.push_str(&format!("        certResolver: {CERT_RESOLVER}\n"));
+    doc.push_str("  services:\n");
+    doc.push_str("    tsubomi-apex:\n");
+    doc.push_str("      loadBalancer:\n");
+    doc.push_str("        servers:\n");
+    doc.push_str(&format!("          - url: \"http://host.docker.internal:{port}\"\n"));
+    write_atomic(&state.config.traefik_dynamic_dir.join("apex.yml"), &doc)
 }
 
 /// service の stop / 削除時にルートファイルを消す(無ければ無視)。

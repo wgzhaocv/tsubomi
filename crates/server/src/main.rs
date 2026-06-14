@@ -53,6 +53,12 @@ async fn main() -> anyhow::Result<()> {
     // 起動時に IP 許可リストを traefik へ収束させる(middleware を必ず定義済みにする。
     // best-effort:書けなくてもサーバは起動する)。
     ipblock::sync_traefik(&state).await;
+    // 本番 TLS:registry の push 入口(basicAuth)と apex router を traefik へ書く
+    // (どちらも tls=false の dev では no-op。best-effort)。
+    services::registry::sync_traefik(&state).await;
+    if let Err(e) = services::route::write_apex(&state) {
+        tracing::error!(error = ?e, "apex route の書き出しに失敗(本番のみ)");
+    }
     let app = routes::build_router(state);
     axum::serve(listener, app).await?;
     Ok(())

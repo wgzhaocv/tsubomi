@@ -77,6 +77,11 @@ pub struct Config {
     pub platforms: String,
     /// ユーザコンテナを attach する docker ネットワーク名(traefik も参加)。
     pub edge_network: String,
+    /// 本番 TLS フラグ(`TSUBOMI_TLS`)。true で route.rs が router を websecure + LE
+    /// (certResolver `le`)で書き、registry の basicAuth 入口(`registry.<domain>`)と
+    /// apex router(`<domain>` → server)も file provider に書く。dev=false(HTTP のまま)。
+    /// ACME メール等 traefik 側の値は compose が env(`TSUBOMI_ACME_EMAIL`)から直接読む。
+    pub tls: bool,
 
     // ===== ガバナンス:IP 許可リスト =====
     /// 平台が traefik の動的設定(ipAllowList middleware)を書き出すディレクトリ。
@@ -201,6 +206,15 @@ impl Config {
 
         // ===== M3 service =====
         let domain = std::env::var("TSUBOMI_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+        // ホスト名以外の文字を弾く:domain は traefik の Host(`<sub>.<domain>`) ルールへ
+        // そのまま埋め込まれるので、引用符 / 空白 / バックスラッシュ等が混じると設定が壊れる。
+        if domain.is_empty()
+            || !domain
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            anyhow::bail!("TSUBOMI_DOMAIN must be a hostname ([a-zA-Z0-9.-] のみ): {domain}");
+        }
         let registry_pull =
             std::env::var("TSUBOMI_REGISTRY_PULL").unwrap_or_else(|_| "127.0.0.1:5000".to_string());
         // push 入口。未設定なら pull と同じ(dev の無認証 registry)。
@@ -210,6 +224,10 @@ impl Config {
             std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
         let edge_network =
             std::env::var("TSUBOMI_EDGE_NETWORK").unwrap_or_else(|_| "tsubomi-edge".to_string());
+        // 本番のみ true。route.rs / registry の traefik 出力を websecure+LE 形へ切り替える。
+        let tls = std::env::var("TSUBOMI_TLS")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         // ===== ガバナンス:IP 許可リスト =====
         // volumes_dir / backup_dir と同じ /srv/tsubomi 配下の規約。本番は compose の
@@ -246,6 +264,7 @@ impl Config {
             registry_push,
             platforms,
             edge_network,
+            tls,
             traefik_dynamic_dir,
         })
     }

@@ -98,6 +98,56 @@ services:
         target: /etc/pgbouncer/pgbouncer.ini
       - source: pgbouncer_userlist
         target: /etc/pgbouncer/userlist.txt
+    # default = pg-tenant への到達。tsubomi-edge = ユーザコンテナが `tsubomi-pgbouncer:6432`
+    # (docker DNS)で内部入口に届くため(M3 注入。dev の infra/docker-compose.yml と同じ)。
+    networks: [default, tsubomi-edge]
+
+  # M3:ユーザ app イメージの置き場。平台は digest 指定で 127.0.0.1:5000(ループバック・無認証)
+  # から pull する。公網 push 入口は traefik 経由(registry.<ドメイン> + basicAuth)で、registry
+  # コンテナ自体には認証を付けない(平台のローカル pull を壊さないため)。
+  registry:
+    image: registry:2
+    container_name: tsubomi-registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"   # registry GC(未参照 blob 削除)のため
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - registry_data:/var/lib/registry
+
+  # M3:ユーザ service / apex / registry の入口 + ルーティング。**file provider のみ**
+  # (docker provider は Docker Engine 29 で壊れる)。平台(ホスト直走り)が動的設定を
+  # TSUBOMI_TRAEFIK_DYNAMIC_DIR に書き、traefik が watch でホットリロードする:
+  # ipallow.yml(ipblock)/ svc-<id>.yml(route.rs)/ registry.yml(registry.rs)/ apex.yml。
+  # 本番:443 + Let's Encrypt(TLS-ALPN tlsChallenge、`le` resolver)。:80 は :443 へリダイレクト。
+  # apex(<ドメイン> → 平台 server)は host-gateway 経由で host ネットの server に届く。
+  traefik:
+    image: traefik:v3.5
+    container_name: tsubomi-traefik
+    restart: unless-stopped
+    command:
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.email=${TSUBOMI_ACME_EMAIL:?set TSUBOMI_ACME_EMAIL in .env.production}
+      - --certificatesresolvers.le.acme.storage=/acme/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # 平台が書き出すホストパスを read-only でマウント(docker.sock は不要)。
+      # TSUBOMI_TRAEFIK_DYNAMIC_DIR(server の env)と一致させること。
+      - ${TSUBOMI_TRAEFIK_DYNAMIC_DIR:-/srv/tsubomi/traefik-dynamic}:/etc/traefik/dynamic:ro
+      - traefik_acme:/acme   # LE 証明書の永続化(acme.json)
+    # apex router の後端 `host.docker.internal` を host ゲートウェイへ解決(server は host ネット)。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [default, tsubomi-edge]
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
@@ -120,10 +170,19 @@ services:
       pg-tenant:
         condition: service_healthy
 
+# tsubomi-edge は external:平台(bollard)がユーザコンテナを attach する網。compose は参照だけ。
+# デプロイ前に一度 `docker network create tsubomi-edge` する(infra/docker-compose.yml と同じ約束)。
+networks:
+  tsubomi-edge:
+    external: true
+    name: tsubomi-edge
+
 volumes:
   pg_platform_data:
   pg_tenant_data:
   pgb_tls:
+  registry_data:
+  traefik_acme:
 
 # ===========================================================================
 # インライン設定(別ファイルを配らずに済ませるための埋め込み)。

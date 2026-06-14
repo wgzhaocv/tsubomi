@@ -683,3 +683,68 @@ Button/Dialog を踏襲(frontend 規約)。
 - [ ] `tbm deploy --local` が GitHub 非依存で同じ結果を出す ← 実装済み(S5)だが **dev は buildx コンテナドライバが host registry に届かず未検証。prod registry で確認**
 - [x] `tbm service rollback <deploy-id>` が旧 digest を再起動(再 build なし)(S7a)
 ```
+
+---
+
+## 13. prod-infra デプロイ手順(本番 = 香橙派 arm64、将来 x86)
+
+決定:**入口/TLS = traefik 自跑 Let's Encrypt(TLS-ALPN tlsChallenge、子域ごと按需)**、**プラットフォーム
+イメージ = arm64+amd64 双架**(`release-image.sh` 既定)、**ユーザ service イメージ = ホスト arch 追随**
+(`TSUBOMI_PLATFORMS`、今 arm64)。registry の push 認証 = **traefik basicAuth**(平台が `registry_accounts` を
+bcrypt して `registry.yml` に出す。registry 自体は無認証ループバック :5000、平台 pull はそのまま)。
+
+### 13.1 前提(あなたが用意)
+
+- **DNS(A レコード、香橙派の公網 IP へ)**:`<ドメイン>`(apex)、`*.<ドメイン>`(service 子域)、
+  `registry.<ドメイン>`(push 入口)。tlsChallenge は :443 で各 host を検証するので **ワイルドカード A だけで足り、
+  DNS provider の API token は不要**(DNS-01 ワイルドカード証に上げるなら token が要る — §11 決定 G)。
+  registry は **Cloudflare proxy を通さない**(直 :443・LE。CF proxy は upload 100MB 上限で push が割れる)。
+- **公網到達**:香橙派の :80 / :443 が外から届く。:80 は :443 へリダイレクト。
+- **ファイアウォール**:公開するのは traefik の :80/:443 だけ。平台 server の :9090 は公網から塞ぐ
+  (traefik が `host.docker.internal`(host-gateway)経由で内部的に :9090 を叩くだけ)。pgbouncer :6432 の
+  送信元 CIDR 制限は iptables `DOCKER-USER`(§1)。
+
+### 13.2 `.env.production` に必要なキー(M3 + prod-infra)
+
+`.env.example` がひな形。**この本番ファイルは M1/M2 時点のままだと M3 キーが抜けている**ので、最低限以下を足す/確認:
+
+```
+TSUBOMI_DOMAIN=tsubomi.wgzhao.me
+TSUBOMI_SERVER_URL=https://tsubomi.wgzhao.me
+TSUBOMI_TLS=true                                   # ← route.rs / registry を websecure+LE 形へ
+TSUBOMI_ACME_EMAIL=<LE 通知メール>                  # ← traefik が直接読む(tls 時 compose が必須化)
+TSUBOMI_COOKIE_SECURE=true
+TSUBOMI_BIND_ADDR=0.0.0.0:9090                      # ← apex を traefik 前段にするため(:9090 は要 FW)
+TSUBOMI_REGISTRY_PULL=127.0.0.1:5000               # 平台のローカル pull(無認証ループバック)
+TSUBOMI_REGISTRY_PUSH=registry.tsubomi.wgzhao.me   # CI が docker login + push する公網入口
+TSUBOMI_PLATFORMS=linux/arm64                       # ホスト arch。x86 機を足したら linux/arm64,linux/amd64
+TSUBOMI_EDGE_NETWORK=tsubomi-edge
+TSUBOMI_TRAEFIK_DYNAMIC_DIR=/srv/tsubomi/traefik-dynamic   # compose の traefik mount と一致
+TSUBOMI_DB_INTERNAL_HOST=tsubomi-pgbouncer
+TSUBOMI_DB_INTERNAL_PORT=6432
+TSUBOMI_DB_PUBLIC_HOST=<外部接続用ホスト>            # human 接続文字列に載る
+TSUBOMI_DB_SSLMODE=require
+```
+
+(既存の `PG_PLATFORM_PASSWORD` / `PG_TENANT_PASSWORD` / `PGBOUNCER_AUTH_PASSWORD` / `TENANT_ADMIN_URL` /
+`TSUBOMI_MASTER_KEY` / `GOOGLE_*` / `TSUBOMI_ALLOWED_HD` / `TSUBOMI_OWNER_EMAILS` はそのまま。`PGBOUNCER_BIND_ADDR=0.0.0.0`。)
+
+### 13.3 手順
+
+1. 開発機で **`just release-image`**(既定で amd64+arm64 manifest list を push。`REGISTRY=...` 指定)。香橙派は
+   その tag を pull すれば自動で arm64 を取る(将来 x86 機は同 tag で amd64)。`compose.prod.yml` の
+   `TSUBOMI_IMAGE` を出したタグに。
+2. 香橙派で `docker network create tsubomi-edge`(冪等)+ `mkdir -p /srv/tsubomi/{traefik-dynamic,backups,trash,volumes}`。
+3. 香橙派で `docker compose --env-file .env.production -f compose.prod.yml pull && up -d`
+   (pg-platform / pg-tenant / pgbouncer / registry / traefik / server)。server 起動時に migration 自動 +
+   `ipblock`/`registry`/`apex` の traefik 動的設定を書く。
+4. traefik が apex / registry の LE 証明書を取得(初回アクセス時)。`https://tsubomi.wgzhao.me` /
+   `https://registry.tsubomi.wgzhao.me` を確認。
+
+### 13.4 検証(§12 の本番依存 2 行)
+
+- `tbm service create demo` → 表示された gh 手順(`gh repo create` + secret/variable)→ `git push`。
+  CI が `docker login registry.tsubomi.wgzhao.me`(basicAuth)→ 双架不要(`TSUBOMI_PLATFORMS=linux/arm64`)で
+  build+push → hook → 香橙派が `127.0.0.1:5000` から pull → 起動 → **30 秒で `https://demo.tsubomi.wgzhao.me`**。
+- `tbm deploy --local` も同じ registry に push して同結果(GitHub 非依存)。
+- `tbm inject` / `stop` / `start` / ホスト再起動回復が本番でも効く。
