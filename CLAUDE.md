@@ -17,11 +17,18 @@ app をデプロイし、データベース / ボリュームを作る。
 ディスク)をそこへ収束させる**。注入はバインディングだけを保存し、値はコンテナ
 起動の瞬間に解決する(だから rotate 後は再デプロイして初めて効く — これは仕様)。
 
-## フェーズ(現在地:M3 service 機能完成 — prod-infra 残り)
+## フェーズ(現在地:M3 service 完了・本番稼働 → 次は M4 ガバナンス)
 
 M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → **M2 volume(完了)** →
-**M3 service(機能完成 S1–S8、残り = prod-infra)** → M4 ガバナンス → M5 valkey。
+**M3 service(完了)** → **M4 ガバナンス(次)** → M5 valkey。
 各フェーズ単体で使える状態にする。マイグレーションはフェーズ毎に追加。
+
+M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
+`git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
+本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =
+traefik は HTTP :80)。専用ドメイン `tsubomi-app.com`(CF zone)でサービスは一級子域 `*.tsubomi-app.com` =
+免費 Universal SSL 覆盖(ACM 不要)。デプロイは `just ship`(`docker save|ssh load`、`~/tsubomi-deploy`)。
+詳細・2 モード(上流TLS / 直VPS+LE)は `paas-m3-design.md` §13。
 
 M1 で入ったもの:`resources` スーパーテーブル + `database_details`/`database_roles`
 + `audit_log`;pg-tenant(ユーザ DB)+ pgbouncer(外部入口、auth_query、client TLS);DB 作成/

@@ -669,18 +669,19 @@ Button/Dialog を踏襲(frontend 規約)。
 
 ## 12. 完了判定(第 4 層 §9 の M3 行を満たす)
 
-> 現状(S1–S8 機能完成、dev e2e 済み):機能・デプロイ経路・注入・lifecycle・reconcile は緑。
-> **残りは prod-infra**(GH Actions buildx 双架 + 本番 traefik/LE/registry/pgbouncer)— ✗ の 2 行が
-> それに依存する(dev は registry 到達不可 / 本番ドメイン・LE 無しのため end-to-end を張れない)。
+> **完了(2026-06-15、`tsubomi-app.com` で本番稼働・端到端検証済み)**。香橙派 + Cloudflare Tunnel
+> (上流 TLS 終端 = `TSUBOMI_TLS` 未設定 / traefik HTTP :80)。両デプロイ経路を実機で確認:`git push`→
+> GitHub Actions(arm64 QEMU build → registry.tsubomi-app.com push → hook)と `tbm deploy --local`、どちらも
+> `https://<sub>.tsubomi-app.com` が 200。専用ドメインで `*.tsubomi-app.com` は一級子域 = 免費証書(ACM 不要)。
 
-- [ ] `tbm service create x` → `git push` → **30 秒以内**に `<sub>.<ドメイン>` が開く ← **prod-infra 待ち**(デプロイ経路・file provider ルーティングは S3–S5 で実装・dev の `<sub>.localhost` で検証済み。GitHub push→本番ドメインの end-to-end が残り)
+- [x] `tbm service create x` → `git push` → `<sub>.<ドメイン>` が開く(本番 `ghdemo.tsubomi-app.com` で確認。GitHub Actions が registry.tsubomi-app.com へ push → hook → 起動 → ルーティング)
 - [x] `tbm inject <db> --into x` + 再デプロイ → コンテナ内 `$DATABASE_URL` が app role の内部文字列で、実際に接続できる(S6)
 - [x] `tbm inject <volume> --into x --mount /data` → コンテナ内 `/data` に volume が見える(S6)
 - [x] `tbm service stop/start/logs/status` が期待通り(S7a)
 - [x] ホスト再起動(or `docker rm` で全コンテナ消す)→ reconcile が desired=running を自動復活(S8、dev e2e 済み)
 - [x] 孤児コンテナ(DB に行が無い `tsubomi.managed` コンテナ)が reconcile で消える(S8)
 - [x] deploy hook:署名不一致 401 / ts 範囲外 400 / nonce 重複 409 / 正常 202(S4/S5)
-- [ ] `tbm deploy --local` が GitHub 非依存で同じ結果を出す ← 実装済み(S5)だが **dev は buildx コンテナドライバが host registry に届かず未検証。prod registry で確認**
+- [x] `tbm deploy --local` が GitHub 非依存で同じ結果を出す(本番 `demo.tsubomi-app.com` で確認。build → registry push → hook → 起動)
 - [x] `tbm service rollback <deploy-id>` が旧 digest を再起動(再 build なし)(S7a)
 ```
 
