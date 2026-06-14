@@ -18,7 +18,7 @@ use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde_json::json;
-use sqlx::{Column, Connection, Executor, PgPool, Row};
+use sqlx::{Column, Connection, Executor, PgPool, Row, SqlSafeStr};
 use tsubomi_shared::{
     ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, QueryResultSet,
     RenameDatabaseReq, ResourceDto,
@@ -427,7 +427,7 @@ pub async fn query(
     // fetch_many で「行(Right)/ 文完了(Left)」を流し、文ごとに 1 集合へまとめる
     // (fetch_all だと全文の行が混ざり、別 SELECT の値が違う列に並んでしまう)。
     let collect = async {
-        let stream = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql)).fetch_many(&mut conn);
+        let stream = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql.as_str())).fetch_many(&mut conn);
         futures_util::pin_mut!(stream);
 
         let mut results: Vec<QueryResultSet> = Vec::new();
@@ -467,7 +467,8 @@ pub async fn query(
         Ok::<_, AppError>(results)
     };
 
-    let results = match tokio::time::timeout(std::time::Duration::from_secs(15), collect).await {
+    let mut results = match tokio::time::timeout(std::time::Duration::from_secs(15), collect).await
+    {
         Ok(r) => r?,
         Err(_) => {
             // タイムアウト:接続を落として中断する。
@@ -477,6 +478,28 @@ pub async fn query(
             ));
         }
     };
+
+    // 0 行 SELECT は列が落ちる:単純クエリプロトコルでは列を最初の行から確定するため、
+    // 行が来ないと columns が空のまま返る(空テーブルの閲覧や WHERE 偽の SELECT)。
+    // すると columns 空 = 非 SELECT(INSERT/CREATE 等)と区別がつかず、UI が
+    // 「行を返さない」表示に倒れてヘッダ無しになる。結果集合が 1 つだけ・列も行も空・
+    // rows_affected=0 のとき(= 空 SELECT か非 SELECT のどちらか)に限り describe で
+    // 列だけ引き直す(Parse のみで実行はしない)。列が返れば行 0 の SELECT として補い、
+    // 返らなければ非 SELECT なので空のまま(= OK 表示)。複数文のときは describe が
+    // 通らない/曖昧なので触らない。
+    if let [only] = results.as_mut_slice()
+        && only.columns.is_empty()
+        && only.rows.is_empty()
+        && only.rows_affected == 0
+    {
+        let sql = sqlx::AssertSqlSafe(req.sql).into_sql_str();
+        if let Ok(Ok(desc)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), conn.describe(sql)).await
+        {
+            only.columns = desc.columns.iter().map(|c| c.name().to_string()).collect();
+        }
+    }
+
     let _ = conn.close().await;
 
     Ok(Json(QueryResp { results }))

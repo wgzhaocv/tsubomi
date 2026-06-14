@@ -154,7 +154,8 @@ function TableViewer({ id, table }: { id: string; table: string }) {
   );
 }
 
-// DATA タブ:先頭 100 行。
+// DATA タブ:先頭 100 行。空テーブルでも列ヘッダは出る(サーバが 0 行 SELECT の
+// 列を describe で補うため — databases.rs の query 参照)。
 function DataPane({ query }: { query: ReturnType<typeof useTableRows> }) {
   if (query.isPending) return <Loading />;
   if (query.error)
