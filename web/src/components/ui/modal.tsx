@@ -255,7 +255,11 @@ export const Modal: React.FC<ModalProps> = ({
       <div
         ref={dialogRef}
         className={cn(
-          "relative flex max-h-[calc(100vh-64px)] max-w-[calc(100vw-32px)] flex-col animate-[animal-zoom-in_0.3s_ease]",
+          // outline-none:この div は tabIndex=-1 のフォーカストラップ用コンテナで、
+          // 操作対象のウィジェットではない。グローバルの `* { outline-ring/50 }`
+          // (黄)が当たって、フォーカスが乗ると対話框全体が黄枠になるのを防ぐ。
+          // 中の入力/ボタンは各自の focus-visible 枠を持つ。
+          "relative flex max-h-[calc(100vh-64px)] max-w-[calc(100vw-32px)] flex-col outline-none animate-[animal-zoom-in_0.3s_ease]",
           className,
         )}
         style={{ width }}

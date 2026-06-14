@@ -154,7 +154,7 @@ export default function VolumeFileBrowser() {
 
   const submitMkdir = () => {
     const trimmed = mkdirName.trim();
-    if (!trimmed) return;
+    if (!trimmed || mkdir.isPending) return; // 二重送信を防ぐ
     mkdir.mutate(joinPath(currentPath, trimmed), {
       onSuccess: () => {
         setMkdirOpen(false);
@@ -165,7 +165,7 @@ export default function VolumeFileBrowser() {
 
   const submitRename = () => {
     const trimmed = renameName.trim();
-    if (!trimmed || !renameTarget) return;
+    if (!trimmed || !renameTarget || move.isPending) return; // 二重送信を防ぐ
     move.mutate(
       { from: joinPath(currentPath, renameTarget.name), to: joinPath(currentPath, trimmed) },
       { onSuccess: () => setRenameTarget(null) },
@@ -410,19 +410,22 @@ export default function VolumeFileBrowser() {
           </>
         }
       >
-        <div className="flex w-full flex-col gap-3">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitMkdir();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
           <Input
             label="フォルダ名"
             placeholder="例:images"
             value={mkdirName}
             autoFocus
             onChange={(e) => setMkdirName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitMkdir();
-            }}
             description={`${currentPath ? `/${currentPath}` : "ルート"} の中に作成します。`}
           />
-        </div>
+        </form>
       </Modal>
 
       {/* 名前変更 / 移動 */}
@@ -448,18 +451,21 @@ export default function VolumeFileBrowser() {
           </>
         }
       >
-        <div className="flex w-full flex-col gap-3">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitRename();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
           <Input
             label="新しい名前(現在のフォルダからの相対パス)"
             value={renameName}
             autoFocus
             onChange={(e) => setRenameName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitRename();
-            }}
             description="サブフォルダへ移動するには path/to/name のように指定します。"
           />
-        </div>
+        </form>
       </Modal>
 
       {/* 削除確認 */}

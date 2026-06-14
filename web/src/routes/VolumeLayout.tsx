@@ -31,7 +31,7 @@ export default function VolumeLayout() {
 
   const submitRename = () => {
     const trimmed = renameName.trim();
-    if (!trimmed) return;
+    if (!trimmed || rename.isPending) return; // 二重送信を防ぐ
     rename.mutate(trimmed, { onSuccess: () => setRenameOpen(false) });
   };
 
@@ -134,21 +134,24 @@ export default function VolumeLayout() {
           </>
         }
       >
-        <div className="flex w-full flex-col gap-3">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitRename();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
           <Input
             label="名前"
             value={renameName}
             autoFocus
             onChange={(e) => setRenameName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitRename();
-            }}
             description="表示名だけ変わります。保存したファイルはそのままです。"
           />
           {rename.error && (
             <p className="text-sm font-semibold text-[#e05a5a]">{rename.error.message}</p>
           )}
-        </div>
+        </form>
       </Modal>
     </PageContainer>
   );

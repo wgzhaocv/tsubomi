@@ -26,7 +26,7 @@ export default function Volumes() {
 
   const submit = () => {
     const trimmed = name.trim();
-    if (!trimmed) return;
+    if (!trimmed || create.isPending) return; // 二重送信を防ぐ(連打 / Enter+クリック)
     create.mutate(trimmed, {
       onSuccess: (vol) => {
         setOpen(false);
@@ -131,22 +131,26 @@ export default function Volumes() {
             </>
           }
         >
-          <div className="flex w-full flex-col gap-3">
+          {/* 本物の form。Enter は onSubmit を 1 回だけ通す(独自 onKeyDown は廃止)。 */}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit();
+            }}
+            className="flex w-full flex-col gap-3"
+          >
             <Input
               label="名前"
               placeholder="例:myapp-storage"
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
               description="表示名です。後から変えても保存したファイルは変わりません。"
             />
             {create.error && (
               <p className="text-sm font-semibold text-[#e05a5a]">{create.error.message}</p>
             )}
-          </div>
+          </form>
         </Modal>
       </div>
     </PageContainer>
