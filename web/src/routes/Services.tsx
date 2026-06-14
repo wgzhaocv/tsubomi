@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { Plus, Server } from "lucide-react";
+import { useNavigate } from "react-router";
 
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
+import { PhaseBadge } from "@/components/phase-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { CodeBlock } from "@/components/ui/codeblock";
@@ -19,27 +21,13 @@ import {
 
 // サービス一覧 + 作成導線。サービスは GitHub repo と 1:1 のデプロイ単位。
 // 平台は GitHub に触れないので、作成後は「次の一手」(setup_commands + workflow)を
-// 表示する(CLI の json「方案だけ返す」と同じ思想)。詳細・ログ・停止/再開は後フェーズ。
-
-// phase バッジ(観測された実際の段階)。色は段階で決まる。
-function PhaseBadge({ phase }: { phase: string }) {
-  const tone =
-    phase === "running"
-      ? "bg-[#2f6b3f]/15 text-[#3f8a55]"
-      : phase === "deploying"
-        ? "bg-[#b5862a]/15 text-[#b5862a]"
-        : phase === "failed"
-          ? "bg-[#e05a5a]/15 text-[#e05a5a]"
-          : "bg-muted text-muted-foreground"; // created / stopped
-  return (
-    <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ${tone}`}>{phase}</span>
-  );
-}
+// 表示する(CLI の json「方案だけ返す」と同じ思想)。カードクリックで詳細ページへ。
 
 // モーダルの状態(作成フォーム / 作成後の連携手順 / 閉)を 1 つの型で表す。
 type ModalState = { kind: "create" } | { kind: "setup"; result: CreateServiceResult } | null;
 
 export default function Services() {
+  const navigate = useNavigate();
   const { data: services, isPending, error } = useServices();
   const create = useCreateService();
 
@@ -96,8 +84,8 @@ export default function Services() {
               <div className="flex flex-col gap-1.5">
                 <p className="text-lg font-bold text-foreground">まだサービスがありません</p>
                 <p className="max-w-md text-sm font-medium text-muted-foreground">
-                  GitHub リポジトリと 1 対 1 で結びつくデプロイ単位です。作成すると連携手順
-                  (gh / workflow)が表示され、git push で自動デプロイされます。
+                  GitHub リポジトリと 1 対 1 で結びつくデプロイ単位です。作成すると連携手順 (gh /
+                  workflow)が表示され、git push で自動デプロイされます。
                 </p>
               </div>
               <Button
@@ -115,7 +103,11 @@ export default function Services() {
           <ul className="flex flex-col gap-3">
             {services.map((svc: Service) => (
               <li key={svc.id}>
-                <Card className="flex-row items-center justify-between gap-4 py-4">
+                <Card
+                  interactive
+                  onClick={() => navigate(`/services/${svc.id}`)}
+                  className="flex-row items-center justify-between gap-4 py-4"
+                >
                   <CardContent className="flex min-w-0 items-center gap-3.5">
                     <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
                       <Server className="size-5.5" />
@@ -201,7 +193,8 @@ export default function Services() {
               </div>
 
               <p className="text-sm font-medium text-foreground">
-                リポジトリ直下で以下を実行 → <code className="font-mono">git push</code> で自動デプロイ。
+                リポジトリ直下で以下を実行 → <code className="font-mono">git push</code>{" "}
+                で自動デプロイ。
                 <span className="text-muted-foreground">
                   {" "}
                   (gh が無ければ各値を手動で GitHub Secrets / Variables に登録)

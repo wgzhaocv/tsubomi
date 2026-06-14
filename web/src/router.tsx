@@ -14,6 +14,12 @@ import Login from "@/routes/Login";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
 import ResourcePage from "@/routes/ResourcePage";
+import ServiceDeploys from "@/routes/ServiceDeploys";
+import ServiceEnv from "@/routes/ServiceEnv";
+import ServiceInjections from "@/routes/ServiceInjections";
+import ServiceLayout from "@/routes/ServiceLayout";
+import ServiceLogs from "@/routes/ServiceLogs";
+import ServiceOverview from "@/routes/ServiceOverview";
 import Services from "@/routes/Services";
 import Trash from "@/routes/Trash";
 import UiGallery from "@/routes/UiGallery";
@@ -38,8 +44,20 @@ export const router = createBrowserRouter([
     element: <DashboardLayout />,
     children: [
       { index: true, element: <Welcome /> },
-      // service 一覧 + 作成導線(M3 S4)。詳細・ログ・停止/再開は後フェーズ。
+      // service 一覧 + 作成導線(M3 S4)。
       { path: "services", element: <Services /> },
+      {
+        // 詳細の外殻(見出し + サブナビ)。子が 概要 / デプロイ / 注入 / 環境変数 / ログ。
+        path: "services/:id",
+        element: <ServiceLayout />,
+        children: [
+          { index: true, element: <ServiceOverview /> },
+          { path: "deploys", element: <ServiceDeploys /> },
+          { path: "injections", element: <ServiceInjections /> },
+          { path: "env", element: <ServiceEnv /> },
+          { path: "logs", element: <ServiceLogs /> },
+        ],
+      },
       // database は実装済み(一覧 + 詳細 3 ページ)。他の種別は当面 ResourcePage の骨格。
       { path: "databases", element: <Databases /> },
       {
