@@ -405,16 +405,19 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 
 ## 11. 完了判定(第 4 層 §9 の M4 行「owner が見える・対処できる」)
 
-- [ ] owner で `/admin` を開くと、全ユーザの資源が **真名 + 匿名番号 + 使用量**で見える
+> **完了(S1–S4、dev e2e 済み)**。S5(共有パスワード viewer)は §10-A の通り**否決(後相)** —
+> 可視化を owner-gated で出したので「owner が見える・対処できる」は満たす。
+
+- [x] owner で `/admin` を開くと、全ユーザの資源が **真名 + 匿名番号 + 使用量**で見える
       (資源名・内容は出ない)。非 owner は 403 / 画面で弾かれる(S1)
-- [ ] ランキングが指標降順で出る(service=CPU/内存、database=存储、volume=占用)(S1)
-- [ ] 磁盘使用率を閾値より上げる(or 閾値を下げる)と owner に告警メールが届き、
+- [x] ランキングが指標降順で出る(service=CPU/内存、database=存储、volume=占用)(S1)
+- [x] ディスク使用率を閾値より上げる(or 閾値を下げる)と owner に警告メールが届き、
       連続 tick で重複しない(dev は log で確認)(S2)
-- [ ] owner が他人の service を **メール検証コード入力後に** stop / delete でき、
-      コード無し / 誤コードは拒否される(S3)
-- [ ] owner の delete が対象ユーザの**ゴミ箱**に入り、本人が復元できる(S3)
-- [ ] `/admin/audit` で S1–S3 の操作(`owner.stop_service` 等)が **actor / 対象ユーザ真名付き**で
+- [x] owner が他人の service を **メール検証コード入力後に** stop / delete でき、
+      コード無し / 誤コードは拒否される(誤コードは焚码で総当たり封じ)(S3)
+- [x] owner の delete が対象ユーザの**ゴミ箱**に入り、本人が復元できる(S3)
+- [x] `/admin/audit` で S1–S3 の操作(`owner.stop_service` 等)が **actor / 対象ユーザ真名付き**で
       辿れる(S4)
-- [ ] (S5 を実装した場合)非 owner が共有パスワードで overview を只读で見られ、
-      owner がパスワードをリセットできる
+- [ ] (否決・後相)S5 共有パスワード viewer:非 owner が共有パスワードで overview を只读で
+      見られ、owner がパスワードをリセットできる
 ```
