@@ -76,3 +76,39 @@ pub fn remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
         Err(e) => Err(e.into()),
     }
 }
+
+/// dynamic dir 内の `svc-<uuid>.yml` ファイルから service_id を列挙する(reconcile の
+/// 孤児 route 掃除用)。best-effort:dir が読めなければ空、命名規則に合わないファイルは無視。
+pub(crate) fn list_service_ids(state: &AppState) -> Vec<Uuid> {
+    let Ok(entries) = std::fs::read_dir(&state.config.traefik_dynamic_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| parse_route_filename(e.file_name().to_str()?))
+        .collect()
+}
+
+/// `svc-<uuid>.yml` から uuid を取り出す純粋関数(write の `svc-{id}.yml` の逆)。
+/// 平台が書く route ファイルだけを拾い、ipallow.yml や .tmp などは弾く。
+fn parse_route_filename(name: &str) -> Option<Uuid> {
+    let stem = name.strip_prefix("svc-")?.strip_suffix(".yml")?;
+    Uuid::parse_str(stem).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_route_filename;
+    use uuid::Uuid;
+
+    #[test]
+    fn parses_only_service_route_files() {
+        let id = Uuid::new_v4();
+        assert_eq!(parse_route_filename(&format!("svc-{id}.yml")), Some(id));
+        // 命名規則に合わないものは弾く(中間生成物 / 他用途 / 不正 uuid)。
+        assert_eq!(parse_route_filename("ipallow.yml"), None);
+        assert_eq!(parse_route_filename(&format!("svc-{id}.yml.tmp")), None);
+        assert_eq!(parse_route_filename("svc-not-a-uuid.yml"), None);
+        assert_eq!(parse_route_filename(&format!("{id}.yml")), None);
+    }
+}

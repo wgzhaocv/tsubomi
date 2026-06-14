@@ -8,6 +8,7 @@
 pub mod deploy;
 pub mod docker;
 pub mod inject;
+pub mod reconcile;
 pub mod registry;
 pub mod route;
 pub mod workflow;
@@ -206,13 +207,30 @@ pub async fn deploy_config(
 
 // ===== lifecycle(start / stop / logs / delete / rollback)=====
 
-/// 指定 digest を新しい deploy として起こす(start / rollback が共有)。deploys 行を received で
-/// 作り、run_digest を **await**(run_digest 内で deploy_lock + start-first swap + 状態記録)。
-async fn redeploy(
+/// 直近に成功した deploy の `(image_digest, git_sha)`(同じ行なので整合)。1 件も無ければ未デプロイ。
+/// start(現行を再起動)と reconcile(消えたコンテナを復活)が共有する。
+pub(crate) async fn latest_succeeded_deploy(
+    state: &AppState,
+    service_id: Uuid,
+) -> AppResult<Option<(String, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT image_digest, git_sha FROM deploys
+          WHERE service_id = $1 AND status = 'succeeded'
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(&state.db)
+    .await?)
+}
+
+/// 指定 digest を新しい deploy として起こす(start / rollback / reconcile が共有)。deploys 行を
+/// received で作り、run_digest を **await**(run_digest 内で deploy_lock + start-first swap + 状態記録)。
+pub(crate) async fn redeploy(
     state: &AppState,
     service_id: Uuid,
     image_digest: &str,
     git_sha: &str,
+    trigger: deploy::DeployTrigger,
 ) -> AppResult<()> {
     let deploy_id: Uuid = sqlx::query_scalar(
         "INSERT INTO deploys (service_id, git_sha, image_digest, status)
@@ -223,7 +241,7 @@ async fn redeploy(
     .bind(image_digest)
     .fetch_one(&state.db)
     .await?;
-    deploy::run_digest(state, deploy_id, service_id, image_digest, git_sha).await
+    deploy::run_digest(state, deploy_id, service_id, image_digest, git_sha, trigger).await
 }
 
 /// `POST /api/services/:id/start`:現 image_digest を再起動(desired_state=running)。
@@ -234,22 +252,13 @@ pub async fn start(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
-    // 直近に成功した deploy の (digest, git_sha) を再起動する(両者が同じ行 = 整合)。
-    // 1 件も無ければ未デプロイ。
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT image_digest, git_sha FROM deploys
-          WHERE service_id = $1 AND status = 'succeeded'
-          ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
-    let (digest, git_sha) = row.ok_or_else(|| {
+    // 直近に成功した deploy の (digest, git_sha) を再起動する。1 件も無ければ未デプロイ。
+    let (digest, git_sha) = latest_succeeded_deploy(&state, id).await?.ok_or_else(|| {
         AppError::BadRequest(
             "まだデプロイされていません(git push か `tbm deploy --local` でデプロイしてください)".into(),
         )
     })?;
-    redeploy(&state, id, &digest, &git_sha).await?;
+    redeploy(&state, id, &digest, &git_sha, deploy::DeployTrigger::User).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -342,7 +351,7 @@ pub async fn rollback(
     .fetch_optional(&state.db)
     .await?;
     let (digest, git_sha) = row.ok_or(AppError::NotFound)?;
-    redeploy(&state, id, &digest, &git_sha).await?;
+    redeploy(&state, id, &digest, &git_sha, deploy::DeployTrigger::User).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

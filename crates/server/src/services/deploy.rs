@@ -30,6 +30,15 @@ const SIGNATURE_HEADER: &str = "x-tsubomi-signature";
 /// ts の許容ずれ(リプレイ防御の片割れ。もう片方は nonce 一意)。
 const MAX_SKEW_SECS: i64 = 300;
 
+/// run_digest を起こす契機。reconcile はロック取得後に「まだ走るべき(desired=running かつ
+/// phase=running)」かを再確認する — 候補取得とロック取得の間に stop が割り込むと停止済みの
+/// service を蘇らせてしまうため。user 操作(hook / start / rollback)は明示的意図なので再確認しない。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DeployTrigger {
+    User,
+    Reconcile,
+}
+
 /// hook body。**生バイトで HMAC 検証してから** serde で読む(serde 経由で受けて
 /// 再シリアライズすると 1 バイトの差で署名が割れるため、Bytes で生を取る)。
 #[derive(Deserialize)]
@@ -117,10 +126,16 @@ pub async fn deploy(
         // パイプラインを panic 包囲する(spawn 内の panic はタスクを黙って殺し、deploy が
         // deploying のまま残るため)。panic 時は **まだ deploying のものだけ** failed にする
         // (条件付き UPDATE。commit 済みの running は触らない)。
-        let outcome =
-            AssertUnwindSafe(run_digest(&state2, deploy_id, service_id, &image_digest, &git_sha))
-                .catch_unwind()
-                .await;
+        let outcome = AssertUnwindSafe(run_digest(
+            &state2,
+            deploy_id,
+            service_id,
+            &image_digest,
+            &git_sha,
+            DeployTrigger::User,
+        ))
+        .catch_unwind()
+        .await;
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -157,28 +172,33 @@ pub async fn run_digest(
     service_id: Uuid,
     image_digest: &str,
     git_sha: &str,
+    trigger: DeployTrigger,
 ) -> AppResult<()> {
     // 同一 service の deploy を直列化(コンテナ / route / 状態の競合を防ぐ。単機インメモリ)。
     let lock = state.deploy_lock(service_id);
     let _guard = lock.lock().await;
 
-    // ロック取得待ちの間に service が削除された可能性(start/rollback/hook と delete の競合)。
-    // 削除済みなら起動せず終える — 削除済み service に孤児コンテナ / route を作らない。
-    let alive: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1 AND kind='service' AND deleted_at IS NULL)",
+    // ロック取得待ちの間に状態が変わった可能性(delete / stop / 別 deploy と競合)。行が無い =
+    // 削除済み → 起動しない(削除済み service に孤児コンテナ / route を作らない)。
+    let cur: Option<(String, String)> = sqlx::query_as(
+        "SELECT s.desired_state, s.phase FROM service_details s
+           JOIN resources r ON r.id = s.resource_id
+          WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
     .bind(service_id)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await?;
-    if !alive {
+    let Some((desired, phase)) = cur else {
         tracing::warn!(%service_id, %deploy_id, "deploy 対象が削除済み — スキップ(孤児防止)");
-        let _ = sqlx::query(
-            "UPDATE deploys SET status='failed', error='service は削除済みです', finished_at=now()
-              WHERE id=$1 AND status NOT IN ('succeeded','failed')",
-        )
-        .bind(deploy_id)
-        .execute(&state.db)
-        .await;
+        abort_deploy(state, deploy_id, "service は削除済みです").await;
+        return Ok(());
+    };
+    // reconcile の復活は「まだ走るべき」時だけ:候補取得とロック取得の間に stop が割り込んで
+    // desired/phase が running でなくなっていたら停止済み service を蘇らせない(決定 #5)。
+    // commit_success が desired=running に戻してしまうので、ここで弾くのが唯一の防壁。
+    if trigger == DeployTrigger::Reconcile && (desired != "running" || phase != "running") {
+        tracing::info!(%service_id, %deploy_id, desired, phase, "reconcile: 復活直前に状態が変化 — スキップ");
+        abort_deploy(state, deploy_id, "reconcile: 復活前に状態が変化したためスキップ").await;
         return Ok(());
     }
 
@@ -351,6 +371,19 @@ async fn mark_failed(
         .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// deploy を起こさずに deploys 行だけ failed で閉じる(削除済み / reconcile スキップの共通処理)。
+/// service_details の phase は **触らない** — 既存の状態(stopped 等)を尊重する。
+async fn abort_deploy(state: &AppState, deploy_id: Uuid, reason: &str) {
+    let _ = sqlx::query(
+        "UPDATE deploys SET status='failed', error=$2, finished_at=now()
+          WHERE id=$1 AND status NOT IN ('succeeded','failed')",
+    )
+    .bind(deploy_id)
+    .bind(reason)
+    .execute(&state.db)
+    .await;
 }
 
 async fn set_status(state: &AppState, deploy_id: Uuid, status: &str) {

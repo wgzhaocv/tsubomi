@@ -50,6 +50,13 @@ async fn sweep_auth(state: &AppState) {
             "authcodes",
             "DELETE FROM authcodes WHERE expires_at <= now()",
         ),
+        // deploy hook のリプレイ防御 nonce。窓(MAX_SKEW=±300s)を十分越えた古い行は
+        // もう照合されないので掃除する(m3-design §8。reconcile の職務だが DB ハウスキーピング
+        // なのでここに同居 — reconcile は容器/route 収束に純化する)。
+        (
+            "deploy_nonces",
+            "DELETE FROM deploy_nonces WHERE seen_at < now() - interval '1 hour'",
+        ),
     ] {
         match sqlx::query(sql).execute(&state.db).await {
             Ok(r) if r.rows_affected() > 0 => {

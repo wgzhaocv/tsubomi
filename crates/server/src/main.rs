@@ -47,6 +47,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(config).await?;
     gc::spawn(state.clone());
+    // 現実(コンテナ/route)を期望状態へ収束させる第二の保険(restart=unless-stopped が第一)。
+    // 起動時フル + 30s ライト(S8)。serve はブロックしない(初回フルは spawn 内の 0 tick)。
+    services::reconcile::spawn(state.clone());
     // 起動時に IP 許可リストを traefik へ収束させる(middleware を必ず定義済みにする。
     // best-effort:書けなくてもサーバは起動する)。
     ipblock::sync_traefik(&state).await;

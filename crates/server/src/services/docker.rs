@@ -11,7 +11,8 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
 use bollard::models::{
-    ContainerCreateBody, ContainerSummary, HostConfig, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerSummary, ContainerSummaryStateEnum, HostConfig, RestartPolicy,
+    RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -116,6 +117,47 @@ fn mgmt_labels(spec: &RunSpec) -> HashMap<String, String> {
     m.insert(LABEL_GIT_SHA.into(), spec.git_sha.clone());
     m.insert(LABEL_MANAGED.into(), "true".into());
     m
+}
+
+/// reconcile 用の緩い存在判定:running / restarting のコンテナが 1 つでもあれば true。
+/// 厳格な `is_live`(restart_count==0 を要求)とは**別物** — reconcile であれを使うと
+/// クラッシュループ中(restarting)のコンテナを「不在」と誤判し毎パス作り直してしまう。
+/// restarting は docker の restart policy が面倒を見ているので「存在」とみなし手出ししない。
+pub(crate) async fn is_present(state: &AppState, service_id: Uuid) -> AppResult<bool> {
+    use ContainerSummaryStateEnum::{RESTARTING, RUNNING};
+    Ok(list_by_service(state, service_id)
+        .await?
+        .iter()
+        .any(|c| matches!(c.state, Some(RUNNING | RESTARTING))))
+}
+
+/// 全ての管理コンテナ(`tsubomi.managed=true`)を `(コンテナ id, service_id ラベルの parse 結果)`
+/// で返す(停止中も含む)。reconcile の孤児検出が使う:service_id が DB に生きた行を持たなければ
+/// 孤児。ラベルが欠落 / 不正なら `None`(個別削除の対象)。
+pub(crate) async fn list_managed(state: &AppState) -> AppResult<Vec<(String, Option<Uuid>)>> {
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("label".into(), vec![format!("{LABEL_MANAGED}=true")]);
+    let opts = ListContainersOptionsBuilder::default()
+        .all(true)
+        .filters(&filters)
+        .build();
+    let containers = state
+        .docker
+        .list_containers(Some(opts))
+        .await
+        .map_err(|e| AppError::Other(anyhow!("管理コンテナ一覧に失敗: {e}")))?;
+    Ok(containers
+        .into_iter()
+        .filter_map(|c| {
+            let id = c.id?;
+            let sid = c
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(LABEL_SERVICE_ID))
+                .and_then(|s| Uuid::parse_str(s).ok());
+            Some((id, sid))
+        })
+        .collect())
 }
 
 /// 指定 service の管理コンテナ一覧(`tsubomi.service_id` ラベルで引く。停止中も含む)。
