@@ -111,6 +111,10 @@ services:
     restart: unless-stopped
     environment:
       REGISTRY_STORAGE_DELETE_ENABLED: "true"   # registry GC(未参照 blob 削除)のため
+      # TLS 終端の前段(traefik / CF tunnel)の後ろにいるので、blob upload の Location を
+      # **相対 URL** で返す。これが無いと registry が受信スキーム(http)で絶対 URL を返し、
+      # docker push が http:// へ降格 → basicAuth が落ちて 401 になる(本番 push の必須設定)。
+      REGISTRY_HTTP_RELATIVEURLS: "true"
     ports:
       - "127.0.0.1:5000:5000"
     volumes:
@@ -154,6 +158,9 @@ services:
     env_file:
       - .env.production
     volumes:
+      # M3:平台は docker.sock を保持してユーザコンテナを起動/停止/収束する(bollard)。
+      # dev は host 直走りで native に持つが、本番はコンテナなのでホストの sock をマウントする。
+      - /var/run/docker.sock:/var/run/docker.sock
       # バックアップ / ゴミ箱 dump をホストに永続化(server は host ネットなので
       # コンテナ内パス = ホストパスで一致。TSUBOMI_BACKUP_DIR / _TRASH_DIR と対応)。
       - /srv/tsubomi:/srv/tsubomi
