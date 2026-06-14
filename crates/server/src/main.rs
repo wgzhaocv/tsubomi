@@ -13,6 +13,7 @@ mod databases;
 mod error;
 mod gc;
 mod ipblock;
+mod mail;
 mod routes;
 mod services;
 mod state;

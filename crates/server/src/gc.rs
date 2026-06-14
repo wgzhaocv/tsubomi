@@ -7,10 +7,12 @@
 //! M3 でコンテナの存在収束・孤児掃除がここに合流する。
 
 use crate::databases::audit;
+use crate::mail;
 use crate::state::AppState;
 use crate::tenant;
 use crate::trash;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -35,8 +37,135 @@ fn spawn_housekeeping(state: AppState) {
             tick.tick().await;
             sweep_auth(&state).await;
             sweep_trash(&state).await;
+            check_disk(&state).await;
         }
     });
+}
+
+/// platform_config にディスク警告の状態を持つキー(level + notified_at で去重)。
+const DISK_STATE_KEY: &str = "disk_alert_state";
+/// 同じ level に留まっている間も、この間隔を超えたら 1 回だけ再喚起する。
+const DISK_REALERT_AFTER: chrono::Duration = chrono::Duration::hours(24);
+
+/// ディスク使用率を `df` で見て、warn/critical を跨いだら(or 同 level でも 24h 経過で)owner に
+/// メールする。1h tick で呼ばれるので、毎回送ると受信箱が溢れる → platform_config の
+/// 前回状態(level + notified_at)で去重する(§4.2)。best-effort:df 失敗 / 送信失敗は log のみ。
+async fn check_disk(state: &AppState) {
+    let cfg = &state.config;
+    let Some(pct) = disk_used_pct(&cfg.volumes_dir).await else {
+        return; // df 失敗(best-effort:警告は安全側に倒し止めない)
+    };
+    let level = if pct >= cfg.disk_critical_pct {
+        "critical"
+    } else if pct >= cfg.disk_warn_pct {
+        "warn"
+    } else {
+        "ok"
+    };
+
+    let prev: Option<Value> = sqlx::query_scalar("SELECT value FROM platform_config WHERE key = $1")
+        .bind(DISK_STATE_KEY)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    let prev_level = prev
+        .as_ref()
+        .and_then(|v| v.get("level"))
+        .and_then(Value::as_str)
+        .unwrap_or("ok");
+    let prev_notified = prev
+        .as_ref()
+        .and_then(|v| v.get("notified_at"))
+        .and_then(Value::as_str)
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc));
+
+    let rank = |l: &str| match l {
+        "critical" => 2,
+        "warn" => 1,
+        _ => 0,
+    };
+    let now = chrono::Utc::now();
+    let escalated = rank(level) > rank(prev_level);
+    // 再喚起は **同 level に留まっている間だけ** 24h 間隔で(de-escalation では送らない — §4.2)。
+    // 初回観測(prev_notified なし)で同 level なら即送る。
+    let stale =
+        level == prev_level && prev_notified.is_none_or(|t| now - t > DISK_REALERT_AFTER);
+    let should_notify = level != "ok" && (escalated || stale);
+
+    // 通知できた時だけ notified_at を進める。送信失敗(Resend の一時障害など)では据え置き、
+    // 次 tick で再試行する(さもないと 1 通も届かないまま 24h 沈黙してしまう)。
+    let notified = if should_notify {
+        let subject = format!("[tsubomi] ディスク使用率 {pct}%({level})");
+        let body = format!(
+            "tsubomi のディスク使用率が {pct}% に達しました(level={level}、warn={}% / critical={}%)。\n\
+             監視パス:{}\n\n古いバックアップ / ゴミ箱の整理、不要な volume の削除、容量増設を検討してください。",
+            cfg.disk_warn_pct,
+            cfg.disk_critical_pct,
+            cfg.volumes_dir.display()
+        );
+        match mail::send(state, &cfg.owner_emails, &subject, &body).await {
+            Ok(()) => {
+                // target_resource は無い(platform 全体のイベント)ので nil uuid。詳細は detail に。
+                audit(
+                    &state.db,
+                    None,
+                    "disk.alert",
+                    Uuid::nil(),
+                    json!({ "used_pct": pct, "level": level }),
+                )
+                .await;
+                tracing::warn!(pct, level, "ディスク水位警告 — owner に通知");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "ディスク警告メールの送信に失敗 — 次 tick で再試行");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    // 状態を更新:level は常に最新へ。notified_at は通知に**成功した時だけ** now に進める
+    // (同 level の再喚起判定 + 送信失敗時の再試行に使う)。
+    let notified_at = if notified { Some(now) } else { prev_notified };
+    let new_state = json!({
+        "level": level,
+        "used_pct": pct,
+        "notified_at": notified_at.map(|t| t.to_rfc3339()),
+    });
+    if let Err(e) = sqlx::query(
+        "INSERT INTO platform_config (key, value, updated_at) VALUES ($1, $2, now())
+         ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()",
+    )
+    .bind(DISK_STATE_KEY)
+    .bind(&new_state)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(error = ?e, "ディスク警告状態の保存に失敗");
+    }
+}
+
+/// 指定パスを含む filesystem の使用率(%)を `df -Pk` で取る。POSIX `-P` で 1 行・固定列
+/// (Filesystem 1024-blocks Used Available Capacity Mounted-on)になり、Capacity は 5 列目。
+/// macOS/Linux 両対応。解析失敗は None(best-effort)。
+async fn disk_used_pct(path: &Path) -> Option<u8> {
+    let out = tokio::process::Command::new("df")
+        .arg("-Pk")
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?; // ヘッダの次の行
+    let cap = line.split_whitespace().nth(4)?; // "NN%"
+    cap.trim_end_matches('%').parse().ok()
 }
 
 async fn sweep_auth(state: &AppState) {

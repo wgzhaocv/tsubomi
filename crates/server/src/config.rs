@@ -89,6 +89,16 @@ pub struct Config {
     /// traefik(compose)が file provider でこの同じホストパスを読む。会社 IP
     /// 許可リストの変更はここへ書き直され、traefik がホットリロードする。
     pub traefik_dynamic_dir: PathBuf,
+
+    // ===== M4 ガバナンス:メール基盤(Resend)+ ディスク水位警告 =====
+    /// Resend の API キー。未設定 = メールを送らず log のみ(dev / 未契約時の退路)。
+    pub resend_api_key: Option<String>,
+    /// メール送信元(例:"tsubomi <noreply@tsubomi-app.com>")。resend_api_key が在る時は必須。
+    pub mail_from: Option<String>,
+    /// ディスク使用率の警告閾値(%)。warn 以上で owner にメール、critical でさらに強調。
+    /// gc の周期(1h)で `df` を見て判定し、platform_config の状態で去重する(§4.2)。
+    pub disk_warn_pct: u8,
+    pub disk_critical_pct: u8,
 }
 
 /// master key のラッパ。Config は Debug 派生なので、生鍵が `{:?}` で漏れないように
@@ -266,6 +276,25 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/traefik-dynamic"));
 
+        // ===== M4 ガバナンス:メール基盤 + ディスク水位警告 =====
+        let resend_api_key = std::env::var("RESEND_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mail_from = std::env::var("TSUBOMI_MAIL_FROM")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if resend_api_key.is_some() && mail_from.is_none() {
+            anyhow::bail!("RESEND_API_KEY が設定されているなら TSUBOMI_MAIL_FROM も必要です");
+        }
+        let disk_warn_pct: u8 = std::env::var("TSUBOMI_DISK_WARN_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(80);
+        let disk_critical_pct: u8 = std::env::var("TSUBOMI_DISK_CRITICAL_PCT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90);
+
         Ok(Self {
             bind_addr,
             web_dir,
@@ -296,6 +325,10 @@ impl Config {
             edge_network,
             tls,
             traefik_dynamic_dir,
+            resend_api_key,
+            mail_from,
+            disk_warn_pct,
+            disk_critical_pct,
         })
     }
 }
