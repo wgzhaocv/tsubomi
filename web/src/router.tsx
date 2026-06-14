@@ -1,7 +1,10 @@
 import { createBrowserRouter } from "react-router";
 
 import { DashboardLayout } from "@/components/dashboard-layout";
+import { RequireOwner } from "@/components/require-owner";
 import { RESOURCES } from "@/lib/resources";
+import AdminOverview from "@/routes/AdminOverview";
+import AdminRanking from "@/routes/AdminRanking";
 import CliInstall from "@/routes/CliInstall";
 import DatabaseEditor from "@/routes/DatabaseEditor";
 import DatabaseLayout from "@/routes/DatabaseLayout";
@@ -89,6 +92,16 @@ export const router = createBrowserRouter([
       // IP 許可リスト(owner 専用のガバナンス画面)。サイドメニューにも owner 限定で出す。
       // バックエンドが 403 で守るので、ここはルート自体は誰でも辿れる(画面側で弾く)。
       { path: "ip-allowlist", element: <IpAllowlist /> },
+      // 管制面の可視化(owner 専用・M4 S1)。総覧 + 使用量ランキング。匿名化(真名 +
+      // 匿名番号 + 使用量、資源名/内容は出さない)。後端が owner + session を毎回検証。
+      // owner ゲートはルート単位の <RequireOwner> に集約(各ページに内蔵しない)。
+      {
+        element: <RequireOwner />,
+        children: [
+          { path: "admin", element: <AdminOverview /> },
+          { path: "admin/ranking", element: <AdminRanking /> },
+        ],
+      },
       ...RESOURCES.filter(
         (r) =>
           r.kind !== "service" &&

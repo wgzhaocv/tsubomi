@@ -11,12 +11,12 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
 use bollard::models::{
-    ContainerCreateBody, ContainerSummary, ContainerSummaryStateEnum, HostConfig, RestartPolicy,
-    RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum,
+    HostConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder, StatsOptionsBuilder,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -262,6 +262,61 @@ pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> Ap
         }
     }
     Ok(out)
+}
+
+/// owner ガバナンスの監視指標(M4 S1)。`(cpu_pct, mem_bytes)` を 1 サンプルで返す。
+pub struct ServiceStat {
+    /// CPU 使用率(%)。算出不能(system delta 0 / フィールド欠落)は None。
+    pub cpu_pct: Option<f64>,
+    /// 内存使用量(bytes)。
+    pub mem_bytes: i64,
+}
+
+/// 指定 service の **稼働中** コンテナを 1 サンプル stats する(owner 可視化、§3.3)。
+/// コンテナ不在 / 停止中 / 取得失敗は None(UI は「-」表示 = best-effort)。
+///
+/// `stream=false` で one_shot を**付けない**:daemon が約 1 秒間隔の 2 サンプルから
+/// `precpu_stats` を埋めてくれるので CPU% を算出できる(one_shot=true だと precpu が
+/// 無く CPU が出せない)。代わりに 1 コンテナにつき ~1 秒かかるので、呼び出し側
+/// (overview/ranking)は service を並行に集める。
+pub async fn stats(state: &AppState, service_id: Uuid) -> Option<ServiceStat> {
+    let name = list_by_service(state, service_id)
+        .await
+        .ok()?
+        .into_iter()
+        .find(|c| matches!(c.state, Some(ContainerSummaryStateEnum::RUNNING)))
+        .and_then(|c| c.id)?;
+
+    let opts = StatsOptionsBuilder::default().stream(false).build();
+    let sample = state.docker.stats(&name, Some(opts)).next().await?.ok()?;
+
+    let mem_bytes = sample
+        .memory_stats
+        .as_ref()
+        .and_then(|m| m.usage)
+        .unwrap_or(0) as i64;
+    Some(ServiceStat {
+        cpu_pct: compute_cpu_pct(&sample),
+        mem_bytes,
+    })
+}
+
+/// Docker 公式の CPU% 算出:`(cpu_delta / system_delta) * online_cpus * 100`。
+/// precpu(前サンプル)が無い / system delta が 0 なら None。
+fn compute_cpu_pct(s: &ContainerStatsResponse) -> Option<f64> {
+    let cpu = s.cpu_stats.as_ref()?;
+    let pre = s.precpu_stats.as_ref()?;
+    let cpu_delta = cpu
+        .cpu_usage
+        .as_ref()?
+        .total_usage?
+        .checked_sub(pre.cpu_usage.as_ref()?.total_usage?)? as f64;
+    let sys_delta = cpu.system_cpu_usage?.checked_sub(pre.system_cpu_usage?)? as f64;
+    if sys_delta <= 0.0 {
+        return None;
+    }
+    let ncpu = cpu.online_cpus.unwrap_or(1).max(1) as f64;
+    Some((cpu_delta / sys_delta) * ncpu * 100.0)
 }
 
 /// 新コンテナが「起動直後に落ちていない」ことを確認する(就緒ではなく **存活** 判定。

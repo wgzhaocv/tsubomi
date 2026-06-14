@@ -34,6 +34,19 @@ pub enum AuthSource {
     Token { token_id: Uuid },
 }
 
+impl AuthCtx {
+    /// owner ロールか(role 文字列の比較を 1 箇所に集約 — owner 専用ハンドラの共通入力)。
+    pub fn is_owner(&self) -> bool {
+        self.role == "owner"
+    }
+
+    /// web セッション由来か(Bearer cli_token ではない)。owner ガバナンスは web 専用なので
+    /// admin ハンドラがこれを要求する(CLI は AI 駆動のユーザ資源操作専用)。
+    pub fn is_session(&self) -> bool {
+        matches!(self.source, AuthSource::Session)
+    }
+}
+
 pub fn public_routes() -> Router<AppState> {
     Router::new()
         .route("/auth/info", get(google::info))

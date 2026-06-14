@@ -267,7 +267,8 @@ const USAGE_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// symlink は辿らない(read_dir の file_type はエントリ自身の型 — symlink は file/dir
 /// どちらにも該当せず素通り)。スタックで回し、深いツリーでも再帰オーバーフローしない。
 /// 時間予算を超えたら途中で打ち切る(値は下限、truncated=true)。
-fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64, bool)> {
+/// owner ガバナンスの可視化(M4 admin)も volume の占用にこれを再利用する。
+pub(crate) fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64, bool)> {
     let start = std::time::Instant::now();
     let (mut size, mut files, mut dirs, mut seen) = (0u64, 0u64, 0u64, 0u64);
     let mut stack = vec![root.to_path_buf()];

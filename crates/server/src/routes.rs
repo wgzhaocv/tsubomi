@@ -33,6 +33,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::volumes::routes())
         .merge(crate::services::routes())
         .merge(crate::ipblock::routes())
+        .merge(crate::admin::routes())
         .merge(crate::trash::routes())
         .layer(middleware::from_fn_with_state(
             state.clone(),

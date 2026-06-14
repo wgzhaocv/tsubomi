@@ -446,6 +446,49 @@ pub struct CreateIpAllowReq {
     pub note: String,
 }
 
+// ============ ガバナンス:管制面の可視化(M4 S1、owner 専用・web)============
+
+/// `GET /api/admin/ranking` の各行 / overview の素材。匿名化済み(設計 v2 §7):
+/// **ユーザの真名は出すが、資源は `display_name` ではなく匿名番号**(`service1` 等)。
+/// 資源の内容(DB の中身 / ファイル / env 明文)は一切載せない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminResourceRow {
+    /// 資源 ID(不透明な UUID。名前/内容ではないので匿名化を破らない)。owner 専用で、
+    /// S3「最後の砦」の代理操作(stop/delete)が対象を指すのに使う。
+    pub resource_id: Uuid,
+    /// 資源の所有者の真名(users.name、無ければ email)。
+    pub owner_name: String,
+    pub kind: String,
+    /// 匿名ラベル `<kind><anon_seq>`(例:service1 / database2 / volume1)。display_name は出さない。
+    pub anon_label: String,
+    /// ソート対象の使用量(bytes)。database=存储 / volume=占用 / service=内存(稼働中)。
+    /// 取得不能(停止中 service / 計測タイムアウト / 未対応の cache 等)は null。
+    pub usage_bytes: Option<i64>,
+    /// service のみ:CPU 使用率(%)。取得不能 / 停止中は null。
+    pub cpu_pct: Option<f64>,
+    /// service のみ:コンテナが稼働中か。他種別は null。
+    pub running: Option<bool>,
+}
+
+/// `GET /api/admin/overview` の種別ごと集計。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOverviewKind {
+    pub kind: String,
+    pub count: i64,
+    /// 使用量の合計(bytes)。種別内で意味は単一(service=稼働中内存 / database=存储 /
+    /// volume=占用)。取得できなかった分は 0 として加算。
+    pub total_usage_bytes: i64,
+}
+
+/// `GET /api/admin/overview` のレスポンス。匿名化された全体サマリ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOverviewResp {
+    /// 資源を 1 つ以上持つ(削除されていない)ユーザ数。
+    pub user_count: i64,
+    /// kind は service / database / volume の固定順(cache は M5)。
+    pub kinds: Vec<AdminOverviewKind>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

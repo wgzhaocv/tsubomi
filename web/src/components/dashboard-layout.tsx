@@ -1,5 +1,14 @@
 import { useEffect } from "react";
-import { ChevronRight, LogOut, Menu, ShieldCheck, X } from "lucide-react";
+import {
+  BarChart3,
+  ChevronRight,
+  Gauge,
+  LogOut,
+  type LucideIcon,
+  Menu,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { Link, NavLink, Navigate, Outlet, useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +32,53 @@ function FullPageLoading() {
         <p className="text-sm font-bold text-muted-foreground">読み込み中…</p>
       </div>
     </div>
+  );
+}
+
+// 管理(owner 専用)セクションのナビ項目。リソースナビと同じ薬形 + active の葉っぱ揺れ。
+// 3 項目(管制面 / ランキング / IP 許可リスト)で同じマークアップを繰り返すので 1 つに束ねる。
+function OwnerNavLink({
+  to,
+  end,
+  icon: Icon,
+  label,
+  onNavigate,
+}: {
+  to: string;
+  end?: boolean;
+  icon: LucideIcon;
+  label: string;
+  onNavigate?: () => void;
+}) {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        cn(
+          "relative flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-semibold text-foreground outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
+          isActive
+            ? "bg-[#0CC0B5] text-[#FFF9E3] shadow-[0_3px_0_0_rgba(61,52,40,0.08)]"
+            : "hover:bg-[rgba(25,200,185,0.1)] hover:text-[#11a89b]",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Icon className="size-5 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{label}</span>
+          {isActive && (
+            <img
+              src="/icons/icon-leaf.png"
+              alt=""
+              aria-hidden
+              className="absolute -top-1 right-1 size-4.5 animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]"
+            />
+          )}
+        </>
+      )}
+    </NavLink>
   );
 }
 
@@ -96,33 +152,20 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           <span className="px-3.5 pt-2 pb-0.5 text-[11px] font-bold tracking-wide text-muted-foreground">
             管理
           </span>
-          <NavLink
+          {/* end:/admin は総覧のみ active(/admin/ranking では非 active にする)。 */}
+          <OwnerNavLink to="/admin" end icon={Gauge} label="管制面" onNavigate={onNavigate} />
+          <OwnerNavLink
+            to="/admin/ranking"
+            icon={BarChart3}
+            label="使用量ランキング"
+            onNavigate={onNavigate}
+          />
+          <OwnerNavLink
             to="/ip-allowlist"
-            onClick={onNavigate}
-            className={({ isActive }) =>
-              cn(
-                "relative flex items-center gap-3 rounded-2xl px-3.5 py-2.5 text-sm font-semibold text-foreground outline-none transition-all duration-250 ease-in-out focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
-                isActive
-                  ? "bg-[#0CC0B5] text-[#FFF9E3] shadow-[0_3px_0_0_rgba(61,52,40,0.08)]"
-                  : "hover:bg-[rgba(25,200,185,0.1)] hover:text-[#11a89b]",
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <ShieldCheck className="size-5 shrink-0" />
-                <span className="min-w-0 flex-1 truncate">IP 許可リスト</span>
-                {isActive && (
-                  <img
-                    src="/icons/icon-leaf.png"
-                    alt=""
-                    aria-hidden
-                    className="absolute -top-1 right-1 size-4.5 animate-[animal-leaf-wiggle_2s_ease-in-out_infinite]"
-                  />
-                )}
-              </>
-            )}
-          </NavLink>
+            icon={ShieldCheck}
+            label="IP 許可リスト"
+            onNavigate={onNavigate}
+          />
         </nav>
       )}
 
