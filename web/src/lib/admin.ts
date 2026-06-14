@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { RESOURCES } from "@/lib/resources";
 
@@ -97,5 +102,39 @@ export function useAdminAction() {
         qc.invalidateQueries({ queryKey: adminKeys.overview });
       }
     },
+  });
+}
+
+// 監査ログ閲覧(S4)。キーセット分頁(id DESC)を useInfiniteQuery で「もっと読む」。
+// action は前方一致フィルタ(例 "owner." で代理操作だけ)。
+export type AuditEntry = {
+  id: number;
+  created_at: string;
+  action: string;
+  actor_name: string | null;
+  target_user_name: string | null;
+  target_resource: string | null;
+  detail: unknown;
+};
+
+const AUDIT_PAGE = 50;
+
+async function fetchAudit(cursor: number | null, action: string): Promise<AuditEntry[]> {
+  const p = new URLSearchParams({ limit: String(AUDIT_PAGE) });
+  if (cursor != null) p.set("cursor", String(cursor));
+  if (action) p.set("action", action);
+  const res = await fetch(`/api/admin/audit?${p}`);
+  if (!res.ok) return failBody(res);
+  return (await res.json()) as AuditEntry[];
+}
+
+export function useAuditLog(action: string) {
+  return useInfiniteQuery({
+    queryKey: ["admin", "audit", action],
+    queryFn: ({ pageParam }) => fetchAudit(pageParam, action),
+    initialPageParam: null as number | null,
+    // 1 頁が満杯なら続きがある可能性 → 最後の id を次カーソルに。満杯未満 = 終端。
+    getNextPageParam: (last) => (last.length === AUDIT_PAGE ? last[last.length - 1].id : undefined),
+    staleTime: STALE_MS,
   });
 }

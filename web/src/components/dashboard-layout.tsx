@@ -6,6 +6,7 @@ import {
   LogOut,
   type LucideIcon,
   Menu,
+  ScrollText,
   ShieldCheck,
   X,
 } from "lucide-react";
@@ -158,6 +159,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             to="/admin/ranking"
             icon={BarChart3}
             label="使用量ランキング"
+            onNavigate={onNavigate}
+          />
+          <OwnerNavLink
+            to="/admin/audit"
+            icon={ScrollText}
+            label="監査ログ"
             onNavigate={onNavigate}
           />
           <OwnerNavLink

@@ -3,6 +3,7 @@ import { createBrowserRouter } from "react-router";
 import { DashboardLayout } from "@/components/dashboard-layout";
 import { RequireOwner } from "@/components/require-owner";
 import { RESOURCES } from "@/lib/resources";
+import AdminAudit from "@/routes/AdminAudit";
 import AdminOverview from "@/routes/AdminOverview";
 import AdminRanking from "@/routes/AdminRanking";
 import CliInstall from "@/routes/CliInstall";
@@ -100,6 +101,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "admin", element: <AdminOverview /> },
           { path: "admin/ranking", element: <AdminRanking /> },
+          { path: "admin/audit", element: <AdminAudit /> },
         ],
       },
       ...RESOURCES.filter(

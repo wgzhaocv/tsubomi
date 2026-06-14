@@ -13,6 +13,7 @@ use axum::Router;
 use axum::routing::{get, post};
 
 mod actions;
+mod audit_view;
 mod overview;
 
 pub fn routes() -> Router<AppState> {
@@ -22,6 +23,8 @@ pub fn routes() -> Router<AppState> {
         // 最後の砦(S3):owner が他人の資源を停止 / 削除(二段確認 + 検証コード)。
         .route("/admin/resources/{id}/stop", post(actions::stop))
         .route("/admin/resources/{id}/delete", post(actions::delete))
+        // 監査ログ閲覧(S4)。
+        .route("/admin/audit", get(audit_view::list))
 }
 
 /// admin ゲート:owner 身分 **かつ** session 由来(Bearer cli_token は拒否)。

@@ -503,6 +503,26 @@ pub struct AdminActionResp {
     pub code_required: bool,
 }
 
+/// `GET /api/admin/audit` の各行(監査ログ閲覧・S4、owner 専用・web)。actor / target_user は
+/// 真名(name、無ければ email)で join 済み。target_resource は匿名化のため UUID のまま
+/// (資源名は出さない)。detail は非機密の jsonb(cidr / kind / 用量など)をそのまま。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEntryDto {
+    /// audit_log.id(BIGINT)。キーセット分頁のカーソルにも使う(id DESC)。
+    pub id: i64,
+    pub created_at: DateTime<Utc>,
+    /// 'owner.delete_service' / 'db.rotate' / 'disk.alert' など。
+    pub action: String,
+    /// 操作者の真名。システム操作(reconcile の自動 purge 等)は null。
+    pub actor_name: Option<String>,
+    /// 代理操作の対象ユーザの真名(owner.* のみ)。それ以外は null。
+    pub target_user_name: Option<String>,
+    /// 対象資源(UUID のまま。資源名は出さない)。
+    pub target_resource: Option<Uuid>,
+    /// 付帯情報(非機密の jsonb)。
+    pub detail: Option<serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
