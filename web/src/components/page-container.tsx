@@ -5,10 +5,10 @@ import { cn } from "@/lib/utils";
 // 管理画面の各ページの内容コンテナ。横幅と既定パディングをここで一元管理する。
 // 以前は DashboardLayout が pathname の正規表現で幅を出し分けていたが、それは層が
 // 浅い(レイアウトがルートを知ってしまう)ので、各ページが自分の幅を宣言する形へ。
-//   default: max-w-5xl(読み物・カード一覧向け)
-//   wide:    max-w-360(テーブルデータなど横スクロールが要る画面向け)
+//   wide(既定): max-w-360 — 全ダッシュボード画面を統一(一覧・詳細・テーブルすべて)。
+//   default:    max-w-5xl — 狭くしたい画面が出たとき明示する用に残す(現状不使用)。
 export function PageContainer({
-  width = "default",
+  width = "wide",
   className,
   children,
 }: {

@@ -31,7 +31,7 @@ export default function Volumes() {
       onSuccess: (vol) => {
         setOpen(false);
         setName("");
-        void navigate(`/volumes/${vol.id}/files`);
+        navigate(`/volumes/${vol.id}/files`);
       },
     });
   };

@@ -30,7 +30,7 @@ export default function Databases() {
       onSuccess: (db) => {
         setOpen(false);
         setName("");
-        void navigate(`/databases/${db.id}`);
+        navigate(`/databases/${db.id}`);
       },
     });
   };

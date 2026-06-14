@@ -77,41 +77,45 @@ export default function Trash() {
           <ul className="flex flex-col gap-3">
             {items.map((it) => (
               <li key={it.id}>
-                <Card className="flex-row items-center justify-between gap-4 py-4">
-                  <CardContent className="flex min-w-0 items-center gap-3.5">
-                    <span className="shrink-0 rounded-full bg-accent px-3 py-1 text-xs font-bold text-accent-foreground">
-                      {KIND_JA[it.kind] ?? it.kind}
-                    </span>
-                    <div className="flex min-w-0 flex-col">
-                      <span className="truncate text-base font-bold text-foreground">
-                        {it.display_name}
+                <Card>
+                  {/* 中身は全て CardContent の中に置く(px-6 が両側に効く)。
+                      操作ボタンを CardContent の外に出すと右枠と padding が無くなる。 */}
+                  <CardContent className="flex items-center justify-between gap-4">
+                    <div className="flex min-w-0 items-center gap-3.5">
+                      <span className="shrink-0 rounded-full bg-accent px-3 py-1 text-xs font-bold text-accent-foreground">
+                        {KIND_JA[it.kind] ?? it.kind}
                       </span>
-                      <span className="truncate text-xs font-medium text-muted-foreground">
-                        削除 {new Date(it.deleted_at).toLocaleDateString("ja-JP")} · 自動削除{" "}
-                        {daysLeft(it.purge_after)}
-                      </span>
+                      <div className="flex min-w-0 flex-col">
+                        <span className="truncate text-base font-bold text-foreground">
+                          {it.display_name}
+                        </span>
+                        <span className="truncate text-xs font-medium text-muted-foreground">
+                          削除 {new Date(it.deleted_at).toLocaleDateString("ja-JP")} · 自動削除{" "}
+                          {daysLeft(it.purge_after)}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        type="default"
+                        size="small"
+                        icon={<RotateCcw className="size-4" />}
+                        loading={restore.isPending && restore.variables === it.id}
+                        onClick={() => restore.mutate(it.id)}
+                      >
+                        復元
+                      </Button>
+                      <Button
+                        type="default"
+                        size="small"
+                        danger
+                        icon={<Trash2 className="size-4" />}
+                        onClick={() => setPurgeTarget(it)}
+                      >
+                        完全に削除
+                      </Button>
                     </div>
                   </CardContent>
-                  <div className="flex shrink-0 gap-2">
-                    <Button
-                      type="default"
-                      size="small"
-                      icon={<RotateCcw className="size-4" />}
-                      loading={restore.isPending && restore.variables === it.id}
-                      onClick={() => restore.mutate(it.id)}
-                    >
-                      復元
-                    </Button>
-                    <Button
-                      type="default"
-                      size="small"
-                      danger
-                      icon={<Trash2 className="size-4" />}
-                      onClick={() => setPurgeTarget(it)}
-                    >
-                      完全に削除
-                    </Button>
-                  </div>
                 </Card>
               </li>
             ))}

@@ -9,7 +9,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // https://vite.dev/config/
 export default defineConfig({
   fmt: {},
-  lint: { options: { typeAware: true, typeCheck: true } },
+  // no-floating-promises は無効化。fire-and-forget の navigate/refetch/clipboard を
+  // `void` で抑止するのを止め、コードから void 演算子を一掃する方針(プロジェクト決定)。
+  lint: {
+    options: { typeAware: true, typeCheck: true },
+    rules: { "typescript/no-floating-promises": "off" },
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

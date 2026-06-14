@@ -203,7 +203,7 @@ export default function DatabaseOverview() {
                 del.mutate(id, {
                   onSuccess: () => {
                     setDeleteOpen(false);
-                    void navigate("/databases");
+                    navigate("/databases");
                   },
                 })
               }

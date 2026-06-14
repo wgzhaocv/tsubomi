@@ -11,7 +11,7 @@ export function useCopied(resetMs = 1500) {
 
   const copy = useCallback(
     (text: string) => {
-      void navigator.clipboard.writeText(text).then(() => {
+      navigator.clipboard.writeText(text).then(() => {
         setCopied(true);
         clearTimeout(timer.current);
         timer.current = setTimeout(() => setCopied(false), resetMs);

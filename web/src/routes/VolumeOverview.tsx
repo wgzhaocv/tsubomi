@@ -93,7 +93,7 @@ export default function VolumeOverview() {
                 del.mutate(id, {
                   onSuccess: () => {
                     setDeleteOpen(false);
-                    void navigate("/volumes");
+                    navigate("/volumes");
                   },
                 })
               }

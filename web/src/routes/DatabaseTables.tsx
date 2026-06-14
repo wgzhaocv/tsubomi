@@ -109,7 +109,9 @@ function TableViewer({ id, table }: { id: string; table: string }) {
   const columns = useTableColumns(id, tab === "structure" ? table : undefined);
 
   const active = tab === "data" ? rows : columns;
-  const refresh = () => void active.refetch();
+  const refresh = () => {
+    active.refetch();
+  };
 
   return (
     <div className="flex flex-col gap-3">

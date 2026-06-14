@@ -36,7 +36,7 @@ export default function OauthCodeCallback() {
               block
               type={copied ? "default" : "primary"}
               onClick={() => {
-                void navigator.clipboard.writeText(code).then(() => {
+                navigator.clipboard.writeText(code).then(() => {
                   setCopied(true);
                 });
               }}

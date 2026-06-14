@@ -63,7 +63,7 @@ export function InstallSteps({ className }: { className?: string }) {
       />
       <CommandCard
         title="Windows — コマンドプロンプト(cmd)"
-        note="PowerShell を使わない純 cmd 版。同じ場所に入ります。"
+        note="PowerShell を使わない cmd 版。同じ場所に入ります。"
         command={`curl -fsSL ${origin}/install.bat -o %TEMP%\\tbm-install.bat && %TEMP%\\tbm-install.bat`}
       />
 

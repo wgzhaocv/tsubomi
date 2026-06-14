@@ -229,7 +229,9 @@ export default function VolumeFileBrowser() {
             type="default"
             size="small"
             icon={<RefreshCw className={isFetching ? "size-4 animate-spin" : "size-4"} />}
-            onClick={() => void refetch()}
+            onClick={() => {
+              refetch();
+            }}
           >
             更新
           </Button>
@@ -296,7 +298,9 @@ export default function VolumeFileBrowser() {
               ) : (
                 data.entries.map((e) => {
                   const path = joinPath(currentPath, e.name);
-                  const enterFolder = () => void navigate(browseUrl(id, path));
+                  const enterFolder = () => {
+                    navigate(browseUrl(id, path));
+                  };
                   return (
                     <tr
                       key={e.name}
