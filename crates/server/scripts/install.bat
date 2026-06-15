@@ -1,12 +1,18 @@
 @echo off
-REM tbm CLI インストーラ — cmd.exe(PowerShell 不要、管理者権限不要)。
-REM 使い方:
-REM   curl -fsSL https://<ドメイン>/install.bat -o %TEMP%\tbm-install.bat ^&^& %TEMP%\tbm-install.bat
+REM tbm CLI installer for cmd.exe (no PowerShell, no admin required).
+REM Usage:
+REM   curl -fsSL https://<domain>/install.bat -o %TEMP%\tbm-install.bat ^&^& %TEMP%\tbm-install.bat
 REM
-REM %LOCALAPPDATA%\tbm\bin\tbm.exe に入れて、reg add でユーザ PATH に追加する
-REM (setx は 1024 文字で切り詰めるので使わない)。`tbm uninstall` が PATH
-REM エントリとディレクトリを丸ごと取り除く(残留物ゼロ)。
-REM __SERVER_URL__ は配信時にサーバが実ドメインへ置換する。
+REM Installs to %LOCALAPPDATA%\tbm\bin\tbm.exe and adds that dir to the user PATH
+REM via "reg add" (setx truncates at 1024 chars, so it is avoided). "tbm uninstall"
+REM removes the PATH entry and the directory (no leftovers).
+REM __SERVER_URL__ is replaced with the real domain by the server at serve time.
+REM
+REM IMPORTANT: keep this file ASCII-only. cmd.exe parses batch files using the
+REM console's OEM codepage (cp932 / Shift-JIS on Japanese Windows). UTF-8 non-ASCII
+REM bytes get mis-paired there, which swallows spaces and line breaks and makes cmd
+REM execute fragments of comments as commands. The design rationale lives in
+REM crates/server/src/cli_release.rs (Rust source is read as UTF-8, never by cmd).
 setlocal enabledelayedexpansion
 
 if not defined TSUBOMI_SERVER_URL set "TSUBOMI_SERVER_URL=__SERVER_URL__"
@@ -15,7 +21,7 @@ set "INSTALL_DIR=%LOCALAPPDATA%\tbm\bin"
 set "ARCH=%PROCESSOR_ARCHITECTURE%"
 if defined PROCESSOR_ARCHITEW6432 set "ARCH=%PROCESSOR_ARCHITEW6432%"
 if /i not "%ARCH%"=="AMD64" (
-    echo tbm は Windows %ARCH% には未対応です ^(x86_64 のみ^)
+    echo tbm does not support Windows %ARCH% ^(x86_64 only^)
     exit /b 1
 )
 set "TARGET=x86_64-pc-windows-gnu"
@@ -35,8 +41,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM manifest はコンパクト JSON: {"version":"...","target":"...","url":"...","sha256":"..."}
-REM 純 cmd パース:1 変数に読み込み、各キーまで文字列を剥がし、次の引用符まで取る。
+REM manifest is compact JSON: {"version":"...","target":"...","url":"...","sha256":"..."}
+REM Pure cmd parse: load into one var, strip up to each key, take up to the next quote.
 set "JSON="
 for /f "usebackq delims=" %%L in ("%MANIFEST%") do set "JSON=!JSON!%%L"
 
@@ -49,7 +55,7 @@ for /f tokens^=1^ delims^=^" %%V in ("!_rest!") do set "EXPECTED_SHA=%%V"
 if not defined URL goto :bad_manifest
 if not defined EXPECTED_SHA goto :bad_manifest
 
-REM manifest の url は相対パス(ドメイン非依存)。先頭が / ならサーバを前置。
+REM manifest url is a relative path (domain-independent). If it starts with /, prefix the server.
 if "!URL:~0,1!"=="/" set "URL=%TSUBOMI_SERVER_URL%!URL!"
 
 set "ARCHIVE=%TMP_DIR%\tbm.zip"
@@ -61,8 +67,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM certutil で完全性チェック。install.sh と同じ意図:改竄・途中切れの
-REM アーカイブを PATH に置く前に止める。
+REM Integrity check with certutil. Same intent as install.sh: stop a tampered or
+REM truncated archive before it lands on PATH.
 set "ACTUAL_SHA="
 for /f "skip=1 delims=" %%H in ('certutil -hashfile "%ARCHIVE%" SHA256') do (
     if not defined ACTUAL_SHA set "ACTUAL_SHA=%%H"
@@ -77,7 +83,7 @@ if /i not "%ACTUAL_SHA%"=="%EXPECTED_SHA%" (
     exit /b 1
 )
 
-REM tar は Windows 10 1803+ に同梱で zip も扱える。
+REM tar ships with Windows 10 1803+ and handles zip.
 tar -xf "%ARCHIVE%" -C "%TMP_DIR%"
 if errorlevel 1 (
     echo failed to extract %ARCHIVE%
@@ -98,15 +104,15 @@ rmdir /s /q "%TMP_DIR%" >nul 2>&1
 echo.
 echo tbm installed to %INSTALL_DIR%\tbm.exe
 
-REM PATH 統合。満たすべき 3 点:
-REM   1. setx は 1024 文字に切り詰める(長いユーザ PATH を黙って壊す)。
-REM      reg add でレジストリに直接書く。
-REM   2. reg add は WM_SETTINGCHANGE を発火しないので、explorer が古い env の
-REM      まま新しい cmd に継がせる。setx は副作用としてそれを発火する —
-REM      捨て変数を書いて消すことで PATH に触れず更新通知だけ出す。
-REM   3. 呼び出し元の cmd(`&& install.bat` で実行した窓)は実行前の env を
-REM      持っている。endlocal ^& set トリックで呼び出し元の PATH にも注入し、
-REM      同じ窓ですぐ tbm が動くようにする。
+REM PATH integration. Three requirements:
+REM   1. setx truncates at 1024 chars (silently corrupts a long user PATH).
+REM      Write the registry directly with "reg add".
+REM   2. "reg add" does not fire WM_SETTINGCHANGE, so explorer keeps handing the
+REM      stale env to new cmd windows. setx fires it as a side effect -- write and
+REM      delete a throwaway var to broadcast the change without touching PATH.
+REM   3. The calling cmd (the window that ran "&& install.bat") holds its pre-run
+REM      env. The "endlocal ^& set" trick injects into the caller's PATH too so tbm
+REM      works in the same window right away.
 set "USER_PATH="
 for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul ^| findstr /i "REG_"') do set "USER_PATH=%%B"
 
@@ -136,10 +142,10 @@ if not defined REG_HAS_DIR (
     echo added %INSTALL_DIR% to user PATH.
 )
 
-REM 初期設定:server_url を書いておく(インストーラは自分のドメインを知っている)。
-REM 既存の設定(トークン入りかもしれない)は壊さない。
-REM パスは Rust 側 ProjectDirs の Windows 解決結果 %APPDATA%\org\app\config を
-REM ミラーしている(crates/cli/src/config.rs)。
+REM Initial config: write server_url (the installer knows its own domain).
+REM Do not clobber an existing config (it may hold a token).
+REM This path mirrors the Rust ProjectDirs Windows resolution
+REM %APPDATA%\org\app\config (crates/cli/src/config.rs).
 set "CFG_DIR=%APPDATA%\flegrowth\tsubomi\config"
 if not exist "%CFG_DIR%\config.toml" (
     if not exist "%CFG_DIR%" mkdir "%CFG_DIR%"
@@ -150,9 +156,9 @@ if not exist "%CFG_DIR%\config.toml" (
 echo.
 echo next: tbm login
 
-REM 呼び出し元 shell の PATH へ注入。右辺は endlocal 前に展開され、
-REM endlocal で親スコープに戻った後の set が親に書き込む。既に PATH に
-REM あればスキップ(再実行で増殖しない)。
+REM Inject into the caller shell's PATH. The right-hand side is expanded before
+REM endlocal; after endlocal returns to the parent scope, "set" writes to the parent.
+REM Skip if already on PATH (no duplication on re-run).
 if defined SHELL_HAS_DIR (
     endlocal
     exit /b 0

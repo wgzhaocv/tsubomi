@@ -8,7 +8,7 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderName, StatusCode, header};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
@@ -88,9 +88,18 @@ fn serve_script(
     body: &str,
     content_type: &'static str,
 ) -> axum::response::Response {
+    // インストールスクリプトは可変(ドメインを注入する / 内容を直す)。Cloudflare の
+    // エッジにキャッシュされると修正版を出してもしばらく旧版が配られる(実害あり:
+    // LF 版が居座って Windows が壊れた)。no-store で edge・ブラウザ双方のキャッシュを
+    // 止める。CDN-Cache-Control は Cloudflare が個別に尊重するので併記。
+    // ※ 既にキャッシュ済みのエントリは TTL 切れまで残る — 切替直後は手動 purge が要る。
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+            (HeaderName::from_static("cdn-cache-control"), "no-store"),
+        ],
         body.replace("__SERVER_URL__", &state.config.server_url),
     )
         .into_response()
@@ -113,10 +122,14 @@ pub async fn install_ps1(State(state): State<AppState>) -> axum::response::Respo
 }
 
 pub async fn install_bat(State(state): State<AppState>) -> axum::response::Response {
-    // cmd.exe のバッチは CRLF 必須。LF のみだと goto / for / 遅延展開が壊れ、
-    // トークンが途中で千切れて「X は内部コマンド... ではありません」を撒く
-    // (EXPECTED_SHA が CTED_SHA に化ける等)。リポジトリの実体は LF・サーバは
-    // Linux なので include_str! も LF — 配信の瞬間に CRLF へ正規化する。
+    // install.bat は 2 つの Windows 制約を満たす必要がある:
+    //  (1) 改行は CRLF 必須。LF のみだと goto / for / 遅延展開が壊れトークンが
+    //      途中で千切れる(EXPECTED_SHA → CTED_SHA 等)。リポジトリ実体は LF・
+    //      サーバは Linux なので include_str! も LF — ここで CRLF へ正規化する。
+    //  (2) 中身は ASCII のみ(install.bat 側で担保)。cmd は OEM コードページ
+    //      (日本語 Windows は cp932)でバッチを解釈するため、UTF-8 の日本語を
+    //      混ぜると Shift-JIS として誤対合され、空白や行境界を食って REM の断片を
+    //      コマンド実行してしまう。よって install.bat だけは日本語コメント禁止。
     let crlf = include_str!("../scripts/install.bat")
         .replace("\r\n", "\n")
         .replace('\n', "\r\n");
