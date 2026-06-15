@@ -45,7 +45,7 @@ pub async fn run(_server_override: Option<String>) -> Result<()> {
     // 3. バイナリ + インストールディレクトリ
     self_destruct()?;
 
-    println!("ok");
+    println!("アンインストールしました");
     Ok(())
 }
 
@@ -124,21 +124,27 @@ fn strip_rc_markers() {
             }
         }
         if std::fs::write(&path, out).is_ok() {
-            eprintln!("cleaned PATH block from {}", path.display());
+            eprintln!("{} から PATH ブロックを削除しました", path.display());
         }
     }
 }
 
 /// インストーラが HKCU\Environment の Path に足したエントリを取り除く。
 /// レジストリ直書き(setx は 1024 文字で切り詰める)— install.bat と対称。
+/// インストーラは %LOCALAPPDATA%\tbm 配下に複数の dir を足し得る
+/// (tbm/gh = `\tbm\bin`、MinGit = `\tbm\git\cmd`)。よって個別名で消すのではなく、
+/// `\tbm\` 配下のエントリをまとめて取り除く。
 #[cfg(windows)]
 fn remove_from_user_path() {
     use std::process::Command;
-    let Some(root) = std::env::var_os("LOCALAPPDATA") else {
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         return;
     };
-    let dir = std::path::PathBuf::from(root).join("tbm").join("bin");
-    let dir = dir.to_string_lossy().to_string();
+    // 末尾にセパレータを付けた接頭辞で前方一致させる(`\tbm\bin` も
+    // `\tbm\git\cmd` も拾い、無関係な `\tbmfoo` は拾わない)。
+    let mut prefix = std::path::PathBuf::from(local).join("tbm");
+    prefix.push("");
+    let prefix = prefix.to_string_lossy().to_lowercase();
 
     let out = Command::new("reg")
         .args(["query", "HKCU\\Environment", "/v", "Path"])
@@ -159,7 +165,7 @@ fn remove_from_user_path() {
 
     let new_path: Vec<&str> = current
         .split(';')
-        .filter(|p| !p.trim().eq_ignore_ascii_case(&dir))
+        .filter(|p| !p.trim().to_lowercase().starts_with(&prefix))
         .collect();
     let new_path = new_path.join(";");
     if new_path == current {
@@ -179,6 +185,6 @@ fn remove_from_user_path() {
         ])
         .status();
     if matches!(r, Ok(s) if s.success()) {
-        eprintln!("removed {dir} from user PATH");
+        eprintln!("ユーザ PATH から tbm のエントリを削除しました");
     }
 }

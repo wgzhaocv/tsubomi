@@ -87,14 +87,14 @@ pub async fn run(server_override: Option<String>, manual: bool, web: bool) -> Re
     cfg.user_id = Some(me.user_id.clone());
     config::save(&cfg)?;
 
-    println!("ok {}", me.email);
+    println!("ログインしました: {}", me.email);
     Ok(())
 }
 
 fn open_in_browser(url: &str) {
-    println!("opening: {url}");
+    println!("ブラウザを開きます: {url}");
     if webbrowser::open(url).is_err() {
-        eprintln!("(browser failed to open; copy the URL above into a browser manually)");
+        eprintln!("(ブラウザを開けませんでした。上の URL をブラウザに貼り付けてください)");
     }
 }
 
@@ -131,7 +131,7 @@ fn browser_likely_unavailable() -> bool {
 }
 
 fn read_code_from_stdin() -> Result<String> {
-    print!("paste code: ");
+    print!("コードを貼り付けてください: ");
     io::stdout().flush().ok();
     let mut code = String::new();
     io::stdin()
