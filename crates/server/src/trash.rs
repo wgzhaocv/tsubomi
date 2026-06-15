@@ -308,6 +308,11 @@ pub(crate) async fn purge_resource(
         // db/volume と同じ規律。管理対象外の活きたコンテナを取り残さない)。
         crate::services::docker::stop_remove(state, id).await?;
         crate::services::route::remove(state, id)?;
+        // 永久削除なので rollback 対象も消える → registry の repo(全 manifest)も掃除する。
+        // manifest を消すと layer blob は無参照になり、日次の garbage_collect が実体を回収する
+        // (これをしないと削除済み service の旧イメージが registry に永久に堆積する)。
+        // 失敗時は行を残す(上と同じ規律 → 次 tick で再試行。registry 一時障害で自己修復)。
+        crate::services::registry::delete_repo(state, id).await?;
     } else if kind == "cache" {
         // cache の永久削除:ACL ユーザを消し(冪等)、namespace の key を SCAN+UNLINK で
         // 確実に解放してから行を消す(掃除が失敗したら行を残す = 取り残し防止)。§7.2。
