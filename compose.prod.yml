@@ -185,7 +185,7 @@ services:
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
-    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v7}
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v8}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
