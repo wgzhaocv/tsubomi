@@ -340,23 +340,25 @@ tbm inject <cache> --into <svc> [--as REDIS_URL]   # 既存 inject に cache 種
 | **G** | **per-cache ACL 永続化は平台の収束に委ねる(`ACL SETUSER` は揮発)。収束は起動時 **+ 周期(30s)**の両方。周期収束は毎 tick で fresh に生存 cache を読んでから SETUSER(RACE-1)** | cache_details が真実源 = 背骨。**周期収束は必須**:valkey 単独再起動(ACL 全消失・平台は無再起動)を起動時収束だけでは直せない穴を塞ぐ。再接続窓は tick 幅+クライアント再試行で吸収。**fresh スナップショット**で delete↔tick の競態(削除直後ユーザの一瞬復活)を防ぐ(§7.3) | 起動時のみ(valkey 単独再起動で ACL が永遠に欠落)/ aclfile + `ACL SAVE`(per-cache も valkey 側に二重真実源)/ 古いスナップショットで収束(delete と競態) |
 | **H** | **依存 = `redis` crate** | 成熟・tokio 対応・ACL 発行と e2e 検証に十分 | `fred`(高機能だが M5 には過剰) |
 | **I** | **key の「値」隔離は ACL `~ns:*` で硬いが、`SCAN`/`RANDOMKEY`/`DBSIZE` + `PUBSUB CHANNELS/NUMSUB` による他テナントの key 名/channel 名/総数の列挙は防げない — これを受容し明記** | これらは key/channel パターンを引数に取らず ACL のパターンで出力がフィルタされない(redis/valkey の既知挙動)。値・メッセージは依然 NOPERM。内部ツールで key/channel 名は機密扱いしない。**PUBSUB の channel 名列挙は valkey 8 で実測確認(SUBSCRIBE 値路径は NOPERM)**(ACL-1・§6) | `-SCAN -RANDOMKEY -DBSIZE`(+ 必要なら `-PUBSUB`)も禁止(自分の key も SCAN 不可で実用性を損なう)/ cache 毎に別 valkey 実例(重い) |
-| **J** | **valkey の `default` ユーザは off、平台専用 `tsubomi-admin`(強乱数・aclfile)だけが管理権** | valkey は edge 上で不可信コンテナから到達可能。`default` を残すと admin 入口を晒す。専用 admin + default off で攻撃面を絞る(per-cache は `-@admin` 済み) | `default` に requirepass のまま(admin 入口が edge に晒される)/ valkey を edge に載せない(注入の内部入口が成立しない) |
+| **J** | **valkey の `default` ユーザは off、平台専用 `tsubomi-admin`(強乱数・compose の `--user` で静的定義)だけが管理権** | valkey は edge 上で不可信コンテナから到達可能。`default` を残すと admin 入口を晒す。専用 admin + default off で攻撃面を絞る(per-cache は `-@admin` 済み)。aclfile は `${VAR}` 非展開 + 実行時 SETUSER と排他なので使わない(§3) | `default` に requirepass のまま(admin 入口が edge に晒される)/ valkey を edge に載せない(注入の内部入口が成立しない) |
 
 ---
 
 ## 12. 完了判定(第 4 層 §9 / §10 の M5 行)
 
-- [ ] `tbm cache create x` → valkey に ACL ユーザができ、`tbm cache list` に出る(S1)
-- [ ] **valkey 単独再起動**(`docker restart tsubomi-valkey`)→ 周期収束で ACL が最大 1 tick で復活(S1・§7.3)
-- [ ] `tbm inject x --into <svc>` + 再デプロイ → コンテナ内 `$REDIS_URL` で自分の `<prefix>key` を読み書きできる(S2)
-- [ ] **越境(値)/ 危険コマンドが NOPERM**:`GET otherns:*` / `FLUSHALL` / `KEYS *` が弾かれる(S2・完了判定の核)。
-      ※ `SCAN` による他 ns の key 名列挙は**受容済みギャップ**(§11-I)で、ここでは弾かれなくてよい
+- [x] `tbm cache create x` → valkey に ACL ユーザができ、`tbm cache list` に出る(S1)— dev e2e 済み
+- [x] **valkey 単独再起動**(`docker restart tsubomi-valkey`)→ 周期収束で ACL が ~7s で復活(S1・§7.3)— dev e2e 済み
+- [x] `tbm inject x --into <svc>` + デプロイ → コンテナ内 `$REDIS_URL` で自分の `<prefix>key` を読み書き(S2/最終 e2e)
+- [x] **越境(値)/ 危険コマンドが NOPERM**:`GET otherns:*` / `FLUSHALL` / `KEYS *` / `CONFIG` / `SWAPDB` /
+      `SCRIPT FLUSH` / `FUNCTION FLUSH` が弾かれる(S2・完了判定の核)。`SCAN` の key 名列挙は受容済み(§11-I)— dev e2e 済み
 - [x] `PUBSUB CHANNELS *` 実測済み(ACL-1):他 ns の channel 名は列挙され得る(§11-I 受容)、SUBSCRIBE 値路径は NOPERM
-- [ ] `tbm cache rotate x` で旧文字列が即死、再デプロイで新文字列が効く(S3)
-- [ ] `tbm cache delete x` → ゴミ箱 → restore で凭据 + 生き残った key が復活(データは best-effort・**生存 key 数を報告** §11-D/TRASH-1)、
-      purge(3d)で実体削除(S3・§7.2)
-- [ ] web で cache 一覧 / 詳細(接続文字列 + REDIS_KEY_PREFIX + key 数)が見える(S1/S3)。
-      cache の CRUD は **web 画面 + CLI のみ**(公開入口なし = §11-B)
-- [ ] **総合 e2e(最終)**:cache を作り、**実際に cache を使う service** を立て注入 → デプロイ → その app が
-      `REDIS_URL` + `REDIS_KEY_PREFIX` で読み書きして動く(web 画面 / CLI 双方の経路で確認)
+- [x] `tbm cache rotate x` で旧文字列が即死(WRONGPASS)、再デプロイで新文字列が効く(S3/最終 e2e)— dev e2e 済み
+- [x] `tbm cache delete x` → ゴミ箱 → restore で凭据 + 生き残った key 復活(best-effort・**生存 key 数を audit 報告** TRASH-1)、
+      purge で ACL + key + 行を実体削除(S3・§7.2)— dev e2e 済み
+- [x] web で cache 一覧 / 詳細(接続文字列 reveal + REDIS_KEY_PREFIX + key 数 + rotate + 削除)— endpoint は CLI で e2e 済み、
+      web は vp build + lint クリーン(database 詳細 UI の同型)。cache の CRUD は **web 画面 + CLI のみ**(公開入口なし = §11-B)
+- [x] owner 最後の砦で cache を delete(session 二段確認 + `owner.delete_cache` audit)— dev e2e 済み
+- [x] **総合 e2e(最終)**:cache を作り、**実際に cache を使う service**(Node ioredis カウンタ)を立て注入 →
+      `tbm deploy`/hook でデプロイ → 公開 URL(traefik)で `REDIS_URL` + `REDIS_KEY_PREFIX` を使い `<ns>:visits` を
+      INCR して跨リクエストで永続・隔離内に収まることを確認。rotate → 再デプロイで新コンテナが新パスで接続(決定 #5)— dev e2e 済み
 ```

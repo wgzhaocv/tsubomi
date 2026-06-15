@@ -17,11 +17,25 @@ app をデプロイし、データベース / ボリュームを作る。
 ディスク)をそこへ収束させる**。注入はバインディングだけを保存し、値はコンテナ
 起動の瞬間に解決する(だから rotate 後は再デプロイして初めて効く — これは仕様)。
 
-## フェーズ(現在地:M4 ガバナンス完了 → 次は M5 valkey)
+## フェーズ(現在地:M5 cache(valkey)完了 — 設計フェーズの 4 リソース出揃い)
 
 M0 基盤(ログイン/CLI token)→ **M1 database(完了)** → **M2 volume(完了)** →
-**M3 service(完了)** → **M4 ガバナンス(完了)** → **M5 valkey(次)**。
+**M3 service(完了)** → **M4 ガバナンス(完了)** → **M5 cache/valkey(完了)**。
 各フェーズ単体で使える状態にする。マイグレーションはフェーズ毎に追加。
+
+M5 で入ったもの(S1–S3。dev e2e 済み):infra に **valkey**(`valkey/valkey:8-alpine`、edge 参加、
+default off + `tsubomi-admin` を compose の `--user` で静的定義、ホスト側 6433 で loopback 公開)+
+migration `cache_details`(`acl_user=namespace=c_<shortid>`/`password_enc`/`rotated_at`)。**cache リソース一式**:
+`crates/server/src/{caches.rs,valkey.rs}`(create/list/get/rename/url/rotate/delete)。隔離は **valkey ACL**
+(値 `~<ns>:*` + チャンネル `&<ns>:*` + コマンド白名単 `+@all -@admin -@dangerous -function -script` = 越境 /
+FLUSHALL / KEYS / SCRIPT・FUNCTION FLUSH は NOPERM。値は隔離・key/channel **名**は SCAN/PUBSUB で列挙され得る =
+受容済み §11-I)。per-cache ACL は揮発なので**起動時 + 30s 周期で収束**(`valkey::reconcile_acls`、毎 tick fresh に
+生存 cache を読む = RACE-1)。**注入**:cache → `REDIS_URL`(内部入口 `tsubomi-valkey:6379`)+ `REDIS_KEY_PREFIX`
+(`<ns>:`。値は起動の瞬間に解決 — rotate は再デプロイで効く)。rotate は **DB 先 → valkey**(背骨どおり前向き収束)。
+ゴミ箱:delete=`ACL DELUSER`(key 温存)/ restore=ACL 再作成 + 生存 key 数報告(best-effort)/ purge=`SCAN+UNLINK`。
+owner 最後の砦に cache delete、admin overview/ranking に cache(指標=key 数)。web 詳細(`CacheDetail.tsx`)+
+CLI `tbm cache`。**最終 e2e 済み**:cache を使う service(Node ioredis カウンタ)をデプロイし、公開 URL で
+`<ns>:visits` を INCR して跨リクエスト永続・隔離内を実機確認。実装級は **`paas-m5-design.md`**。
 
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
