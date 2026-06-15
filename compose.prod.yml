@@ -8,14 +8,23 @@
 #   2) .env.production を用意(.env.example がひな形)
 #   3) docker compose --env-file .env.production -f compose.prod.yml up -d
 #
-# 更新:`docker compose --env-file .env.production -f compose.prod.yml pull && up -d`
-#       (別タグなら TSUBOMI_IMAGE=...:vN を前置)。
+# 更新(server だけ・ユーザ app 無瞬断):
+#   TSUBOMI_IMAGE=...:vN docker compose --env-file .env.production -f compose.prod.yml up -d server
+#       (`just ship` はこれを自動でやる。`up -d`(全 service)ではなく `up -d server` に絞るのが要点 —
+#        traefik / pg / valkey などデータ面・入口を巻き込んで再生成せず、全 app の同時瞬断を避ける。)
+#
+# **infra イメージ(postgres/valkey/traefik/pgbouncer/registry)は multi-arch 索引 digest で固定**。
+# こうすると `pull` や `up -d` で勝手に新版へ動かず(= 不意の再生成によるユーザ app 瞬断を防ぎ)、
+# どの VPS でも同一の版に収束する。**索引(manifest list)の digest を貼る**ので arm64 / amd64 の
+# どちらのホストでも docker が自分のアーキ層を解決する(単一アーキの digest を貼ると arm が壊れる)。
+# 更新時(セキュリティ修正など)は新 digest を取って貼り替え、infra の更新だけ別途 `up -d <service>`:
+#   docker buildx imagetools inspect postgres:18   # 出力の `Digest:` が索引 digest
 #
 # 設計: pg-platform は loopback(127.0.0.1:5434)、pg-tenant は loopback(:5435)で
 # テナントから隔離。pgbouncer(:6432)が外部入口。server は host ネットワーク。
 services:
   pg-platform:
-    image: postgres:18
+    image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     container_name: tsubomi-pg-platform
     restart: unless-stopped
     environment:
@@ -35,7 +44,7 @@ services:
   # M1:ユーザ DB インスタンス(管制面とは別)。admin は loopback :5435。
   # 初期化スクリプトは下の configs(pgtenant_init)からマウント = 別ファイル不要。
   pg-tenant:
-    image: postgres:18
+    image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     container_name: tsubomi-pg-tenant
     restart: unless-stopped
     environment:
@@ -60,7 +69,7 @@ services:
   # sslmode=require は証明書を検証しない(LAN・受動的盗聴対策)ので自己署名で十分。
   # postgres:18 を流用(openssl 同梱、別イメージ不要)。鍵は volume 内のみ・git に残さない。
   pgbouncer-certgen:
-    image: postgres:18
+    image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     entrypoint: ["sh", "-c"]
     command:
       - |
@@ -81,7 +90,7 @@ services:
   # 下の configs から。userlist のパスワードは .env から插值され、pgtenant_init が
   # 作るロールと自動で一致する(手動同期は不要)。
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.2-p0
+    image: edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
     container_name: tsubomi-pgbouncer
     restart: unless-stopped
     depends_on:
@@ -106,7 +115,7 @@ services:
   # から pull する。公網 push 入口は traefik 経由(registry.<ドメイン> + basicAuth)で、registry
   # コンテナ自体には認証を付けない(平台のローカル pull を壊さないため)。
   registry:
-    image: registry:2
+    image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     container_name: tsubomi-registry
     restart: unless-stopped
     environment:
@@ -127,7 +136,7 @@ services:
   # 公網 / 会社 LAN には晒さない(§11-B:cache は内部注入のみ)。ホスト側 127.0.0.1:6433 は
   # host ネットの server が admin 接続するため(pg-platform/pgbouncer と同じ loopback 公開)。
   valkey:
-    image: valkey/valkey:8-alpine
+    image: valkey/valkey:8-alpine@sha256:77643d152547b446fc15cbafaff22004545663fcd40c6b28038ad283837baa75
     container_name: tsubomi-valkey
     restart: unless-stopped
     command:
@@ -165,7 +174,7 @@ services:
   # 重ねる(`-f compose.prod.yml -f compose.prod.tls.yml`)+ `.env` に TSUBOMI_TLS=true / TSUBOMI_ACME_EMAIL。
   # ports は loopback 既定(tunnel は cloudflared が localhost へ来るだけ)。直VPSは TRAEFIK_BIND_ADDR=0.0.0.0。
   traefik:
-    image: traefik:v3.5
+    image: traefik:v3.5@sha256:16acb89c6db341182970d6fdafece31303b0a380a8ed7aa51682e225229bf1d2
     container_name: tsubomi-traefik
     restart: unless-stopped
     command:

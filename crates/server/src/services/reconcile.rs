@@ -12,7 +12,7 @@
 
 use crate::databases::audit;
 use crate::error::AppResult;
-use crate::services::deploy::DeployTrigger;
+use crate::services::deploy::{DeployTrigger, container_name};
 use crate::services::{docker, latest_succeeded_deploy, redeploy, route};
 use crate::state::AppState;
 use serde_json::json;
@@ -28,12 +28,155 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 /// その回だけ他 service を待たせるが、単機規模では許容。
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
+        // 起動時に一度だけ:server がデプロイ途中で再起動した service を収束させてから周期へ。
+        // 周期パスは phase='deploying' を触らない(churn 安全弁)ので、この穴はここでしか塞げない。
+        recover_interrupted(&state).await;
         let mut tick = tokio::time::interval(RECONCILE_INTERVAL);
         loop {
             tick.tick().await;
             reconcile_pass(&state).await;
         }
     });
+}
+
+/// 起動時に一度だけ:server がデプロイ途中で死ぬと `service_details.phase` が 'deploying' のまま
+/// 残り、in-flight だった deploys 行も pulling/starting のまま閉じない(パイプラインの tokio タスクは
+/// プロセス死で消える)。さらに start-first の途中(新コンテナ起動済み・route 未切替)で死ぬと、
+/// **route が指していない孤児の新コンテナ**が走ったまま漏れる(周期 reconcile はどちらも掃除しない)。
+///
+/// 各 service の deploy_lock を取り、**永続化された desired_state へ現実を収束**させる(deploy を
+/// やり直すのではない = 起動時に pull せず registry 障害に依存しない、reconcile の精神)。lock の中で
+/// 状態を読み直すので、再起動直後に割り込んだ stop / 新 deploy と競合しない(redeploy は呼ばない =
+/// lock 二重取得も起きない):
+///   - phase が既に 'deploying' でない(stop / 別経路が処理済み)→ 触らない。
+///   - desired='running'(= 成功版あり)→ route が指す旧コンテナだけ残し、孤児の新コンテナを掃除して
+///     phase='running' に戻す。旧版は走ったままなのでダウンタイム無し。旧も消えていれば次の
+///     converge_existence が直近成功 digest で復活させる(phase='running' が条件)。
+///   - それ以外(desired='stopped' = ユーザの stop / 初回未起動、または成功版なし)→ 全コンテナと
+///     route を掃除し phase を stopped / failed に落とす(**止めたい意図を絶対に覆さない**)。
+async fn recover_interrupted(state: &AppState) {
+    let stuck: Vec<(Uuid,)> = match sqlx::query_as(
+        "SELECT s.resource_id FROM service_details s
+           JOIN resources r ON r.id = s.resource_id
+          WHERE r.kind = 'service' AND r.deleted_at IS NULL AND s.phase = 'deploying'",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = ?e, "reconcile: 中断デプロイ候補の取得に失敗");
+            return;
+        }
+    };
+    if stuck.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = stuck.len(),
+        "reconcile: 中断デプロイを検知 — 収束開始"
+    );
+    for (id,) in stuck {
+        // deploy_lock の中で状態を読み直し、再起動直後に割り込んだ stop / 新 deploy と競合しない。
+        let lock = state.deploy_lock(id);
+        let _guard = lock.lock().await;
+        let cur: Option<(String, String)> = match sqlx::query_as(
+            "SELECT s.desired_state, s.phase FROM service_details s
+               JOIN resources r ON r.id = s.resource_id
+              WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの状態取得に失敗");
+                continue;
+            }
+        };
+        let Some((desired, phase)) = cur else {
+            continue;
+        }; // 削除済み
+        if phase != "deploying" {
+            continue; // stop / 別経路が既に処理済み
+        }
+
+        // 中断した in-flight deploy 行を閉じる(succeeded/failed 以外 → failed)。lock を持っているので
+        // 走行中の deploy は無い(割り込んだ新 deploy は lock 待ち。failed にしても自分の run_digest が
+        // 動き出した時に status を上書きするので無害)。
+        let _ = sqlx::query(
+            "UPDATE deploys SET status='failed', error='server がデプロイ中に再起動しました', finished_at=now()
+               WHERE service_id=$1 AND status NOT IN ('succeeded','failed')",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await;
+
+        // route が指す旧コンテナ = 直近成功 deploy のコンテナ(start-first の命名規約)。
+        let succeeded_id: Option<Uuid> = match sqlx::query_as::<_, (Uuid,)>(
+            "SELECT id FROM deploys WHERE service_id=$1 AND status='succeeded'
+              ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        {
+            Ok(row) => row.map(|(x,)| x),
+            Err(e) => {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの直近成功 deploy 取得に失敗");
+                None
+            }
+        };
+
+        if desired == "running"
+            && let Some(sdid) = succeeded_id
+        {
+            // 旧(routed)コンテナを残し、孤児の新コンテナだけ掃除する(ダウンタイム無し)。
+            let keep = container_name(id, sdid);
+            if let Err(e) = docker::remove_others(state, id, &keep).await {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの孤児コンテナ掃除に失敗");
+            }
+            let _ = sqlx::query(
+                "UPDATE service_details SET phase='running', phase_detail=NULL WHERE resource_id=$1",
+            )
+            .bind(id)
+            .execute(&state.db)
+            .await;
+            audit(
+                &state.db,
+                None,
+                "service.reconcile",
+                id,
+                json!({ "reason": "interrupted_deploy", "action": "kept_running" }),
+            )
+            .await;
+            tracing::info!(%id, "reconcile: 中断デプロイ — 旧版を維持し孤児新コンテナを掃除");
+        } else {
+            // desired='stopped'(止めたい意図 / 初回未起動)or 成功版なし → 全コンテナ + route を掃除。
+            if let Err(e) = docker::stop_remove(state, id).await {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイのコンテナ掃除に失敗");
+            }
+            if let Err(e) = route::remove(state, id) {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの route 掃除に失敗");
+            }
+            // desired=running で成功版が無い(理屈上は起きない)は failed、それ以外(止めたい意図)は stopped。
+            let new_phase = if desired == "running" {
+                "failed"
+            } else {
+                "stopped"
+            };
+            let _ = sqlx::query(
+                "UPDATE service_details SET phase=$2, phase_detail='デプロイ中に server が再起動しました'
+                   WHERE resource_id=$1",
+            )
+            .bind(id)
+            .bind(new_phase)
+            .execute(&state.db)
+            .await;
+            tracing::info!(%id, desired, new_phase, "reconcile: 中断デプロイ — 掃除して収束");
+        }
+    }
 }
 
 /// 1 パス:存在収束 → 孤児掃除。どちらも内部でエラーを log に握り潰し、片方の失敗で

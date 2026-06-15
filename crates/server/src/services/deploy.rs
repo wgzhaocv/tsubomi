@@ -236,6 +236,17 @@ pub async fn run_digest(
     outcome
 }
 
+/// deploy ごとに一意なコンテナ名(`tsubomi-<service 短码>-<deploy 短码 8 桁>`)。start-first で
+/// 新旧が一瞬共存するため deploy 単位で一意にする。route の backend もこの名前を指すので、reconcile
+/// の中断デプロイ復旧(直近成功 deploy のコンテナ = route が指す版を残す)もこの命名規約に依存する。
+pub(crate) fn container_name(service_id: Uuid, deploy_id: Uuid) -> String {
+    format!(
+        "tsubomi-{}-{}",
+        service_id.simple(),
+        &deploy_id.simple().to_string()[..8]
+    )
+}
+
 async fn run_digest_inner(
     state: &AppState,
     deploy_id: Uuid,
@@ -265,11 +276,7 @@ async fn run_digest_inner(
     let env = dedup_env_last(env);
 
     // start-first:新コンテナを deploy 一意名で起こす(旧は触らない)。
-    let new_name = format!(
-        "tsubomi-{}-{}",
-        service_id.simple(),
-        &deploy_id.simple().to_string()[..8]
-    );
+    let new_name = container_name(service_id, deploy_id);
     let spec = RunSpec {
         service_id,
         container_name: new_name.clone(),
@@ -336,8 +343,26 @@ async fn run_digest_inner(
 async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<()> {
     docker::run(state, spec, image_ref).await?;
     if !docker::is_live(state, &spec.container_name).await {
+        // 掃除される前に死んだ新コンテナのログ末尾を拾い、原因をエラーに載せる。
+        // これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が空になり、
+        // クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service status に残る。
+        let tail = docker::logs_by_name(state, &spec.container_name, 40).await;
+        let tail = tail.trim();
+        let detail = if tail.is_empty() {
+            "(コンテナログ無し — 出力前にクラッシュ / 即 exit、またはログ取得に失敗した可能性)"
+                .to_string()
+        } else {
+            // deploys.error 列に載るので末尾 1500 文字だけに切る(char 境界安全)。
+            let n = tail.chars().count();
+            let clipped: String = if n > 1500 {
+                format!("…{}", tail.chars().skip(n - 1500).collect::<String>())
+            } else {
+                tail.to_string()
+            };
+            format!("コンテナログ末尾:\n{clipped}")
+        };
         return Err(AppError::Other(anyhow::anyhow!(
-            "新コンテナが起動直後に終了しました(イメージ / $PORT のリッスンを確認してください)"
+            "新コンテナが起動直後に終了しました(イメージ / $PORT のリッスンを確認してください)。{detail}"
         )));
     }
     Ok(())
