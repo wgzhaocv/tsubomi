@@ -11,13 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Stat } from "@/components/ui/stat";
 import { Title } from "@/components/ui/title";
-import {
-  useCache,
-  useDeleteCache,
-  useRenameCache,
-  useRevealUrl,
-  useRotate,
-} from "@/lib/caches";
+import { useCache, useDeleteCache, useRenameCache, useRevealUrl, useRotate } from "@/lib/caches";
 
 // キャッシュ詳細(単一ページ):戻りリンク + 見出し(+ リネーム)+ 状態 + 接続文字列
 // (表示 / rotate)+ 危険ゾーン(削除)。cache はタブが概要のみなので Layout/Outlet は使わない。
@@ -126,8 +120,8 @@ export default function CacheDetail() {
             <TriangleAlert className="mt-0.5 size-4.5 shrink-0 text-[#dba90e]" />
             <p className="text-sm font-semibold text-[#8a6d12]">
               この文字列は<strong>パスワードそのもの</strong>です。git に commit
-              したり共有したりしないでください。漏れたら rotate
-              で失効できます。<strong>内部入口</strong>なので、注入したサービスのコンテナからのみ接続できます。
+              したり共有したりしないでください。漏れたら rotate で失効できます。
+              <strong>内部入口</strong>なので、注入したサービスのコンテナからのみ接続できます。
             </p>
           </div>
 

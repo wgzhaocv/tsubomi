@@ -7,7 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
 import { Title } from "@/components/ui/title";
-import { type AdminOverviewKind, formatUsageByKind, KIND_LABEL, useAdminOverview } from "@/lib/admin";
+import {
+  type AdminOverviewKind,
+  formatUsageByKind,
+  KIND_LABEL,
+  useAdminOverview,
+} from "@/lib/admin";
 import { RESOURCES } from "@/lib/resources";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + 資源保有ユーザ数。

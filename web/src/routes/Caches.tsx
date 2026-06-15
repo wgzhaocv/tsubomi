@@ -70,8 +70,8 @@ export default function Caches() {
               <div className="flex flex-col gap-1.5">
                 <p className="text-lg font-bold text-foreground">まだキャッシュがありません</p>
                 <p className="max-w-md text-sm font-medium text-muted-foreground">
-                  サービスに注入して使う Valkey
-                  の高速キャッシュです。接続文字列を env に注入して利用します。
+                  サービスに注入して使う Valkey の高速キャッシュです。接続文字列を env
+                  に注入して利用します。
                 </p>
               </div>
               <Button

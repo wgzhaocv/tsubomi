@@ -1,77 +1,223 @@
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router";
 
-import { Code, InstallSteps } from "@/components/install-steps";
+import { ClaudeSession, type SessionLine } from "@/components/claude-session";
+import { Code, InstallPicker } from "@/components/install-steps";
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
 import { Button } from "@/components/ui/button";
+import { CodeBlock } from "@/components/ui/codeblock";
 import { Divider } from "@/components/ui/divider";
 import { Title } from "@/components/ui/title";
+import { Typewriter } from "@/components/ui/typewriter";
 import { useMeQuery } from "@/lib/auth";
 import { RESOURCES } from "@/lib/resources";
+import { cn } from "@/lib/utils";
 
-// 手順番号のバッジ(ミント丸 + クリーム数字)。
-function StepBadge({ n }: { n: number }) {
+// はじめに(管理画面の入口)。コマンド 1 本から公開 URL まで、利用者を **1 本の線**で
+// 上から下へ導く。Claude Code とのやり取りは端末風パネルで打字機デモ(視口に入ると再生)。
+// 会話・アプリ名・URL はすべて **例**(末尾で明示)で、実物には見せかけない。全体は簡単に。
+
+// Claude Code に話しかけてからデプロイ、公開 URL が返るまでの一連のデモ(すべて例)。
+const DEMO: SessionLine[] = [
+  { role: "user", text: "社内の出欠管理アプリを作って" },
+  { role: "claude", text: "作って、動作確認まで進めますね…" },
+  { role: "claude", text: "✓ アプリができました。" },
+  { role: "user", text: "作ったアプリを tbm でデプロイして" },
+  { role: "claude", text: "tbm でデプロイしています…" },
+  { role: "claude", text: "✓ 公開しました。URL はこちらです:" },
+  { role: "url" },
+];
+
+// タイムラインの 1 ステップ(左に番号ノード + 連結線、右に内容)。
+function Step({
+  n,
+  title,
+  last,
+  children,
+}: {
+  n: number;
+  title: string;
+  last?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <span className="mr-2 inline-grid size-6 place-items-center rounded-full bg-[#0CC0B5] text-xs font-black text-[#FFF9E3]">
-      {n}
-    </span>
+    <li className="relative flex gap-4 pb-9 last:pb-0">
+      {!last && (
+        <span
+          aria-hidden
+          className="absolute top-10 -bottom-1 left-[17px] w-0.5 rounded-full bg-[#dcd1b6]"
+        />
+      )}
+      <span className="z-10 grid size-9 shrink-0 place-items-center rounded-full bg-[#0CC0B5] text-sm font-black text-[#FFF9E3] shadow-[0_3px_0_0_#0a9e95]">
+        {n}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col gap-2.5 pt-1">
+        <h2 className="text-base font-bold text-foreground">{title}</h2>
+        {children}
+      </div>
+    </li>
   );
 }
 
-// 管理画面の入口(はじめに)。ログイン直後に最初に見える画面。
-// web / CLI どちらからでも操作できるが、CLI を使う人向けに導入手順も置く。
-// 利用者名はサーバ状態 → useMeQuery を直接読む(props で受け取らない)。
+// 最後のステップ:ブラウザで開いたイメージ(図解。本物のスクショではない)。
+function BrowserMock() {
+  return (
+    <div className="overflow-hidden rounded-2xl border-2 border-[#c4b89e] shadow-[0_4px_0_0_#d8ccae]">
+      <div className="flex items-center gap-2 border-b-2 border-[#e8e2d6] bg-card px-3 py-2">
+        <span className="size-2.5 rounded-full bg-[#e87878]" />
+        <span className="size-2.5 rounded-full bg-[#f5c31c]" />
+        <span className="size-2.5 rounded-full bg-[#7cc47c]" />
+        <span className="ml-1.5 flex-1 truncate rounded-md bg-secondary px-2.5 py-1 font-mono text-xs font-medium text-foreground/70">
+          my-app.{window.location.host}
+        </span>
+      </div>
+      <div className="flex flex-col items-center gap-1 bg-[#fffdf5] px-4 py-7 text-center">
+        <span className="text-3xl">🌷</span>
+        <p className="text-sm font-bold text-foreground">あなたのアプリが公開されました</p>
+        <p className="text-xs font-medium text-foreground/60">この URL を開くだけ。</p>
+      </div>
+    </div>
+  );
+}
+
+// 文中の強調:操作語(右クリック等)は前景色で太く、メニュー名(「新しいフォルダー」等)は
+// ミントで太く。読み手の目を要所に運ぶ。
+function Em({ children }: { children: ReactNode }) {
+  return <strong className="font-bold text-foreground">{children}</strong>;
+}
+function MenuLabel({ children }: { children: ReactNode }) {
+  return <strong className="font-bold text-[#11a89b]">{children}</strong>;
+}
+
+// 第 1 ステップと同じ見た目の切り替えピル。
+function Pill({
+  on,
+  onClick,
+  children,
+}: {
+  on: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={on}
+      className={cn(
+        "rounded-full px-3 py-1 text-xs font-bold outline-none transition-colors focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
+        on ? "bg-[#0CC0B5] text-[#FFF9E3]" : "bg-card text-foreground/65 hover:bg-card/70",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+// 第 3 ステップ:第 1 ステップと同じく「右クリックで(GUI)」と「コマンドで(CLI)」を選べる。
+function FolderStep() {
+  const [mode, setMode] = useState<"gui" | "cli">("gui");
+  return (
+    <>
+      <div className="flex flex-wrap gap-1.5">
+        <Pill on={mode === "gui"} onClick={() => setMode("gui")}>
+          右クリックで
+        </Pill>
+        <Pill on={mode === "cli"} onClick={() => setMode("cli")}>
+          コマンドで
+        </Pill>
+      </div>
+      {mode === "gui" ? (
+        <>
+          <p className="text-sm leading-relaxed font-medium text-foreground/75">
+            デスクトップなどで<Em>右クリック</Em> →「<MenuLabel>新しいフォルダー</MenuLabel>」。その
+            フォルダの中で<Em>右クリック</Em> →「<MenuLabel>ターミナルで開く</MenuLabel>」(Windows
+            は 「<MenuLabel>PowerShell で開く</MenuLabel>」)。開いた窓で <Em>Claude Code</Em>{" "}
+            を起動します。
+          </p>
+          <CodeBlock code="claude" showCopy />
+        </>
+      ) : (
+        <>
+          <p className="text-sm leading-relaxed font-medium text-foreground/75">
+            ターミナルに次を貼り付けます。フォルダを<Em>作って</Em>その中へ<Em>入り</Em>、
+            <Em>Claude Code</Em> を起動します。
+          </p>
+          <CodeBlock code={"mkdir my-app && cd my-app\nclaude"} showCopy />
+        </>
+      )}
+    </>
+  );
+}
+
 export default function Welcome() {
   const { data: me } = useMeQuery();
   const greetingName = me?.name ?? me?.email ?? "ようこそ";
 
   return (
-    // はじめに は「文章」ページなので、5xl の内容領域の中で 3xl の列を中央寄せにする
-    // (左右の余白を対称にし、左に寄って右が大きく空くのを防ぐ)。
     <PageContainer>
-      <div className="mx-auto flex max-w-3xl flex-col gap-8">
+      <div className="mx-auto flex max-w-2xl flex-col gap-7">
         <PageMeta title="はじめに" />
 
-        <header className="flex flex-col gap-3">
+        <header className="flex flex-col gap-2.5">
           <Title size="large" color="app-teal" className="self-start">
             はじめに
           </Title>
           <h1 className="text-2xl font-extrabold tracking-tight text-foreground">
             ようこそ、{greetingName} さん 🌷
           </h1>
-          <p className="text-sm leading-relaxed font-medium text-foreground/75">
-            つぼみは web と <Code>tbm</Code> CLI のどちらからでも操作できます。CLI を使うなら、
-            下の手順で自分の PC にインストールし、<Code>tbm login</Code> で認証してください。
-            左のメニューから サービス・データベース・ボリューム・キャッシュを確認できます。
+          <p className="text-sm font-semibold text-foreground/75">
+            <Typewriter>コマンド 1 本から、公開 URL まで。</Typewriter>
           </p>
         </header>
 
         <Divider type="dashed-teal" />
 
-        {/* 1. インストール */}
-        <section className="flex flex-col gap-4">
-          <h2 className="text-base font-bold text-foreground">
-            <StepBadge n={1} />
-            tbm CLI をインストール
-          </h2>
-          <InstallSteps />
-        </section>
+        <ol className="flex flex-col">
+          <Step n={1} title="tbm CLI をインストール">
+            <p className="text-sm font-medium text-foreground/75">
+              お使いの OS のコマンドをコピーして、下の窓(ターミナル)に貼り付けて実行します。
+            </p>
+            <InstallPicker />
+          </Step>
 
-        {/* 2. 認証 */}
-        <section className="flex flex-col gap-2">
-          <h2 className="text-base font-bold text-foreground">
-            <StepBadge n={2} />
-            ログインする
-          </h2>
-          <p className="text-sm font-medium text-foreground/75">
-            ターミナルで <Code>tbm login</Code> を実行します。ブラウザで「許可する」を
-            押すだけで認証が完了します(SSH 先・ヘッドレスでは自動でコピペ方式に 切り替わります)。
-          </p>
-        </section>
+          <Step n={2} title="ログインする">
+            <p className="text-sm font-medium text-foreground/75">
+              同じ窓で次を実行し、ブラウザで「許可する」を押すだけ(SSH 先などは自動でコピペ方式に
+              切り替わります)。
+            </p>
+            <CodeBlock code="tbm login" showCopy />
+          </Step>
+
+          <Step n={3} title="フォルダを作って Claude Code を起動">
+            <FolderStep />
+          </Step>
+
+          <Step n={4} title="あとは Claude Code に頼むだけ">
+            <p className="text-sm font-medium text-foreground/75">
+              起動した Claude Code に、作りたいものを話しかけます。できたら「
+              <strong className="font-bold text-foreground">tbm でデプロイして</strong>
+              」と頼むと、公開 URL が返ってきます。
+            </p>
+            <ClaudeSession script={DEMO} />
+          </Step>
+
+          <Step n={5} title="リンクを開く" last>
+            <p className="text-sm font-medium text-foreground/75">
+              返ってきた URL をブラウザで開けば、もう世界に公開されています。
+            </p>
+            <BrowserMock />
+          </Step>
+        </ol>
+
+        <p className="text-xs leading-relaxed font-medium text-muted-foreground">
+          ※ ステップ 4・5 の会話・アプリ名・URL はイメージです。実際はあなたが Claude Code に
+          頼む内容によって変わります。ステップ 1〜3 のコマンドはそのまま使えます。
+        </p>
 
         <Divider type="line-brown" />
 
-        {/* 次のステップ:リソースへの導線 */}
         <section className="flex flex-col gap-3">
           <h2 className="text-base font-bold text-foreground">リソースを見る</h2>
           <div className="flex flex-wrap gap-2">
@@ -91,7 +237,7 @@ export default function Welcome() {
             })}
           </div>
           <p className="text-xs font-medium text-muted-foreground">
-            まだ何も作成していなければ、各メニューは空の状態で表示されます。
+            web からも <Code>tbm</Code> CLI からも、同じリソースを操作できます。
           </p>
         </section>
       </div>
