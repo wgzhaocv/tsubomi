@@ -609,6 +609,30 @@ pub struct ViewerStatusResp {
     pub updated_by_name: Option<String>,
 }
 
+// ============ ガバナンス:owner 管理(M4 後相、web 専用)============
+// design v2 §7:最多 2 名の対等 owner。env は冷启动种のみ、運用中は web で増減する。
+// 真相は users.role(毎リクエスト実時読)。owner_roster(platform_config)は未ログイン
+// email の「昇格すべき」意図 + 宛先を保持するだけ。
+
+/// `GET /api/admin/owners` の各行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOwnerDto {
+    pub email: String,
+    /// users 行があれば真名(無ければ null)。
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 操作中の本人か(前端で自分の削除ボタンを無効化する)。
+    pub is_current: bool,
+    /// 既にログイン済み(users 行があり role=owner)= 有効。false = 次回ログインで昇格。
+    pub registered: bool,
+}
+
+/// `POST /api/admin/owners`(追加)/ `POST /api/admin/owners/remove`(削除)のリクエスト。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerEmailReq {
+    pub email: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -109,7 +109,9 @@ async fn check_disk(state: &AppState) {
             cfg.disk_critical_pct,
             cfg.volumes_dir.display()
         );
-        match mail::send(state, &cfg.owner_emails, &subject, &body).await {
+        // 宛先は owner_roster(DB、運用中に web で増減する)。env は冷启动种のみ。
+        let owners = crate::owners::roster(&state.db).await;
+        match mail::send(state, &owners, &subject, &body).await {
             Ok(()) => {
                 // target_resource は無い(platform 全体のイベント)ので nil uuid。詳細は detail に。
                 audit(

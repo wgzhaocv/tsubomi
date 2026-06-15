@@ -7,6 +7,7 @@
 use crate::auth::cookie::{self, OAUTH_STATE_COOKIE, SESSION_COOKIE};
 use crate::auth::{AuthCtx, oauth_state, session};
 use crate::error::{AppError, AppResult};
+use crate::owners;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -20,6 +21,14 @@ use uuid::Uuid;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+
+/// email のドメインが許可リスト(`allowed_hds`)に入っているか。login の email ドメイン判定と
+/// owner 追加時の判定で共用する(login は hd claim も併せて見るが、こちらはドメインだけ)。
+/// 呼び出し側が lowercase 済みであることを前提にする。
+pub(crate) fn email_domain_allowed(email: &str, allowed: &[String]) -> bool {
+    let domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
+    allowed.iter().any(|a| a == domain)
+}
 const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v3/userinfo";
 
 #[derive(Deserialize)]
@@ -152,12 +161,11 @@ pub async fn callback(
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("email がありません".into()))?
         .to_lowercase();
-    let email_domain = email.rsplit_once('@').map(|(_, d)| d).unwrap_or("");
     let hd = info.hd.as_deref().map(str::to_lowercase);
     let hd_ok = hd
         .as_deref()
         .is_some_and(|h| allowed.iter().any(|a| a == h));
-    let email_ok = allowed.iter().any(|a| a == email_domain);
+    let email_ok = email_domain_allowed(&email, allowed);
     if !hd_ok || !email_ok {
         tracing::warn!(sub = %info.sub, hd = ?info.hd, %email, "login rejected: outside allowed domains");
         // ブラウザ遷移の途中なので、素の 403 本文ではなく専用の /forbidden
@@ -169,10 +177,10 @@ pub async fn callback(
 
     let user_id = upsert_google_user(&state.db, &info, &email).await?;
 
-    // owner の種付け:env の明示リストで、ログインの度に昇格を適用
-    // (first-login-wins はやらない)。自動降格はしない — 除名は明示的な
-    // owner 操作にする。
-    if state.config.owner_emails.contains(&email) {
+    // owner の補昇:**roster(DB、env から冷启动种)** に email があれば昇格する。
+    // env をここで読まないのが要点 — web で外した owner が env に残っていても再ログインで
+    // 「神秘復昇」しない(roster が真相)。自動降格はしない — 除名は web の明示操作(owners.rs)。
+    if owners::roster(&state.db).await.contains(&email) {
         sqlx::query(
             "UPDATE users SET role = 'owner', updated_at = now() WHERE id = $1 AND role <> 'owner'",
         )

@@ -7,6 +7,7 @@ import { RESOURCES } from "@/lib/resources";
 import About from "@/routes/About";
 import AdminAudit from "@/routes/AdminAudit";
 import AdminOverview from "@/routes/AdminOverview";
+import AdminOwners from "@/routes/AdminOwners";
 import AdminRanking from "@/routes/AdminRanking";
 import AdminSettings from "@/routes/AdminSettings";
 import CacheDetail from "@/routes/CacheDetail";
@@ -119,6 +120,7 @@ export const router = createBrowserRouter([
         children: [
           { path: "admin/audit", element: <AdminAudit /> },
           { path: "admin/settings", element: <AdminSettings /> },
+          { path: "admin/owners", element: <AdminOwners /> },
         ],
       },
       ...RESOURCES.filter(

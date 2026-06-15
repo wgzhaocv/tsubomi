@@ -9,6 +9,7 @@ import {
   Menu,
   ScrollText,
   ShieldCheck,
+  Users,
   X,
 } from "lucide-react";
 import { Link, NavLink, Navigate, Outlet, useLocation } from "react-router";
@@ -170,6 +171,12 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
                 to="/admin/audit"
                 icon={ScrollText}
                 label="監査ログ"
+                onNavigate={onNavigate}
+              />
+              <AdminNavLink
+                to="/admin/owners"
+                icon={Users}
+                label="Owner 管理"
                 onNavigate={onNavigate}
               />
               <AdminNavLink

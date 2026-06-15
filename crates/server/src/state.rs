@@ -53,6 +53,11 @@ impl AppState {
         // 香橙派でも)は起動時に自動でスキーマに収束する。
         sqlx::migrate!("../../migrations").run(&db).await?;
 
+        // owner_roster の冷启动种(env → DB)。空 / 未設定のときだけ env 種で初期化する
+        // (運用中は web で増減 = DB が真相。env を直して再起動するのは owner 全滅時の
+        // 破窗逃生口)。詳細は owners.rs。
+        crate::owners::seed_if_empty(&db, &config.owner_emails).await?;
+
         // pg-tenant への admin 接続(DDL 用)。プールは小さめ — 同時に大量の
         // DDL を流すことはない。
         let tenant_opts = PgConnectOptions::from_str(&config.tenant_admin_url)?
