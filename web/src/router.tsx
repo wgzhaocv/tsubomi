@@ -9,7 +9,6 @@ import AdminOverview from "@/routes/AdminOverview";
 import AdminRanking from "@/routes/AdminRanking";
 import CacheDetail from "@/routes/CacheDetail";
 import Caches from "@/routes/Caches";
-import CliInstall from "@/routes/CliInstall";
 import DatabaseEditor from "@/routes/DatabaseEditor";
 import DatabaseLayout from "@/routes/DatabaseLayout";
 import DatabaseOverview from "@/routes/DatabaseOverview";
@@ -126,10 +125,10 @@ export const router = createBrowserRouter([
   },
 
   // プロジェクト紹介(守衛の外)。同僚にアーキテクチャを見せる公開 1 枚もの。
+  // CLI のインストール手順は「はじめに」(/)に集約したので単体 /cli ページは持たない。
   { path: "/about", element: <About /> },
 
-  // CLI フロー / 単体ページ(守衛の外)。
-  { path: "/cli", element: <CliInstall /> },
+  // CLI ログインフロー(守衛の外)。
   { path: "/oauth/authorize", element: <OauthAuthorize /> },
   { path: "/oauth/code/callback", element: <OauthCodeCallback /> },
 

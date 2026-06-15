@@ -209,12 +209,9 @@ export default function About() {
         </div>
 
         {/* 導線 */}
-        <div className="flex flex-wrap items-center justify-center gap-3">
+        <div className="flex justify-center">
           <Button asChild type="primary" size="middle">
             <Link to="/">はじめる 🌷</Link>
-          </Button>
-          <Button asChild type="default" size="middle">
-            <Link to="/cli">tbm CLI を入れる</Link>
           </Button>
         </div>
       </div>
