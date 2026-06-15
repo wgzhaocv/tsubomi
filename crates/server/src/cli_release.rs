@@ -113,9 +113,12 @@ pub async fn install_ps1(State(state): State<AppState>) -> axum::response::Respo
 }
 
 pub async fn install_bat(State(state): State<AppState>) -> axum::response::Response {
-    serve_script(
-        &state,
-        include_str!("../scripts/install.bat"),
-        "text/plain; charset=utf-8",
-    )
+    // cmd.exe のバッチは CRLF 必須。LF のみだと goto / for / 遅延展開が壊れ、
+    // トークンが途中で千切れて「X は内部コマンド... ではありません」を撒く
+    // (EXPECTED_SHA が CTED_SHA に化ける等)。リポジトリの実体は LF・サーバは
+    // Linux なので include_str! も LF — 配信の瞬間に CRLF へ正規化する。
+    let crlf = include_str!("../scripts/install.bat")
+        .replace("\r\n", "\n")
+        .replace('\n', "\r\n");
+    serve_script(&state, &crlf, "text/plain; charset=utf-8")
 }
