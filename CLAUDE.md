@@ -69,13 +69,14 @@ M3 で入ったもの(S1–S8):`service_details`/`deploys`/`injections`/`service
 (database→app role の内部接続文字列 / volume→bind mount + `STORAGE_PATH` / 静的 env。値は
 **コンテナ起動の瞬間に解決** = rotate 後は再デプロイで効く)、lifecycle(start/stop/logs/
 delete→ゴミ箱/rollback)、web 詳細ページ(概要/デプロイ/注入/環境変数/ログ)、**reconcile**
-(`services/reconcile.rs`、起動時フル + 30s:存在収束 + 孤児掃除。`restart=unless-stopped` が
-第一の保険、これが第二)。ルーティングは **traefik file provider**(`svc-<id>.yml`。docker
+(`services/reconcile.rs`、起動時フル + 30s:存在収束 + 孤児掃除。**起動時のみ中断デプロイ収束**=
+デプロイ中に server が落ち `phase=deploying` で残った service を deploy_lock 内で desired へ寄せる
+[旧版維持で無瞬断 / 孤児新コンテナ掃除]。`restart=unless-stopped` が第一の保険、これが第二)。ルーティングは **traefik file provider**(`svc-<id>.yml`。docker
 provider は Docker Engine 29 で壊れるため不使用)。**残り = prod-infra**:GH Actions buildx
 双架(arm64+amd64 manifest list)+ 本番 traefik(:443 + LE + 会社 IP 許可リスト)/ pgbouncer /
 registry 入口の落とし込み。
 
-M4 で入ったもの(S1–S4。**owner ガバナンスは web 専用** — admin ハンドラは owner 身分 **かつ**
+M4 で入ったもの(S1–S5。**owner ガバナンスは web 専用** — admin ハンドラは owner 身分 **かつ**
 session 由来を毎回検証 `admin::require_owner_web`、Bearer cli_token は拒否):`platform_config` +
 `admin_action_codes`。**`crates/server/src/admin/`** に集約 — (S1)**可視化** overview/ranking:
 跨ユーザの**匿名化**一覧(真名 + 匿名番号 service1 等、display_name/中身は出さない)+ 指標
@@ -89,9 +90,15 @@ service/database/volume を停止/削除(`POST /api/admin/resources/:id/{stop,de
 owner の delete も**対象ユーザのゴミ箱**へ(復元可)。`audit_with_target`(target_user も記録)。
 (S4)**audit 閲覧** `GET /api/admin/audit`(keyset 分頁 + action 前方一致、actor/target_user 真名 join、
 target_resource は UUID のまま)。web は侧栏 owner 限定 + `RequireOwner` ルート守衛に集約。
-**否決(後相)**:共有パスワードの只读 viewer(設計 §7 の「見るは共有密码」。owner-gated で完了判定を
-満たすため、別認証路は当面入れない — `paas-m4-design.md` §10-A)/ owner 管理 UI(2 人目追加削除は
-env 種子のまま §10-H)。実装級は **`paas-m4-design.md`**。
+(S5)**共有パスワード viewer**(設計 §7「見るは共有密码」= 看/操作の二層分離の「看」):ログイン済み社内
+ユーザが共有パスワードを入れると **overview/ranking** を只读で見られる(`sessions.viewer_until` の 8h grant、
+密码は `platform_config['viewer_password']`=bcrypt)。`AuthCtx.is_viewer`(`session::get` が同じ行で算出)+
+`require_viewer_web`(owner OR viewer)で**読み口(overview/ranking)だけ**緩め、**audit / 危険操作 / パスワード設定 /
+ipblock は owner のまま**(audit は真名+明文流水 = 匿名化の範囲外)。owner が設定/リセット(`POST /api/admin/viewer/
+password`、リセットで旧 grant 全失効)。bcrypt は `spawn_blocking`、パスワードは 8 文字以上。web は `RequireViewer`
+解錠フォーム + owner の `AdminSettings`、危険ボタンは owner のみ表示。dev e2e で鉴权フロー検証済み。
+**否決(後相)**:owner 管理 UI(2 人目追加削除は env 種子のまま §10-H)/ viewer login の失敗レート制限
+(今は bcrypt + 最小長 8 のみ)。実装級は **`paas-m4-design.md`**。
 
 ## 重要な約束事
 

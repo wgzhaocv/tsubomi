@@ -31,8 +31,9 @@ M4 が出すもの:
   (対象ユーザのゴミ箱へ)を再利用 = 復元可。
 - **audit_log の補完**:owner 代理操作で `target_user` を埋める + **閲覧 API / 画面**
   (今まで書くだけで読む口が無かった)。
-- (否決可)**共有パスワードの只读ビュー**:ログイン済み社内ユーザが共有パスワードを
-  入れると、owner 限定の可視化画面を**只读**で見られる。owner が随時リセット。
+- **共有パスワードの只读 viewer(S5、実装済み)**:ログイン済み社内ユーザが共有パスワードを
+  入れると、overview / ranking を**只读**で見られる(session 単位 8h grant)。owner が随時リセット
+  (旧 grant は全失効)。**audit は対象外**(真名 + 操作流水の明文 = §7 匿名化の範囲外)。
 
 M4 が**出さない**もの:
 
@@ -53,7 +54,7 @@ M4 が**出さない**もの:
 | **S2 メール基盤 + 磁盘告警** | config(Resend / 閾値)+ `mail.rs`(reqwest)+ gc の `df` 検査 → 閾値超えで owner にメール(去重) | — | 閾値を下げる → 告警メールが 1 通来る(dev は key 無しで log) |
 | **S3 最後の砦** | 検証コード二段 + owner 跨ユーザ stop/delete(既存ソフト削除を再利用、`target_user` を audit)+ web 操作ボタン / コード入力 | S2(メール) | owner が他人の service をメール検証コード入力後に停止 / 削除でき、ゴミ箱から復元できる |
 | **S4 audit 閲覧** | `GET /api/admin/audit`(分頁 + actor/target 真名 join)+ web 監査ログ画面(owner) | S1–S3(データが溜まる) | owner が S1–S3 の操作履歴を画面で辿れる |
-| **S5(否決可)共有 viewer** | `platform_config.viewer_password_hash` + `POST /api/admin/viewer/login\|password` + S1 の読み口を「owner OR viewer grant」に緩める + web の view-login | S1 | 非 owner が共有パスワードを入れて overview を只读で見られる;owner がリセットできる |
+| **S5(実装済み)共有 viewer** | `sessions.viewer_until` + `platform_config['viewer_password']`(bcrypt)+ `POST viewer/login`(204)/ `GET\|POST viewer/password`(owner)+ **overview/ranking** の読み口を「owner OR viewer grant」に緩める(audit は除く)+ web の RequireViewer 解錠フォーム + AdminSettings | S1 | 非 owner が共有パスワードを入れて overview/ranking を只读で見られ、owner が設定 / リセット(旧 grant 失効)できる |
 
 S1 が**地基**:跨ユーザ匿名化クエリ + 指標採集はここで一度作れば S3/S4 が乗る。
 S2 → S3 の順は不変(メール基盤を磁盘告警という低リスク場面で先に貫通させてから、
@@ -72,7 +73,8 @@ S2 → S3 の順は不変(メール基盤を磁盘告警という低リスク場
 -- ============ 平台設定(key→jsonb)============
 -- 第 4 層 §2 の定義そのまま。M4 では:
 --   'disk_alert_state' = { level: 'ok'|'warn'|'critical', notified_at: <ts> }  -- 告警去重(§4)
---   'viewer_password'  = { hash: '<bcrypt>', updated_at, updated_by }          -- S5(否決可)
+--   'viewer_password'  = { hash: '<bcrypt>', updated_by: '<uuid>' }            -- S5 実装済み(更新時刻は updated_at 列)
+-- ※ viewer grant 自体は sessions.viewer_until 列(migration 20260621000001)。
 create table platform_config (
   key        text primary key,
   value      jsonb not null,
@@ -110,7 +112,7 @@ create index on audit_log (target_user);
   (target_user も埋める版)を足す。既存呼び出しは触らない(後方互換)。
 - **viewer 密码は bcrypt**(registry htpasswd と同じ。`bcrypt 0.19` 既存)。session/token
   系の sha256 とは別 — これは「人が入力する低エントロピー秘密」なので一方向の遅い hash。
-  → S5、否決可(§10-A)。
+  → S5 実装済み(§7 / §10-A)。bcrypt は数百 ms の同期 CPU なので `spawn_blocking` に逃がす。
 
 ---
 
@@ -312,31 +314,42 @@ GET /api/admin/audit?cursor=<id>&limit=50&action=&actor=&target_user=
 
 ---
 
-## 7. 共有パスワード viewer(S5、否決可 §10-A)
+## 7. 共有パスワード viewer(S5、実装済み)
 
 設計 v2 §7:**「看」靠共享密码** — ログイン済み社内ユーザが共有パスワードを入れると
 overview / ranking を**只读**で見られる(owner でなくても)。owner が随時リセット。
+S5 は §10-A で「否決可・後相」に置いていたが、本スライスで実装した(as-built は以下)。
 
 ```
-POST /api/admin/viewer/login    { password }
-  - 既ログイン(session)必須。bcrypt::verify(password, platform_config['viewer_password'].hash)
-  - OK → session に viewer grant を立てる(sessions に viewer_until 列、now()+8h)
-         ※ この列は S5 の migration で足す(本書 §2 には入れない = S5 を否決したら不要)
-  - NG → 401
+migration 20260621000001:sessions に viewer_until TIMESTAMPTZ を足す(grant の絶対期限)。
+共有パスワードは platform_config['viewer_password'] = { hash(bcrypt), updated_by }
+  (更新時刻は platform_config.updated_at 列を流用 = 二重持ちしない)。
 
-POST /api/admin/viewer/password { password }   -- owner のみ
-  - require_owner。bcrypt::hash → platform_config['viewer_password'] に upsert。
-  - 既存 grant は失効させない(次の login から新パスワード。設計の「リセット = 旧失効」を
-    厳密にするなら viewer_until を全て切る — 否決可の細部)。
+is_viewer は session::get が同じ行で算出する:(viewer_until IS NOT NULL AND viewer_until > now())。
+AuthCtx.is_viewer に載り(Bearer 経路は常に false)、require_viewer_web =
+  is_session() && (is_owner() || is_viewer)。
 
-可視化の読み口(§3 の overview/ranking/audit)を「owner OR viewer grant 有効」に緩める。
-危険操作(§5)と viewer 設定(この §)は **owner のみ**(viewer では不可)。
+POST /api/admin/viewer/login    { password }                         [session]
+  - is_session 必須(Bearer は 403 — viewer は web 専用)。
+  - 未設定 → 400(「owner に設定を依頼」)。bcrypt::verify は spawn_blocking に逃がす。
+  - OK → session::grant_viewer(viewer_until = now()+8h)→ 204。NG → 400。
+
+POST /api/admin/viewer/password { password }                         [owner]
+  - require_owner_web。trim 後 8 文字以上(MIN_VIEWER_PASSWORD_LEN。bcrypt と併せ総当たり下限)。
+  - bcrypt::hash(spawn_blocking)→ upsert + 旧 grant 全失効を 1 トランザクションで
+    (UPDATE sessions SET viewer_until = NULL WHERE viewer_until IS NOT NULL = §7「リセット=旧失効」)。
+  - 設定後の状態(ViewerStatusResp)を返す。
+GET  /api/admin/viewer/password                                      [owner]
+  - 設定済みか + updated_at + 設定者の真名(本体 / hash は返さない)。設定ページ表示用。
 ```
+
+**緩める読み口は overview / ranking のみ。audit は owner-only のまま**(audit は actor/対象の
+**真名** + detail の明文を持ち、§7 の匿名化只读の範囲を超えるため。設計 v2 §7 の viewer 範囲も
+overview/ranking で、audit は M4 で後付けした S4)。危険操作(§5)/ viewer 設定 / ipblock も owner のみ。
 
 - **viewer は web/session のみ**(CLI 無し)。owner ガバナンス web 専用の規約に従う。
-- **判断**:内部ツール・人少・owner 2 名で、共有パスワードという別認証路の収益は薄い。
-  S1 で overview を owner-gated にしておけば、S5 を**永久に否決しても M4 は完結する**
-  (owner が見える・対処できる = 完了判定を満たす)。実装するかは要相談(§10-A)。
+- **積み残し(後相)**:login の**失敗レート制限**。今は bcrypt cost 12(≈数百 ms / 試行)+
+  最小長 8 でオンライン総当たりを不経済にする一次防御のみ。本格的な失敗計数 / lockout は別スライス。
 
 ---
 
@@ -349,10 +362,14 @@ admin(web/session のみ。Bearer cli_token は受けない = owner ガバナン
   GET  /api/admin/audit?cursor=&limit=&…    監査ログ閲覧(actor/target 真名 join) [owner]
   POST /api/admin/resources/:id/stop        二段(コード請求 → 確定)             [owner]
   POST /api/admin/resources/:id/delete      二段(同上、ソフト削除→対象ゴミ箱)   [owner]
-  -- S5(否決可)
-  POST /api/admin/viewer/login              共有パスワード → viewer grant         [session]
+  -- S5(実装済み)
+  POST /api/admin/viewer/login              共有パスワード → viewer grant(204)   [session]
+  GET  /api/admin/viewer/password           設定状態 + メタ(設定ページ用)        [owner]
   POST /api/admin/viewer/password           共有パスワードの設定/リセット         [owner]
 ```
+
+> overview / ranking は **[owner OR viewer]**(`require_viewer_web`)に緩めた。audit / 危険操作 /
+> viewer パスワード設定は **[owner]** のまま(`require_owner_web`)。
 
 - ルートは `crates/server/src/admin/`(新 module)に集約、`routes.rs` で `/api/admin` 配下に
   マウント。`require_owner` は ipblock.rs のものを `auth` か admin 共通へ移して共有。
@@ -361,11 +378,15 @@ admin(web/session のみ。Bearer cli_token は受けない = owner ガバナン
 
 web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 ```
-/admin            → AdminOverview
-/admin/ranking    → AdminRanking
-/admin/audit      → AdminAudit
-(S5)/admin/view-login → 共有パスワード入力(viewer)
+/admin            → AdminOverview   ┐ <RequireViewer>(未解錠なら解錠フォームを内蔵描画。
+/admin/ranking    → AdminRanking    ┘  owner || is_viewer で <Outlet>。危険ボタンは owner のみ)
+/admin/audit      → AdminAudit      ┐ <RequireOwner>(audit は匿名化外なので viewer 不可)
+/admin/settings   → AdminSettings   ┘  共有パスワードの設定 / リセット(owner)
 ```
+- 侧栏:管制面 / 使用量ランキングは全ログインユーザに出す(未解錠は解錠フォームへ)。
+  監査ログ / 共有パスワード設定 / IP 許可リストは owner 限定。
+- viewer の解錠は専用ページではなく `RequireViewer` がその場でフォームを出す(login 成功 →
+  `me` 無効化 → `is_viewer` 翻転 → `<Outlet>` に切替)。
 
 ---
 
@@ -373,8 +394,9 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 
 - **依存**:無し(reqwest / bcrypt / sha2 / rand すべて既存)。`df` は外部コマンド shell。
 - **server**:
-  - `crates/server/src/admin/`(`mod.rs` ルート、`overview.rs` 可視化 + 指標、
-    `actions.rs` 危険操作 + 検証コード、`audit_view.rs` 閲覧、(S5)`viewer.rs`)。
+  - `crates/server/src/admin/`(`mod.rs` ルート + `require_owner_web` / `require_viewer_web`、
+    `overview.rs` 可視化 + 指標、`actions.rs` 危険操作 + 検証コード、`audit_view.rs` 閲覧、
+    `viewer.rs` 共有パスワード S5)。`auth/session.rs` に `grant_viewer`、`auth.rs` の AuthCtx に `is_viewer`。
   - `crates/server/src/mail.rs`(Resend、§4.1)。
   - `crates/server/src/services/docker.rs` に `stats`(§3.3)を追加。
   - `crates/server/src/gc.rs` の housekeeping に磁盘検査(§4.2)を追加。
@@ -383,7 +405,8 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
   - 各リソースモジュール(services/databases/volumes)に owner 代理用の所有者引数版を切り出し。
 - **shared**:admin の DTO(AdminOverviewDto / AdminRankingRowDto / AuditEntryDto /
   AdminActionResp など。serde 安定、匿名フィールドのみ)。
-- **web**:`routes/Admin*.tsx`、`lib/admin.ts`(TanStack Query フック)、侧栏 + router 追加。
+- **web**:`routes/Admin*.tsx`(S5 で `AdminSettings.tsx` 追加)、`components/require-viewer.tsx`
+  (解錠フォーム)、`lib/admin.ts`(TanStack Query フック)、`lib/auth.ts`(Me.is_viewer)、侧栏 + router。
 
 ---
 
@@ -391,7 +414,7 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 
 | # | 決定 | 理由 | 否決した場合 |
 |---|---|---|---|
-| **A** | **共有 viewer(S5)は否決可・最後**。S1 の可視化は **owner-gated** で出し、共有パスワード層は別スライスで後乗せ(or 永久に出さない) | 内部・少人数・owner 2 名で別認証路の収益が薄い。owner-gated でも完了判定(owner が見える)は満たす | 設計 v2 §7 通り共有パスワードを第一級に(誰でも只读)。viewer_until を sessions に足す |
+| **A**(後に実装) | **共有 viewer(S5)は当初否決可・最後**としていたが、設計 v2 §7「看/操作の二層分離」の「看」が欠けるため **後で実装した**(§7 as-built)。`sessions.viewer_until` 追加・overview/ranking のみ緩める・audit は owner のまま・リセットで旧 grant 全失効 | §7 の「誰でも只读」が平台の核心価値(可視性)の半分。owner-gated だけだと「全社で围观」が成立しない | (実装済み)残りは login の失敗レート制限のみ後相 |
 | **B** | **危険操作 = 2 段(コード請求 → 確定)、同一エンドポイントに `code` 有無で分岐**。コードは owner 自身へメール、`admin_action_codes` で単回消費 | 状態を持たない 1 往復で済み、AI/UI も `code_required` で次の一手が分かる(CLAUDE.md のエラー規約) | コードを別エンドポイントで請求(口が増える)/ TOTP(共有秘密の配布が要る) |
 | **C** | **指標採集はオンデマンド + 軟タイムアウト**(volume の du が遅いので諦める)。キャッシュは後相 | 単機・少数では十分。m3 の N+1 注記と同じ判断(増えたらキャッシュ) | gc 周期で計測してキャッシュ(列 or platform_config)を先に作る |
 | **D** | **磁盘空闲 = `df` を shell**(sysinfo 等の crate を足さない) | rsync/pg_dump と同じ「外部コマンドを叩く」流儀。依存ゼロ | `sysinfo`/`fs2` crate(移植性は上がるが依存増) |
@@ -405,8 +428,8 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 
 ## 11. 完了判定(第 4 層 §9 の M4 行「owner が見える・対処できる」)
 
-> **完了(S1–S4、dev e2e 済み)**。S5(共有パスワード viewer)は §10-A の通り**否決(後相)** —
-> 可視化を owner-gated で出したので「owner が見える・対処できる」は満たす。
+> **完了(S1–S5、dev e2e 済み)**。S5(共有パスワード viewer)も §10-A の否決を覆して実装し、
+> 設計 v2 §7「看(誰でも只读)/ 操作(owner)の二層分離」が揃った。残りは login の失敗レート制限のみ後相。
 
 - [x] owner で `/admin` を開くと、全ユーザの資源が **真名 + 匿名番号 + 使用量**で見える
       (資源名・内容は出ない)。非 owner は 403 / 画面で弾かれる(S1)
@@ -418,6 +441,6 @@ web ルート(`router.tsx`、DashboardLayout 配下、owner 限定で侧栏):
 - [x] owner の delete が対象ユーザの**ゴミ箱**に入り、本人が復元できる(S3)
 - [x] `/admin/audit` で S1–S3 の操作(`owner.stop_service` 等)が **actor / 対象ユーザ真名付き**で
       辿れる(S4)
-- [ ] (否決・後相)S5 共有パスワード viewer:非 owner が共有パスワードで overview を只读で
-      見られ、owner がパスワードをリセットできる
+- [x] S5 共有パスワード viewer:非 owner が共有パスワードで overview / ranking を只读で見られ
+      (audit は不可)、owner が設定 / リセット(旧 grant 全失効)できる。dev e2e で鉴权フロー検証済み
 ```
