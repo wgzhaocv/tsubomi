@@ -297,6 +297,11 @@ pub struct ServiceDto {
     pub image_digest: Option<String>,
     #[serde(default)]
     pub last_deploy_at: Option<DateTime<Utc>>,
+    /// 公開 URL(`<scheme>://<subdomain>.<domain>`)。scheme はサーバ設定由来
+    /// (dev=localhost→http / prod=https)。サーバが算出して載せる(web/CLI 共通)。
+    /// 古いサーバ相手でも壊れないよう default(空文字)を許す。
+    #[serde(default)]
+    pub url: String,
 }
 
 /// `POST /api/services` のリクエストボディ。

@@ -198,7 +198,12 @@ pub async fn run_digest(
     // commit_success が desired=running に戻してしまうので、ここで弾くのが唯一の防壁。
     if trigger == DeployTrigger::Reconcile && (desired != "running" || phase != "running") {
         tracing::info!(%service_id, %deploy_id, desired, phase, "reconcile: 復活直前に状態が変化 — スキップ");
-        abort_deploy(state, deploy_id, "reconcile: 復活前に状態が変化したためスキップ").await;
+        abort_deploy(
+            state,
+            deploy_id,
+            "reconcile: 復活前に状態が変化したためスキップ",
+        )
+        .await;
         return Ok(());
     }
 
@@ -452,7 +457,10 @@ mod tests {
     #[test]
     fn sha256_digest_validation() {
         assert!(is_sha256_digest(&format!("sha256:{}", "a".repeat(64))));
-        assert!(is_sha256_digest(&format!("sha256:{}", "0123456789abcdef".repeat(4))));
+        assert!(is_sha256_digest(&format!(
+            "sha256:{}",
+            "0123456789abcdef".repeat(4)
+        )));
         assert!(!is_sha256_digest("latest")); // tag
         assert!(!is_sha256_digest("myrepo:v1")); // tag
         assert!(!is_sha256_digest("sha256:abc")); // 短い

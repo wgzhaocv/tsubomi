@@ -127,11 +127,7 @@ export default function AdminAudit() {
 
             {hasNextPage && (
               <div className="flex justify-center">
-                <Button
-                  type="default"
-                  loading={isFetchingNextPage}
-                  onClick={() => fetchNextPage()}
-                >
+                <Button type="default" loading={isFetchingNextPage} onClick={() => fetchNextPage()}>
                   もっと読む
                 </Button>
               </div>

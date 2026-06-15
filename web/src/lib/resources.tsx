@@ -1,11 +1,11 @@
-import { Activity, Database, HardDrive, Server, Trash2, Zap, type LucideIcon } from "lucide-react";
+import { Database, HardDrive, Server, Trash2, Zap, type LucideIcon } from "lucide-react";
 
 import type { TitleColor } from "@/components/ui/title";
 
 // 管理画面のサイドメニューと各リソース画面を「1 つの設定」から駆動するための定義。
 // ここを編集すれば、ナビ項目とページ(見出し・空状態)が同時に変わる。
-// 並び順は paas-design-v2.md の 4 種リソース(service/database/cache/volume)+
-// アクティビティ(操作履歴)。中身は今後 web → CLI の順で実装する(両方から使える)。
+// 並び順は paas-design-v2.md の 4 種リソース(service/database/cache/volume)。
+// 中身は今後 web → CLI の順で実装する(両方から使える)。
 
 export interface ResourceNav {
   /** ルートパス(絶対)。子ルートには先頭の "/" を外して使う。 */
@@ -64,15 +64,6 @@ export const RESOURCES: ResourceNav[] = [
     emptyTitle: "まだキャッシュがありません",
     emptyBody:
       "サービスに注入して使う Valkey の高速キャッシュです。接続文字列を env に注入して利用します。",
-  },
-  {
-    path: "/activity",
-    kind: null,
-    label: "アクティビティ",
-    icon: Activity,
-    ribbon: "purple",
-    emptyTitle: "まだアクティビティがありません",
-    emptyBody: "リソースの作成・削除や owner 操作などの履歴が、ここに時系列で表示されます。",
   },
   {
     // ゴミ箱:リソースではないがサイドメニューの一項目。専用ページ(/trash)へ

@@ -63,12 +63,13 @@ async fn check_disk(state: &AppState) {
         "ok"
     };
 
-    let prev: Option<Value> = sqlx::query_scalar("SELECT value FROM platform_config WHERE key = $1")
-        .bind(DISK_STATE_KEY)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    let prev: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM platform_config WHERE key = $1")
+            .bind(DISK_STATE_KEY)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
     let prev_level = prev
         .as_ref()
         .and_then(|v| v.get("level"))
@@ -90,8 +91,7 @@ async fn check_disk(state: &AppState) {
     let escalated = rank(level) > rank(prev_level);
     // 再喚起は **同 level に留まっている間だけ** 24h 間隔で(de-escalation では送らない — §4.2)。
     // 初回観測(prev_notified なし)で同 level なら即送る。
-    let stale =
-        level == prev_level && prev_notified.is_none_or(|t| now - t > DISK_REALERT_AFTER);
+    let stale = level == prev_level && prev_notified.is_none_or(|t| now - t > DISK_REALERT_AFTER);
     let should_notify = level != "ok" && (escalated || stale);
 
     // 通知できた時だけ notified_at を進める。送信失敗(Resend の一時障害など)では据え置き、

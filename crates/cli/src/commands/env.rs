@@ -60,7 +60,10 @@ pub async fn run(
             if json {
                 print_json(&json!({ "set": keys }))?;
             } else {
-                eprintln!("env を設定しました(反映には再デプロイが必要です):{}", keys.join(", "));
+                eprintln!(
+                    "env を設定しました(反映には再デプロイが必要です):{}",
+                    keys.join(", ")
+                );
             }
         }
         EnvCmd::Unset { svc, keys } => {
@@ -71,7 +74,10 @@ pub async fn run(
             if json {
                 print_json(&json!({ "unset": keys }))?;
             } else {
-                eprintln!("env を削除しました(反映には再デプロイが必要です):{}", keys.join(", "));
+                eprintln!(
+                    "env を削除しました(反映には再デプロイが必要です):{}",
+                    keys.join(", ")
+                );
             }
         }
         EnvCmd::List { svc } => {

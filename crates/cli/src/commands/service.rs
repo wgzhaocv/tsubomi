@@ -81,7 +81,10 @@ pub async fn run(
                 println!("(サービスはありません。`tbm service create <名前>` で作成)");
             } else {
                 for s in &svcs {
-                    println!("service{:<3} {:<24} {}", s.anon_seq, s.display_name, s.phase);
+                    println!(
+                        "service{:<3} {:<24} {}",
+                        s.anon_seq, s.display_name, s.phase
+                    );
                 }
             }
         }
@@ -177,6 +180,9 @@ fn print_status(
         svc.display_name, svc.anon_seq, svc.phase, svc.desired_state
     );
     println!("  subdomain:   {}", svc.subdomain);
+    if !svc.url.is_empty() {
+        println!("  url:         {}", svc.url);
+    }
     if let Some(d) = &svc.image_digest {
         println!("  digest:      {}", short_digest(d));
     }
@@ -202,7 +208,11 @@ fn print_status(
     }
     println!("  デプロイ履歴(新しい順。rollback は id を使う):");
     for d in deploys.iter().take(10) {
-        let err = d.error.as_deref().map(|e| format!("  — {e}")).unwrap_or_default();
+        let err = d
+            .error
+            .as_deref()
+            .map(|e| format!("  — {e}"))
+            .unwrap_or_default();
         println!(
             "    {}  {:<9} {}  id={}{}",
             d.created_at,
@@ -240,9 +250,7 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
 
     // 2. gh が使えなければ手順を出して終わり。
     if !gh_ok() {
-        eprintln!(
-            "⚠ gh が見つからない / 未ログインです。リポジトリ直下で以下を実行してください"
-        );
+        eprintln!("⚠ gh が見つからない / 未ログインです。リポジトリ直下で以下を実行してください");
         eprintln!("  (deploy_key / registry pass は秘密です。共有・commit しないこと):");
         // 手順は平台が組み立てた setup_commands をそのまま出す(CLI で再構築しない)。
         for line in &resp.setup_commands {

@@ -94,7 +94,9 @@ pub fn setup_commands(
         ),
         format!("gh variable set TSUBOMI_HOOK_URL -R \"$TSUBOMI_REPO\" --body '{hook_url}'"),
         format!("gh variable set TSUBOMI_PLATFORMS -R \"$TSUBOMI_REPO\" --body '{platforms}'"),
-        format!("# {WORKFLOW_PATH} を workflow_yaml の内容で作成 → git add/commit/push で自動デプロイ"),
+        format!(
+            "# {WORKFLOW_PATH} を workflow_yaml の内容で作成 → git add/commit/push で自動デプロイ"
+        ),
     ]
 }
 
@@ -116,7 +118,10 @@ mod tests {
             "x-tsubomi-signature",
             "image_digest",
         ] {
-            assert!(TEMPLATE.contains(needle), "workflow テンプレに {needle} が無い");
+            assert!(
+                TEMPLATE.contains(needle),
+                "workflow テンプレに {needle} が無い"
+            );
         }
     }
 }

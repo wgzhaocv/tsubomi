@@ -62,9 +62,10 @@ pub async fn resolve(
                 // host_path を mount_path に bind し、env に mount_path を入れる。失効はスキップ。
                 // mount_path は注入作成時に必ず入る(create_injection が既定を確定)。万一 None なら
                 // データ不整合 — ここで別の既定を捏造せずスキップする(既定の単一真源は create 側)。
-                if let (Some(host_path), Some(mount)) =
-                    (fetch_volume_host_path(state, resource_id).await?, mount_path)
-                {
+                if let (Some(host_path), Some(mount)) = (
+                    fetch_volume_host_path(state, resource_id).await?,
+                    mount_path,
+                ) {
                     // bind 元(host 側)が無ければ作る(volume 作成時に在るはずだが念のため)。
                     let _ = std::fs::create_dir_all(&host_path);
                     binds.push(format!("{host_path}:{mount}"));
@@ -99,10 +100,7 @@ async fn fetch_app_role(
 }
 
 /// 注入元 volume の host_path を引く。削除済み(失効)/ volume でない → None。
-async fn fetch_volume_host_path(
-    state: &AppState,
-    resource_id: Uuid,
-) -> AppResult<Option<String>> {
+async fn fetch_volume_host_path(state: &AppState, resource_id: Uuid) -> AppResult<Option<String>> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT d.host_path
            FROM resources r

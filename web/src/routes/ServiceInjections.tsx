@@ -1,14 +1,26 @@
 import { useState } from "react";
-import { Plus, X } from "lucide-react";
-import { useParams } from "react-router";
+import { ArrowUpRight, Plus, X } from "lucide-react";
+import { Link, useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
 import { useDatabases } from "@/lib/databases";
-import { useCreateInjection, useEjectInjection, useServiceInjections } from "@/lib/services";
+import {
+  type Injection,
+  useCreateInjection,
+  useEjectInjection,
+  useServiceInjections,
+} from "@/lib/services";
 import { useVolumes } from "@/lib/volumes";
+
+// 注入元リソースの詳細ページ(クリックで遷移)。種別でルートが分かれる。
+function resourceHref(inj: Injection): string {
+  return inj.resource_kind === "database"
+    ? `/databases/${inj.resource_id}`
+    : `/volumes/${inj.resource_id}`;
+}
 
 // 注入:database / volume を service にバインドする。値はコンテナ起動の瞬間に解決されるので
 // 反映には再デプロイが要る。失効(注入元が削除済み)は valid:false でバッジ表示。
@@ -64,7 +76,7 @@ export default function ServiceInjections() {
         </Button>
       </div>
       <p className="text-sm font-medium text-muted-foreground">
-        database / volume をこのサービスに注入します。
+        データベースやボリューム(フォルダ)を、環境変数を通じてこのサービスに注入します。接続情報やマウント先が環境変数として渡されます。
         <strong>反映には再デプロイ(または開始)が必要</strong>です。
       </p>
 
@@ -80,18 +92,34 @@ export default function ServiceInjections() {
               key={inj.id}
               className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
             >
-              <div className="flex min-w-0 flex-col gap-0.5">
-                <span className="font-bold text-foreground">
-                  <code className="font-mono">{inj.env_var}</code> ← {inj.resource_name}
+              <div className="flex min-w-0 flex-col gap-1">
+                {/* 1 行目:環境変数名(これがコンテナに渡る名前)。 */}
+                <code className="font-mono text-sm font-bold text-foreground">{inj.env_var}</code>
+                {/* 2 行目:注入元のリソース(クリックで該当リソースへ)+ 値の説明。
+                    volume はマウント先パス、database は接続文字列(値は表示しない)。 */}
+                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs font-medium text-muted-foreground">
+                  <span>{inj.resource_kind}</span>
+                  {inj.valid ? (
+                    <Link
+                      to={resourceHref(inj)}
+                      className="inline-flex items-center gap-0.5 font-bold text-[#11a89b] underline-offset-2 hover:underline"
+                    >
+                      「{inj.resource_name}」
+                      <ArrowUpRight className="size-3 shrink-0" />
+                    </Link>
+                  ) : (
+                    <span className="font-bold text-foreground">「{inj.resource_name}」</span>
+                  )}
+                  {inj.resource_kind === "volume" ? (
+                    inj.mount_path && <span>→ {inj.mount_path} にマウント</span>
+                  ) : (
+                    <span>の接続文字列</span>
+                  )}
                   {!inj.valid && (
-                    <span className="ml-2 rounded-full bg-[#e05a5a]/15 px-2 py-0.5 text-xs font-bold text-[#e05a5a]">
-                      失効
+                    <span className="rounded-full bg-[#e05a5a]/15 px-2 py-0.5 font-bold text-[#e05a5a]">
+                      失効(注入元が削除済み)
                     </span>
                   )}
-                </span>
-                <span className="text-xs font-medium text-muted-foreground">
-                  {inj.resource_kind}
-                  {inj.mount_path ? ` · ${inj.mount_path}` : ""}
                 </span>
               </div>
               <Button
@@ -132,7 +160,16 @@ export default function ServiceInjections() {
           </>
         }
       >
-        <div className="flex w-full flex-col gap-3">
+        {/* form で囲み Enter 送信を効かせる。フッターの注入ボタンは Modal の外側領域に
+            あるため、複数フィールドでも暗黙送信が効くよう隠し submit を 1 つ置く。 */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
+          <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
           <div className="flex flex-col gap-1.5">
             <span className="text-sm font-semibold text-foreground">リソース</span>
             <Select
@@ -160,7 +197,7 @@ export default function ServiceInjections() {
           {create.error && (
             <p className="text-sm font-semibold text-[#e05a5a]">{create.error.message}</p>
           )}
-        </div>
+        </form>
       </Modal>
     </div>
   );

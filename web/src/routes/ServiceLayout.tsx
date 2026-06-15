@@ -1,6 +1,7 @@
 import {
   ArrowLeft,
   Cable,
+  ExternalLink,
   History,
   LayoutDashboard,
   ScrollText,
@@ -56,7 +57,19 @@ export default function ServiceLayout() {
               </span>
             )}
           </header>
-          {svc && <p className="text-sm font-medium text-muted-foreground">{svc.subdomain}</p>}
+          {/* 公開 URL(別タブで開く)。subdomain は display_name と同じになりがちなので、
+              見出しの直下にはそのまま出さず、情報量のある完全 URL を見せる。 */}
+          {svc?.url && (
+            <a
+              href={svc.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex w-fit items-center gap-1.5 text-sm font-semibold text-[#11a89b] underline-offset-2 outline-none hover:underline focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
+            >
+              {svc.url.replace(/^https?:\/\//, "")}
+              <ExternalLink className="size-3.5 shrink-0" />
+            </a>
+          )}
         </div>
 
         <nav

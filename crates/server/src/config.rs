@@ -154,6 +154,18 @@ impl Config {
             .unwrap_or(&self.registry_push)
     }
 
+    /// service の公開 URL(`<scheme>://<subdomain>.<domain>`)を組み立てる。
+    /// scheme は dev(domain=localhost)が http、それ以外(prod = CF tunnel / 直 VPS の
+    /// いずれも公開面は https)が https。ServiceDto.url に載せて web/CLI が表示する。
+    pub fn service_url(&self, subdomain: &str) -> String {
+        let scheme = if self.domain == "localhost" {
+            "http"
+        } else {
+            "https"
+        };
+        format!("{scheme}://{subdomain}.{}", self.domain)
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         // 既定は **loopback** :9090(同居する amber は 8080)。本番は前段(CF Tunnel / 逆代理)が
         // localhost へ転送する想定なので公網露出しないのが安全側。直 VPS で traefik コンテナが
@@ -247,8 +259,8 @@ impl Config {
         let registry_pull =
             std::env::var("TSUBOMI_REGISTRY_PULL").unwrap_or_else(|_| "127.0.0.1:5000".to_string());
         // push 入口。未設定なら pull と同じ(dev の無認証 registry)。
-        let registry_push = std::env::var("TSUBOMI_REGISTRY_PUSH")
-            .unwrap_or_else(|_| registry_pull.clone());
+        let registry_push =
+            std::env::var("TSUBOMI_REGISTRY_PUSH").unwrap_or_else(|_| registry_pull.clone());
         // push host は registry.yml の traefik Host(...) ルールへ埋め込む(registry_host())。
         // host[:port] のみ許可(scheme `//` / path `/` / 引用符 / 空白を弾く。注入・設定崩れ防止)。
         if registry_push.is_empty()

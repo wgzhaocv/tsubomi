@@ -122,11 +122,14 @@ export default function IpAllowlist() {
                 <p className="text-lg font-bold text-foreground">まだ許可レンジがありません</p>
                 <p className="max-w-md text-sm font-medium text-muted-foreground">
                   会社のオフィスや VPN の IP レンジ(CIDR)を登録すると、サービスへの
-                  アクセスをその範囲だけに制限できます。registry とデプロイ用 hook
-                  は対象外です。
+                  アクセスをその範囲だけに制限できます。registry とデプロイ用 hook は対象外です。
                 </p>
               </div>
-              <Button type="primary" icon={<Plus className="size-4" />} onClick={() => setOpen(true)}>
+              <Button
+                type="primary"
+                icon={<Plus className="size-4" />}
+                onClick={() => setOpen(true)}
+              >
                 レンジを追加
               </Button>
             </CardContent>
@@ -242,8 +245,7 @@ export default function IpAllowlist() {
           }
         >
           <p>
-            <strong className="font-mono">{removeTarget?.cidr}</strong>{" "}
-            を許可リストから削除します。
+            <strong className="font-mono">{removeTarget?.cidr}</strong> を許可リストから削除します。
             {entries?.length === 1 && (
               <>
                 {" "}

@@ -122,9 +122,7 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
-        Cmd::Service { action } => {
-            commands::service::run(action, cli.server, cli.token, out).await
-        }
+        Cmd::Service { action } => commands::service::run(action, cli.server, cli.token, out).await,
         Cmd::Deploy(args) => commands::deploy::run(args, cli.server, cli.token, out).await,
         Cmd::Inject(args) => commands::inject::run_inject(args, cli.server, cli.token, out).await,
         Cmd::Eject { id } => commands::inject::run_eject(id, cli.server, cli.token, out).await,

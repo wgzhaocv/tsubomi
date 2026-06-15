@@ -117,7 +117,9 @@ pub fn write_apex(state: &AppState) -> AppResult<()> {
     doc.push_str("    tsubomi-apex:\n");
     doc.push_str("      loadBalancer:\n");
     doc.push_str("        servers:\n");
-    doc.push_str(&format!("          - url: \"http://host.docker.internal:{port}\"\n"));
+    doc.push_str(&format!(
+        "          - url: \"http://host.docker.internal:{port}\"\n"
+    ));
     write_atomic(&state.config.traefik_dynamic_dir.join("apex.yml"), &doc)
 }
 

@@ -466,7 +466,9 @@ pub async fn service_get(
             .bearer_auth(token),
     )
     .await?;
-    resp.json().await.context("failed to parse service response")
+    resp.json()
+        .await
+        .context("failed to parse service response")
 }
 
 pub async fn service_deploys(
@@ -480,7 +482,9 @@ pub async fn service_deploys(
             .bearer_auth(token),
     )
     .await?;
-    resp.json().await.context("failed to parse deploys response")
+    resp.json()
+        .await
+        .context("failed to parse deploys response")
 }
 
 /// `tbm deploy --local` 用の build+hook 情報(deploy_key / registry creds を含む。自分の service のみ)。
@@ -678,8 +682,8 @@ pub async fn env_unset(
     key: &str,
 ) -> Result<()> {
     // key は任意文字を含みうるのでパスセグメントとしてエンコードする。
-    let mut url =
-        url::Url::parse(&format!("{server_url}/api/services/{service_id}/env")).context("invalid server url")?;
+    let mut url = url::Url::parse(&format!("{server_url}/api/services/{service_id}/env"))
+        .context("invalid server url")?;
     url.path_segments_mut()
         .map_err(|()| anyhow::anyhow!("invalid url base"))?
         .push(key);

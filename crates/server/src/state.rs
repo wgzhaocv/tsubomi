@@ -73,10 +73,9 @@ impl AppState {
         // docker 無しでは service フェーズは機能しないので、ここで早期に失敗させる。
         let docker =
             bollard::Docker::connect_with_local_defaults().context("docker.sock への接続に失敗")?;
-        docker
-            .ping()
-            .await
-            .context("docker daemon に ping できない(docker は起動しているか / DOCKER_HOST を確認)")?;
+        docker.ping().await.context(
+            "docker daemon に ping できない(docker は起動しているか / DOCKER_HOST を確認)",
+        )?;
 
         Ok(Self(Arc::new(AppStateInner {
             config,
@@ -94,7 +93,11 @@ impl AppState {
     pub fn deploy_lock(&self, service_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
         // poison しても map 自体は壊れない(値は Arc だけ)。回復して使い続ける —
         // bookkeeping mutex の poison で全 service の deploy を巻き込まない。
-        let mut map = self.0.deploy_locks.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .0
+            .deploy_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.entry(service_id)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()

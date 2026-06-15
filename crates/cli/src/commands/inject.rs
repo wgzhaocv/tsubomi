@@ -115,6 +115,8 @@ async fn resolve_resource(
             message: format!("リソース '{name}' が見つかりません(database / volume)"),
         }
         .into()),
-        _ => bail!("'{name}' が database と volume の両方にあります。一方を改名してから注入してください"),
+        _ => bail!(
+            "'{name}' が database と volume の両方にあります。一方を改名してから注入してください"
+        ),
     }
 }

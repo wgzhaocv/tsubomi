@@ -1,4 +1,5 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 
 import { cn } from "@/lib/utils";
 
@@ -44,6 +45,9 @@ export function Select({
   const [mounted, setMounted] = React.useState(false);
   const wrapperRef = React.useRef<HTMLDivElement>(null);
   const triggerRef = React.useRef<HTMLDivElement>(null);
+  // ドロップダウンは document.body へ portal するので、wrapper の DOM 子ではない。
+  // クリックアウトサイド判定でこの参照も「内側」として除外する。
+  const dropdownRef = React.useRef<HTMLDivElement>(null);
   const currentLabel = options.find((o) => o.key === value)?.label ?? placeholder;
 
   const idPrefix = `tbm-select-${React.useId().replace(/:/g, "")}`;
@@ -70,10 +74,15 @@ export function Select({
     timer: null,
   });
 
-  // クリックアウトサイドで閉じる
+  // クリックアウトサイドで閉じる(portal したドロップダウン内のクリックは内側扱い)。
   React.useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        wrapperRef.current &&
+        !wrapperRef.current.contains(target) &&
+        !dropdownRef.current?.contains(target)
+      ) {
         setOpen(false);
         setMounted(false);
       }
@@ -82,43 +91,37 @@ export function Select({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [open]);
 
-  // 横出し位置を空間に応じて算出(原典の配置ロジックそのまま)
+  // 横出し位置を空間に応じて算出(原典の配置ロジックを踏襲)。ドロップダウンは
+  // document.body へ portal するので、wrapper 相対の % ではなく fixed のビューポート
+  // 絶対座標で置く(modal の overflow / clip-path に切られないため)。
   React.useEffect(() => {
     if (open && wrapperRef.current) {
       const rect = wrapperRef.current.getBoundingClientRect();
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
       const dropdownHeight = options.length * 44 + 24;
-      const s: React.CSSProperties = { position: "absolute" };
+      const gap = 6;
+      const s: React.CSSProperties = { position: "fixed" };
 
+      // 横:右に 200px 入らなければトリガの左へ出す。
       if (rect.right + 200 > viewportWidth) {
-        s.right = "100%";
-        s.marginRight = "6px";
-        s.left = "auto";
+        s.right = viewportWidth - rect.left + gap;
       } else {
-        s.left = "100%";
-        s.marginLeft = "6px";
-        s.right = "auto";
+        s.left = rect.right + gap;
       }
 
+      // 縦:原典の分岐を px のビューポート座標へ写す。原典は wrapper 相対の
+      // bottom:100%(=トリガ上端)/ top:100%(=トリガ下端)で、メニューはトリガの
+      // 上 / 下に完全に出る(重ならない)。fixed でも同じ「トリガの外側 + gap」に置く。
       const spaceBelow = viewportHeight - rect.bottom;
       const spaceAbove = rect.top;
       if (spaceBelow < dropdownHeight && spaceAbove > spaceBelow) {
-        s.top = "auto";
-        s.bottom = "100%";
-        s.marginBottom = "6px";
-      } else if (spaceBelow < dropdownHeight) {
-        s.top = "100%";
-        s.marginTop = "6px";
-        s.bottom = "auto";
-      } else if (rect.top < dropdownHeight) {
-        s.top = "100%";
-        s.marginTop = "6px";
-        s.bottom = "auto";
+        s.bottom = viewportHeight - rect.top + gap; // メニュー下端をトリガ上端の上へ(上に出す)
+      } else if (spaceBelow < dropdownHeight || rect.top < dropdownHeight) {
+        s.top = rect.bottom + gap; // メニュー上端をトリガ下端の下へ(下に出す)
       } else {
-        s.top = "50%";
+        s.top = rect.top + rect.height / 2; // トリガ中央に縦センタリング
         s.transform = "translateY(-50%)";
-        s.bottom = "auto";
       }
 
       setDropdownStyle(s);
@@ -284,58 +287,63 @@ export function Select({
           </svg>
         </span>
       </div>
-      {open && mounted && (
-        <div
-          // dropdown:濃い黄面・角丸 28px・縦 12px パディング・フェードイン
-          className="z-100 rounded-[28px] bg-[#FFEEA0] py-3 opacity-0 animate-[animal-fade-in_0.2s_ease_forwards]"
-          style={dropdownStyle}
-          role="listbox"
-          id={listboxId}
-          aria-label={ariaLabel}
-          aria-labelledby={resolvedLabelledBy}
-        >
-          {options.map((option) => {
-            const selected = value === option.key;
-            // キーボード(activeKey)/マウス(hoveredKey)どちらの「現在項」も
-            // 同じ見た目(カーソル + 太字)でハイライトする。
-            const highlighted = (hoveredKey ?? activeKey) === option.key;
-            return (
-              <div
-                key={option.key}
-                id={optionId(option.key)}
-                role="option"
-                aria-selected={selected}
-                className={cn(
-                  "relative flex cursor-pointer items-center justify-center py-2.5 pr-7.5 pl-3.5 text-sm font-medium whitespace-nowrap text-[#725d42]",
-                  (selected || highlighted) && "z-1 font-bold",
-                )}
-                onClick={() => {
-                  handleSelect(option.key);
-                }}
-                onMouseEnter={() => {
-                  setHoveredKey(option.key);
-                  setActiveKey(option.key);
-                }}
-                onMouseLeave={() => setHoveredKey(null)}
-              >
-                {highlighted && (
-                  // 原典の select-cursor.svg を左から滑り込ませる(自托管 /cursor)
-                  <span
-                    aria-hidden
-                    className="pointer-events-none absolute top-1/2 -left-3 size-8.75 bg-[url(/cursor/select-cursor.svg)] bg-contain bg-center bg-no-repeat animate-[tbm-select-cursor-slide-in_0.5s_ease-out_forwards]"
-                  />
-                )}
-                <span className="w-4 text-xs" aria-hidden />
-                {option.label}
-                {selected && (
-                  // pillBar:選択項の下に敷く半透明の黄色バー
-                  <div className="absolute inset-x-0 top-[56%] -z-1 mx-5 h-3.5 -translate-y-1/2 rounded-[7px] bg-[#FFCC00] opacity-30" />
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {open &&
+        mounted &&
+        createPortal(
+          <div
+            ref={dropdownRef}
+            // dropdown:濃い黄面・角丸 28px・縦 12px パディング・フェードイン。
+            // portal で body 直下に出すので、modal(z-1000)より上の z を取る。
+            className="z-1100 rounded-[28px] bg-[#FFEEA0] py-3 opacity-0 animate-[animal-fade-in_0.2s_ease_forwards]"
+            style={dropdownStyle}
+            role="listbox"
+            id={listboxId}
+            aria-label={ariaLabel}
+            aria-labelledby={resolvedLabelledBy}
+          >
+            {options.map((option) => {
+              const selected = value === option.key;
+              // キーボード(activeKey)/マウス(hoveredKey)どちらの「現在項」も
+              // 同じ見た目(カーソル + 太字)でハイライトする。
+              const highlighted = (hoveredKey ?? activeKey) === option.key;
+              return (
+                <div
+                  key={option.key}
+                  id={optionId(option.key)}
+                  role="option"
+                  aria-selected={selected}
+                  className={cn(
+                    "relative flex cursor-pointer items-center justify-center py-2.5 pr-7.5 pl-3.5 text-sm font-medium whitespace-nowrap text-[#725d42]",
+                    (selected || highlighted) && "z-1 font-bold",
+                  )}
+                  onClick={() => {
+                    handleSelect(option.key);
+                  }}
+                  onMouseEnter={() => {
+                    setHoveredKey(option.key);
+                    setActiveKey(option.key);
+                  }}
+                  onMouseLeave={() => setHoveredKey(null)}
+                >
+                  {highlighted && (
+                    // 原典の select-cursor.svg を左から滑り込ませる(自托管 /cursor)
+                    <span
+                      aria-hidden
+                      className="pointer-events-none absolute top-1/2 -left-3 size-8.75 bg-[url(/cursor/select-cursor.svg)] bg-contain bg-center bg-no-repeat animate-[tbm-select-cursor-slide-in_0.5s_ease-out_forwards]"
+                    />
+                  )}
+                  <span className="w-4 text-xs" aria-hidden />
+                  {option.label}
+                  {selected && (
+                    // pillBar:選択項の下に敷く半透明の黄色バー
+                    <div className="absolute inset-x-0 top-[56%] -z-1 mx-5 h-3.5 -translate-y-1/2 rounded-[7px] bg-[#FFCC00] opacity-30" />
+                  )}
+                </div>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

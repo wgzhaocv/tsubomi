@@ -106,7 +106,7 @@ export default function Services() {
                 <Card
                   interactive
                   onClick={() => navigate(`/services/${svc.id}`)}
-                  className="flex-row items-center justify-between gap-4 py-4"
+                  className="flex-row items-center justify-between gap-4 py-4 pr-6"
                 >
                   <CardContent className="flex min-w-0 items-center gap-3.5">
                     <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">

@@ -10,7 +10,12 @@ const RESEND_ENDPOINT: &str = "https://api.resend.com/emails";
 
 /// テキストメールを送る。失敗しても呼び出し側(告警 / 検証コード)は best-effort で扱える。
 /// 宛先が空なら何もしない。key 未設定は「送らず log」= Ok(運用上の正常系)。
-pub async fn send(state: &AppState, to: &[String], subject: &str, body_text: &str) -> anyhow::Result<()> {
+pub async fn send(
+    state: &AppState,
+    to: &[String],
+    subject: &str,
+    body_text: &str,
+) -> anyhow::Result<()> {
     if to.is_empty() {
         tracing::warn!(subject, "メール宛先が空 — 送信せず(owner_emails 未設定?)");
         return Ok(());

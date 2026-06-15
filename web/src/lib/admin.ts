@@ -1,9 +1,4 @@
-import {
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { RESOURCES } from "@/lib/resources";
 
@@ -72,7 +67,7 @@ export function useAdminRanking() {
 }
 
 /** kind → 日本語ラベル(画面表示用)。RESOURCES(単一の真実源)から導出 — ラベルが
- * ドリフトしないように。activity(kind=null)は除く。 */
+ * ドリフトしないように。kind=null の項目(ゴミ箱など)は除く。 */
 export const KIND_LABEL: Record<string, string> = Object.fromEntries(
   RESOURCES.filter((r) => r.kind).map((r) => [r.kind as string, r.label]),
 );
@@ -86,7 +81,11 @@ export type AdminActionInput = { id: string; action: AdminAction; code?: string 
 export function useAdminAction() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, action, code }: AdminActionInput): Promise<{ code_required: boolean }> => {
+    mutationFn: async ({
+      id,
+      action,
+      code,
+    }: AdminActionInput): Promise<{ code_required: boolean }> => {
       const res = await fetch(`/api/admin/resources/${id}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

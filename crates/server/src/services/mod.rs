@@ -14,6 +14,7 @@ pub mod route;
 pub mod workflow;
 
 use crate::auth::AuthCtx;
+use crate::config::Config;
 use crate::databases::{audit, map_unique};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -59,19 +60,21 @@ pub fn routes() -> Router<AppState> {
 
 /// list / get_one が共有する行(resources + service_details の join)。
 type ServiceRow = (
-    Uuid,              // id
-    String,            // display_name
-    i32,               // anon_seq
-    DateTime<Utc>,     // created_at
-    String,            // subdomain
-    String,            // phase
-    String,            // desired_state
-    i32,               // container_port
-    Option<String>,    // image_digest
+    Uuid,                  // id
+    String,                // display_name
+    i32,                   // anon_seq
+    DateTime<Utc>,         // created_at
+    String,                // subdomain
+    String,                // phase
+    String,                // desired_state
+    i32,                   // container_port
+    Option<String>,        // image_digest
     Option<DateTime<Utc>>, // last_deploy_at
 );
 
-fn service_row_to_dto(r: ServiceRow) -> ServiceDto {
+fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
+    // url は subdomain を移動させる前に算出(同一リテラル内で借用 + 移動はできない)。
+    let url = config.service_url(&r.4);
     ServiceDto {
         id: r.0,
         display_name: r.1,
@@ -83,11 +86,15 @@ fn service_row_to_dto(r: ServiceRow) -> ServiceDto {
         container_port: r.7,
         image_digest: r.8,
         last_deploy_at: r.9,
+        url,
     }
 }
 
 /// `GET /api/services`:自分の service 一覧(ゴミ箱内は除く)。秘密は含まない。
-pub async fn list(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Json<Vec<ServiceDto>>> {
+pub async fn list(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+) -> AppResult<Json<Vec<ServiceDto>>> {
     let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at
@@ -98,7 +105,11 @@ pub async fn list(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Jso
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(service_row_to_dto).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| service_row_to_dto(r, &state.config))
+            .collect(),
+    ))
 }
 
 /// `GET /api/services/:id`:単一 service の詳細(所有者チェック。無 / 他人 / 削除済みは 404)。
@@ -117,7 +128,7 @@ pub async fn get_one(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await?;
-    row.map(service_row_to_dto)
+    row.map(|r| service_row_to_dto(r, &state.config))
         .map(Json)
         .ok_or(AppError::NotFound)
 }
@@ -255,7 +266,8 @@ pub async fn start(
     // 直近に成功した deploy の (digest, git_sha) を再起動する。1 件も無ければ未デプロイ。
     let (digest, git_sha) = latest_succeeded_deploy(&state, id).await?.ok_or_else(|| {
         AppError::BadRequest(
-            "まだデプロイされていません(git push か `tbm deploy --local` でデプロイしてください)".into(),
+            "まだデプロイされていません(git push か `tbm deploy --local` でデプロイしてください)"
+                .into(),
         )
     })?;
     redeploy(&state, id, &digest, &git_sha, deploy::DeployTrigger::User).await?;
@@ -346,7 +358,14 @@ pub async fn delete_service(
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
     soft_delete(&state, id).await?;
-    audit(&state.db, Some(auth.user_id), "service.delete", id, json!({})).await;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.delete",
+        id,
+        json!({}),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -631,8 +650,15 @@ pub async fn create(
         if RESERVED_SUBDOMAINS.contains(&candidate.as_str()) {
             continue;
         }
-        match insert_attempt(&state.db, auth.user_id, &display_name, &candidate, &deploy_key_enc)
-            .await
+        match insert_attempt(
+            &state.db,
+            &state.config,
+            auth.user_id,
+            &display_name,
+            &candidate,
+            &deploy_key_enc,
+        )
+        .await
         {
             Ok(dto) => {
                 created = Some(dto);
@@ -643,7 +669,9 @@ pub async fn create(
         }
     }
     let dto = created.ok_or_else(|| {
-        AppError::Conflict("subdomain を生成できませんでした。表示名を変えて再試行してください".into())
+        AppError::Conflict(
+            "subdomain を生成できませんでした。表示名を変えて再試行してください".into(),
+        )
     })?;
 
     audit(
@@ -660,7 +688,8 @@ pub async fn create(
     // service 作成より前に用意済み(上)。
     let hook_url = format!("{}/api/hook/deploy", state.config.server_url);
     let platforms = state.config.platforms.clone();
-    let setup_commands = workflow::setup_commands(&dto, &deploy_key, &registry, &hook_url, &platforms);
+    let setup_commands =
+        workflow::setup_commands(&dto, &deploy_key, &registry, &hook_url, &platforms);
 
     Ok((
         StatusCode::CREATED,
@@ -693,6 +722,7 @@ impl From<sqlx::Error> for InsertErr {
 /// anon_seq はユーザ単位で advisory lock を取って直列化する(同時 create の競合防止)。
 async fn insert_attempt(
     db: &PgPool,
+    config: &Config,
     user_id: Uuid,
     display_name: &str,
     subdomain: &str,
@@ -759,6 +789,7 @@ async fn insert_attempt(
         container_port: 8080,
         image_digest: None,
         last_deploy_at: None,
+        url: config.service_url(subdomain),
     })
 }
 
@@ -821,7 +852,10 @@ mod tests {
         for _ in 0..200 {
             let s = rand_suffix();
             assert_eq!(s.len(), 4);
-            assert!(s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()));
+            assert!(
+                s.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            );
         }
     }
 }

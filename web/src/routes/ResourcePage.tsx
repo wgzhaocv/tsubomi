@@ -8,7 +8,7 @@ import { Divider } from "@/components/ui/divider";
 import { Title } from "@/components/ui/title";
 import type { ResourceNav } from "@/lib/resources";
 
-// リソース一覧画面の共通実装(サービス / ボリューム / キャッシュ / アクティビティ)。
+// リソース一覧画面の共通実装(現状の未実装プレースホルダ = キャッシュ)。
 // 中身(一覧・作成)は今後 web で実装する。今は見出し + 空状態のみ。1 つの RESOURCES
 // 設定から見出し・色・空状態が決まる。横幅はデータベース詳細と揃えて wide。
 export default function ResourcePage({ resource }: { resource: ResourceNav }) {

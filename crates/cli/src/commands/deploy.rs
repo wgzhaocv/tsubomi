@@ -71,7 +71,9 @@ pub async fn run(
             "status": "accepted",
         }))?;
     } else {
-        eprintln!("デプロイを送信しました。`tbm service status` で deploying→running を確認してください。");
+        eprintln!(
+            "デプロイを送信しました。`tbm service status` で deploying→running を確認してください。"
+        );
         println!("{digest}");
     }
     Ok(())
@@ -96,7 +98,9 @@ async fn resolve_service(
         },
         None => match svcs.as_slice() {
             [only] => Ok(only.id.to_string()),
-            [] => bail!("サービスがありません。先に `tbm service create <名前>` を実行してください"),
+            [] => {
+                bail!("サービスがありません。先に `tbm service create <名前>` を実行してください")
+            }
             _ => bail!("サービスが複数あります。`--service <名前>` で対象を指定してください"),
         },
     }

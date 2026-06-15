@@ -20,6 +20,9 @@ export type Service = {
   container_port: number;
   image_digest: string | null;
   last_deploy_at: string | null;
+  // 公開 URL(`<scheme>://<subdomain>.<domain>`)。サーバが算出して返す。
+  // 古いサーバ相手では欠ける可能性があるので任意扱い。
+  url?: string;
 };
 
 export type RegistryCreds = { host: string; user: string; pass: string };
