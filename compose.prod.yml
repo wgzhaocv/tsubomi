@@ -120,6 +120,40 @@ services:
     volumes:
       - registry_data:/var/lib/registry
 
+  # M5:cache の共有 valkey 実例。per-cache の ACL ユーザは平台(server コンテナ。host ネット +
+  # docker.sock)が実行時に ACL SETUSER で足す(揮発 → server が起動時 + 30s で収束。§7.3)。
+  # default ユーザは off、平台専用 tsubomi-admin だけが管理権(§11-J)。admin は aclfile では
+  # なく command の --user で静的定義(aclfile は ${VAR} 非展開 + 実行時 SETUSER と排他)。
+  # 公網 / 会社 LAN には晒さない(§11-B:cache は内部注入のみ)。ホスト側 127.0.0.1:6433 は
+  # host ネットの server が admin 接続するため(pg-platform/pgbouncer と同じ loopback 公開)。
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: tsubomi-valkey
+    restart: unless-stopped
+    command:
+      - valkey-server
+      - --maxmemory
+      - ${TSUBOMI_VALKEY_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --user
+      - default
+      - "off"
+      - --user
+      - tsubomi-admin
+      - "on"
+      - ">${TSUBOMI_VALKEY_ADMIN_PASS:?set TSUBOMI_VALKEY_ADMIN_PASS in .env.production (英数字のみ)}"
+      - "~*"
+      - "&*"
+      - "+@all"
+    ports:
+      - "127.0.0.1:6433:6379"
+    volumes:
+      - valkey_data:/data   # RDB(キー本体。per-cache ACL は平台が収束で貼り直す)
+    # default = host ネットの server が 127.0.0.1:6433 で admin 接続。tsubomi-edge = ユーザ
+    # コンテナが `tsubomi-valkey:6379`(docker DNS)で内部入口に届くため(§11-A。pgbouncer と同型)。
+    networks: [default, tsubomi-edge]
+
   # M3:ユーザ service / apex / registry の入口 + ルーティング。**file provider のみ**
   # (docker provider は Docker Engine 29 で壊れる)。平台(ホスト直走り)が動的設定を
   # TSUBOMI_TRAEFIK_DYNAMIC_DIR に書き、traefik が watch でホットリロードする:
@@ -185,6 +219,7 @@ volumes:
   pg_tenant_data:
   pgb_tls:
   registry_data:
+  valkey_data:
   # traefik_acme(LE 証明書)は直VPS用 compose.prod.tls.yml が足す。
 
 # ===========================================================================

@@ -120,8 +120,15 @@ valkey:
 
 - **edge 参加**(M3 §3.4 の pgbouncer と同型):ユーザコンテナは `tsubomi-valkey:6379` を docker DNS で
   引く。infra default 網にも居るので平台(host 直走り)からも届く。pg-platform / pg-tenant の隔離は不変。
-- **平台の admin 接続入口**:`ports: 127.0.0.1:6379`(loopback のみ。pg-tenant と同型)。平台はホスト直走り
+- **平台の admin 接続入口**:`ports: 127.0.0.1:6433`(loopback のみ。pg-tenant と同型)。平台はホスト直走り
   なので docker DNS は引けず、loopback 公開で admin 接続する。公網 / 会社 CIDR には晒さない(§11-B)。
+- **本番(`compose.prod.yml`)**:同じ valkey サービスを本番 compose にも足す(`tsubomi-edge` 参加、
+  `127.0.0.1:6433` loopback 公開、`valkey_data` 永続、admin pass は `${TSUBOMI_VALKEY_ADMIN_PASS:?...}` で
+  **必須**)。server コンテナは host ネットなので 127.0.0.1:6433 で admin 接続(pg と同じ)。外部 ingress は
+  無いので `compose.prod.tls.yml`(traefik :443)には変更不要。`just ship` が M5 入りの server イメージを
+  build → compose.prod.yml を配布 → `compose up -d` で valkey も作成・収束。デプロイ前提は Pi の
+  `.env.production` に `TSUBOMI_VALKEY_ADMIN_PASS` + `TSUBOMI_VALKEY_ADMIN_URL`(= `redis://tsubomi-admin:<同pass>@127.0.0.1:6433`)。
+  cache データは備份しない(§11-F)ので valkey_data は日次バックアップ対象外(RDB は再起動跨ぎのみ)。
 - **admin 認証**:`default` は **off**。平台専用 `tsubomi-admin`(強乱数パスワード、compose の `--user`)だけが
   管理権を持つ。平台は `redis://tsubomi-admin:<pass>@…:6379` で `ACL SETUSER` を発行。per-cache ユーザは
   `-@admin` 済みなので ACL/CONFIG を打てない。edge 上の不可信コンテナに admin 入口を晒さない(§11-J)。

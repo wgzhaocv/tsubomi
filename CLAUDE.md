@@ -35,7 +35,9 @@ FLUSHALL / KEYS / SCRIPT・FUNCTION FLUSH は NOPERM。値は隔離・key/channe
 ゴミ箱:delete=`ACL DELUSER`(key 温存)/ restore=ACL 再作成 + 生存 key 数報告(best-effort)/ purge=`SCAN+UNLINK`。
 owner 最後の砦に cache delete、admin overview/ranking に cache(指標=key 数)。web 詳細(`CacheDetail.tsx`)+
 CLI `tbm cache`。**最終 e2e 済み**:cache を使う service(Node ioredis カウンタ)をデプロイし、公開 URL で
-`<ns>:visits` を INCR して跨リクエスト永続・隔離内を実機確認。実装級は **`paas-m5-design.md`**。
+`<ns>:visits` を INCR して跨リクエスト永続・隔離内を実機確認。**prod-infra 込み**:`compose.prod.yml` に valkey
+(loopback 6433・edge・外部 ingress なし・admin pass 必須)、`just ship` が M5 イメージ build + compose 配布 +
+`up -d` で自動展開(前提:Pi の `.env.production` に `TSUBOMI_VALKEY_ADMIN_PASS`/`_URL`)。実装級は **`paas-m5-design.md`**。
 
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
