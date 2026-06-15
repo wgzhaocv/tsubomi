@@ -10,11 +10,7 @@ use serde::Serialize;
 
 /// 200 + `Cache-Control: no-store, private` + JSON。秘密を返す GET / POST 用。
 pub fn no_store<T: Serialize>(body: T) -> Response {
-    (
-        [(header::CACHE_CONTROL, "no-store, private")],
-        Json(body),
-    )
-        .into_response()
+    ([(header::CACHE_CONTROL, "no-store, private")], Json(body)).into_response()
 }
 
 /// 201 Created + `Cache-Control: no-store, private` + JSON(秘密を含む create 応答用)。

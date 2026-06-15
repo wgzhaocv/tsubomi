@@ -7,7 +7,7 @@ use crate::auth::AuthCtx;
 use crate::databases::{audit, map_unique};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use crate::{tenant, valkey, validate};
+use crate::{tenant, validate, valkey};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -54,11 +54,7 @@ fn build_url(state: &AppState, acl_user: &str, password: &str) -> String {
 
 /// 所有者チェック付きで (acl_user, namespace, password_enc) を引く。url / rotate が共有。
 /// 見つからない / 他ユーザ / 削除済みは 404。
-async fn fetch_creds(
-    db: &PgPool,
-    user_id: Uuid,
-    id: Uuid,
-) -> AppResult<(String, String, Vec<u8>)> {
+async fn fetch_creds(db: &PgPool, user_id: Uuid, id: Uuid) -> AppResult<(String, String, Vec<u8>)> {
     let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
         "SELECT d.acl_user, d.namespace, d.password_enc
            FROM resources r
@@ -157,7 +153,12 @@ async fn insert_rows(
     .bind(anon_seq)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| map_unique(e, format!("キャッシュ名 '{display_name}' は既に使われています")))?;
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("キャッシュ名 '{display_name}' は既に使われています"),
+        )
+    })?;
 
     // acl_user = namespace = name(同値。$2 を両方に)。
     sqlx::query(
@@ -203,7 +204,14 @@ pub async fn get_one(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<CacheDetailDto>> {
-    type DetailRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>, String);
+    type DetailRow = (
+        Uuid,
+        String,
+        i32,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+        String,
+    );
     let row: Option<DetailRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, d.namespace
            FROM resources r
@@ -250,7 +258,12 @@ pub async fn rename(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| map_unique(e, format!("キャッシュ名 '{display_name}' は既に使われています")))?;
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("キャッシュ名 '{display_name}' は既に使われています"),
+        )
+    })?;
 
     let row = row.ok_or(AppError::NotFound)?;
     audit(
@@ -296,11 +309,13 @@ pub async fn rotate(
     let enc = state.crypto.encrypt(&new_pw)?;
 
     // 1. DB(真実源)を先に更新。
-    sqlx::query("UPDATE cache_details SET password_enc = $1, rotated_at = now() WHERE resource_id = $2")
-        .bind(enc)
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE cache_details SET password_enc = $1, rotated_at = now() WHERE resource_id = $2",
+    )
+    .bind(enc)
+    .bind(id)
+    .execute(&state.db)
+    .await?;
     // 2. valkey に新パスを適用(失敗しても周期収束が DB から前向きに貼り直す)。
     valkey::set_user(&state.valkey, &acl_user, &namespace, &new_pw).await?;
 

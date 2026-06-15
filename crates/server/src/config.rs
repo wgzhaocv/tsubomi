@@ -256,8 +256,9 @@ impl Config {
         // prod は env で実値に上書き。default ユーザは off なので必ず tsubomi-admin で繋ぐ。
         // dev 既定:loopback の tsubomi-admin。ホスト側 port は 6433(compose と揃える。6379 は
         // ローカル redis に取られがちなので衝突回避)。prod は env で実値に上書き。
-        let valkey_admin_url = std::env::var("TSUBOMI_VALKEY_ADMIN_URL")
-            .unwrap_or_else(|_| "redis://tsubomi-admin:tsubomi_valkey_dev@127.0.0.1:6433".to_string());
+        let valkey_admin_url = std::env::var("TSUBOMI_VALKEY_ADMIN_URL").unwrap_or_else(|_| {
+            "redis://tsubomi-admin:tsubomi_valkey_dev@127.0.0.1:6433".to_string()
+        });
         // 注入する内部入口(コンテナ → edge 上の valkey を docker DNS で。外部入口は無い §11-B)。
         let cache_internal_host = std::env::var("TSUBOMI_CACHE_INTERNAL_HOST")
             .unwrap_or_else(|_| "tsubomi-valkey".to_string());
