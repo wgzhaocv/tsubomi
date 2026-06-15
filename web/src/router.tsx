@@ -3,6 +3,7 @@ import { createBrowserRouter } from "react-router";
 import { DashboardLayout } from "@/components/dashboard-layout";
 import { RequireOwner } from "@/components/require-owner";
 import { RESOURCES } from "@/lib/resources";
+import About from "@/routes/About";
 import AdminAudit from "@/routes/AdminAudit";
 import AdminOverview from "@/routes/AdminOverview";
 import AdminRanking from "@/routes/AdminRanking";
@@ -123,6 +124,9 @@ export const router = createBrowserRouter([
       })),
     ],
   },
+
+  // プロジェクト紹介(守衛の外)。同僚にアーキテクチャを見せる公開 1 枚もの。
+  { path: "/about", element: <About /> },
 
   // CLI フロー / 単体ページ(守衛の外)。
   { path: "/cli", element: <CliInstall /> },
