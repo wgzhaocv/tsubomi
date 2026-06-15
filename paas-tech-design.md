@@ -254,6 +254,12 @@ created ──deploy──▶ deploying ──成功──▶ running ◀──s
    チェック(閾値超え → Resend で owner に通知)、registry GC(週次、未参照
    blob の削除)。
 
+**起動時のみの追加収束(実装で確定)**:server がデプロイ途中で再起動すると
+`phase='deploying'` のまま取り残される(周期パスは churn 防止で deploying を触らない)。
+起動時に一度だけ、これを service の deploy_lock 内で**永続 desired_state へ収束**させる
+(desired=running は route が指す旧版を残して無瞬断・孤児の新コンテナだけ掃除、それ以外は
+停止意図を尊重して掃除)。通常運転の phase には手を出さない原則は保つ。詳細は m3-design §8。
+
 **意図的にやらないこと**:env / 注入のドリフトは追わない。env は起動の瞬間に
 だけ解決され、env 変更 / rotate / リソース削除のどれも自動再起動を**引き起こさ
 ない** — 「再デプロイして初めて効く」は v2 §11 が決めた仕様であり、reconcile が

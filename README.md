@@ -117,10 +117,12 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    curl -fsS http://127.0.0.1:9090/api/health
    docker compose -f compose.prod.yml logs -f server
    ```
-8. **更新**:新しい `compose.prod.yml`(既定タグが上がっている)を取得して
-   `docker compose --env-file .env.production -f compose.prod.yml up -d`
-   (別タグなら `TSUBOMI_IMAGE=...:vN` を前置して実行)。停止は
-   `docker compose -f compose.prod.yml down`。
+8. **更新(server だけ・ユーザ app 無瞬断)**:新しい `compose.prod.yml` を取得して
+   `TSUBOMI_IMAGE=...:vN docker compose --env-file .env.production -f compose.prod.yml up -d server`。
+   **`up -d`(全 service)ではなく `up -d server` に絞る**のが要点 — traefik / pg / valkey などデータ面・
+   入口を巻き込んで再生成せず、全 app の同時瞬断を避ける(infra は compose 内で digest 固定済みなので
+   勝手に動かない)。停止は `docker compose -f compose.prod.yml stop`(`down` は使わない — コンテナを
+   消して次の `up` で全部作り直す = 不要な全 app 瞬断になる。external 網も外す)。
 
 ### メンテナ向け:配布・更新
 
@@ -134,9 +136,10 @@ REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v5 just release-image  # multi-a
 # just 無し:  REGISTRY=docker.io/wgzhaofumi IMAGE=tsubomi TAG=v5 bash scripts/release-image.sh
 ```
 
-publish 後、VPS 側は新タグで起こし直すだけ:
-`TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v5 docker compose --env-file .env.production -f compose.prod.yml up -d`
-(または `compose.prod.yml` の既定タグを上げて取得 → `up -d`)。
+publish 後、VPS 側は新タグで server だけ起こし直す:
+`TSUBOMI_IMAGE=docker.io/wgzhaofumi/tsubomi:v5 docker compose --env-file .env.production -f compose.prod.yml up -d server`
+(または `compose.prod.yml` の既定タグを上げて取得 → `up -d server`。`up -d server` に絞るのは上記 8 と同じ理由 —
+infra を巻き込まずユーザ app を瞬断させない。初回構築だけは infra 一式が要るので全 `up -d`)。
 
 **B. LAN 内ホストへ直送(香橙派など。Hub を介さず速い)**
 

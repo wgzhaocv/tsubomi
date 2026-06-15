@@ -594,10 +594,19 @@ CLI/UI はこれを明示(「反映には再デプロイ」)。
 - **stop レース防御**:reconcile の復活は `DeployTrigger::Reconcile` で run_digest を呼び、run_digest は
   `deploy_lock` 取得後に desired/phase を再取得し、running でなければ起動しない(候補取得とロック取得の
   間に stop が割り込んでも停止済み service を蘇らせない。commit_success が desired=running に戻すのを防ぐ)。
+- **起動時の中断デプロイ収束(`recover_interrupted`)**:server がデプロイ途中で死ぬと `phase='deploying'`
+  のまま残り(in-flight な deploys 行も閉じず、start-first 途中で死ねば route 未切替の**孤児の新コンテナ**が
+  漏れる)。周期パスは churn 防止で `phase='deploying'` を触らないので、ここは塞げない。起動時に一度だけ
+  各 service の `deploy_lock` 内で**永続化された desired_state へ収束**する(redeploy しない = 起動時 pull に
+  依存しない):lock 内で phase を読み直し(stop / 新 deploy と競合しない)、desired=running は route が指す
+  旧コンテナ(直近成功 deploy のコンテナ名)を残し孤児の新コンテナだけ掃除(**無瞬断**。旧も消えていれば
+  次の存在収束が復活)、それ以外(stop 意図 / 初回未起動 / 成功版なし)は全コンテナ + route を掃除して
+  停止意図を尊重。コンテナ名は `deploy::container_name()` に共有化。
 - 積み残し(後相・低影響):① 1 パスで service 毎に `list_containers`(N+1)— 単機・少数では無視可、
   数が増えたら 1 スナップショット + メモリ照合へ。② live service の余剰コンテナ掃除(deploy の
-  `remove_others` 失敗で旧が残るケース)は未対応 — route は正を指したまま=無害。正コンテナの識別子
-  (現行コンテナ列など)が要るので別チャンクで。
+  `remove_others` 失敗で旧が残るケース)— **中断デプロイの孤児は上の `recover_interrupted` で解消**したが、
+  通常運転中に `remove_others` が失敗して残る余剰は依然未対応(route は正を指したまま=無害)。一般解は
+  正コンテナの識別子が要るので別チャンクで。
 
 ---
 
@@ -747,6 +756,8 @@ TSUBOMI_DB_SSLMODE=require
 2. 香橙派で `docker network create tsubomi-edge`(冪等)+ `mkdir -p /srv/tsubomi/{traefik-dynamic,backups,trash,volumes}`。
 3. 香橙派で `docker compose --env-file .env.production -f compose.prod.yml pull && up -d`(base = traefik :80)。
    server 起動時に migration 自動 + `ipblock` / `registry`(web + basicAuth)の動的設定を書く(apex は tunnel 直結)。
+   ※ **初回だけ全 `up -d`**(infra 一式が要る)。以後の更新は **`up -d server`(server だけ)** に絞る — infra は
+   compose 内で multi-arch 索引 digest 固定済みなので動かさず、全 app の同時瞬断を避ける(`just ship` も同じ)。
 
 **⚠ CF の制約**:proxied トラフィックは **リクエスト body 上限**(無料/Pro ≈100MB)。`docker push` の大きな層は
 割れうる(小イメージ = node:alpine 等は通る)。回避は CF Enterprise / 層を小さく / 別 registry。

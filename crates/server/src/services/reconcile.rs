@@ -5,10 +5,14 @@
 //!   1. 存在収束:DB が「走っている」と信じる(phase=running)service にコンテナが無ければ、
 //!      直近成功 deploy の digest で起こし直す(= 正規の deploy 経路。route も書き直される)。
 //!   2. 孤児掃除:DB に生きた行が無い管理コンテナ / route ファイルを消す。
+//! さらに **起動時のみ一度**:server がデプロイ途中で死んで `phase='deploying'` のまま取り残された
+//! service を収束させる(`recover_interrupted`。詳細は同関数の doc)。
 //!
 //! **やらないこと(決定 #5)**:env / 注入のドリフトは追わない(値は起動の瞬間にだけ解決され、
 //! 変更 / rotate / リソース削除は自動再起動を引き起こさない — 再 deploy して初めて効く)。
-//! phase の帳尻合わせもしない(phase 遷移の権限は run_digest / stop だけが持つ)。
+//! phase の帳尻合わせは **周期パスではしない**(phase 遷移の権限は run_digest / stop が持つ)。唯一の
+//! 例外が起動時の `recover_interrupted` — クラッシュで 'deploying' に取り残された service だけを、
+//! 永続化された desired_state へ収束させる(通常運転の phase には触れない)。
 
 use crate::databases::audit;
 use crate::error::AppResult;
