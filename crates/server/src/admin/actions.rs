@@ -154,7 +154,17 @@ async fn issue_code(
          このコードを画面に入力すると、対象の {kind} を {action} します(有効期限 {CODE_TTL_MINUTES} 分)。\n\
          心当たりがなければ無視してください。"
     );
-    mail::send(state, &to, &subject, &body)
+    let ttl = CODE_TTL_MINUTES.to_string();
+    let html = mail::render(
+        mail::TPL_ACTION_CODE,
+        &[
+            ("code", code.as_str()),
+            ("kind", kind),
+            ("action", action),
+            ("ttl", &ttl),
+        ],
+    );
+    mail::send(state, &to, &subject, &html, &body)
         .await
         .map_err(|e| AppError::Other(anyhow!("確認コードメールを送信できませんでした: {e}")))
 }

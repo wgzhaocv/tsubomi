@@ -111,7 +111,26 @@ async fn check_disk(state: &AppState) {
         );
         // 宛先は owner_roster(DB、運用中に web で増減する)。env は冷启动种のみ。
         let owners = crate::owners::roster(&state.db).await;
-        match mail::send(state, &owners, &subject, &body).await {
+        // HTML(React Email)+ text(上の素文面 fallback)。accent は level 別(warn=黄 / critical=赤)。
+        // accent はテンプレの裸 CSS 値(style="…background-color:{{accent}}…")に入る。mail::render の
+        // HTML エスケープは CSS インジェクションを守らないので、ここは**定数の 2 色のみ**に保つ(外部入力を入れない)。
+        let accent = if level == "critical" { "#e05a5a" } else { "#f5c31c" };
+        let pct_s = pct.to_string();
+        let warn_s = cfg.disk_warn_pct.to_string();
+        let crit_s = cfg.disk_critical_pct.to_string();
+        let path_s = cfg.volumes_dir.display().to_string();
+        let html = mail::render(
+            mail::TPL_DISK_ALERT,
+            &[
+                ("accent", accent),
+                ("pct", &pct_s),
+                ("level", level),
+                ("warn", &warn_s),
+                ("critical", &crit_s),
+                ("path", &path_s),
+            ],
+        );
+        match mail::send(state, &owners, &subject, &html, &body).await {
             Ok(()) => {
                 // target_resource は無い(platform 全体のイベント)ので nil uuid。詳細は detail に。
                 audit(

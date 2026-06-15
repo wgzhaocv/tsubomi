@@ -177,9 +177,10 @@ pub async fn remove(
     audit_owner(&state, auth.user_id, "owner.remove", &email).await;
     // 通知は commit 後(メールは巻き戻せない)。best-effort。
     let subject = "[tsubomi] owner 権限が解除されました";
-    let body = "あなたの tsubomi の owner(管理者)権限が解除されました。\n\
+    let text = "あなたの tsubomi の owner(管理者)権限が解除されました。\n\
                 心当たりがなければ、別の owner にご確認ください。";
-    if let Err(e) = mail::send(&state, std::slice::from_ref(&email), subject, body).await {
+    let html = mail::render(mail::TPL_OWNER_REMOVE, &[]);
+    if let Err(e) = mail::send(&state, std::slice::from_ref(&email), subject, &html, text).await {
         tracing::warn!(error = ?e, %email, "owner 解除通知メールの送信に失敗");
     }
     tracing::info!(actor = %auth.user_id, %email, "owner を解除");

@@ -16,6 +16,11 @@ dev:
 cli *args:
     cargo run -p tsubomi-cli -- {{args}}
 
+# React Email テンプレ(web/emails/)を静的 HTML に焼き、crates/server/src/mail/templates/
+# へ書き出す。テンプレ(.tsx)を変えたら実行して生成 HTML をコミットする(include_str! で埋め込む)。
+emails:
+    cd web && bun run scripts/render-emails.tsx
+
 # infra 起動: pg-platform:5434 / pg-tenant:5435 / pgbouncer:6432 / registry:5000 /
 #   traefik:8088(MIG は起動時に自動)。tsubomi-edge 網を先に作る(compose は external 参照)。
 db-up:
