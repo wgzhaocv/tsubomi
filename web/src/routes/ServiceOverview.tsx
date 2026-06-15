@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Play, Square, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, Globe, Play, Square, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,7 @@ import {
   useStartService,
   useStopService,
 } from "@/lib/services";
+import { useCopied } from "@/lib/use-copied";
 
 // 概要:状態 grid + 操作(開始 / 停止)+ 危険ゾーン(削除 = 名前入力確認)。
 // 操作は再デプロイ(start-first)を伴うので結果が返るまで loading。
@@ -26,12 +27,51 @@ export default function ServiceOverview() {
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
+  const { copied, copy } = useCopied();
+  // url を局所定数に取り出して narrow する(onClick クロージャ内でも string 確定にする)。
+  const url = svc?.url;
   const actionErr = start.error ?? stop.error;
   // svc 未取得 / どちらかの操作が進行中なら両ボタンを止める(未知状態への発火・start と stop の同時発火を防ぐ)。
   const busy = !svc || start.isPending || stop.isPending;
 
   return (
     <div className="flex flex-col gap-7">
+      {/* ===== 公開 URL(目立つ位置に独立表示。クリックで開く / コピー)===== */}
+      {url && (
+        <section className="flex flex-wrap items-center gap-3 rounded-2xl border-2 border-[#19c8b9]/35 bg-accent px-5 py-4">
+          <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#19c8b9]/15 text-[#11a89b]">
+            <Globe className="size-5.5" />
+          </div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <span className="text-xs font-bold text-muted-foreground">公開 URL</span>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="truncate text-base font-bold text-[#11a89b] underline-offset-2 outline-none hover:underline focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
+            >
+              {url.replace(/^https?:\/\//, "")}
+            </a>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              type="default"
+              size="small"
+              icon={copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+              onClick={() => copy(url)}
+            >
+              {copied ? "コピー済み" : "コピー"}
+            </Button>
+            <Button type="primary" size="small" asChild>
+              <a href={url} target="_blank" rel="noreferrer">
+                <ExternalLink className="size-4" />
+                開く
+              </a>
+            </Button>
+          </div>
+        </section>
+      )}
+
       {/* ===== 状態 ===== */}
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-bold text-foreground">状態</h2>
