@@ -249,6 +249,9 @@ pub async fn remove_one(state: &AppState, name: &str) {
 
 /// 指定 service の(現行)コンテナの直近ログを text で返す(stdout+stderr、tail 行)。
 /// コンテナが無い(stopped / 未デプロイ)→ 空文字。stream を行ごとに集約する(follow はしない)。
+/// 注:`logs_by_name` とループが似るが **意図的に分離**する — こちらは API エンドポイント
+/// (`GET /services/:id/logs`)で Docker エラーを Err として表に出す契約。`logs_by_name` は
+/// 失敗 deploy 診断用の best-effort で取得失敗を握りつぶす = エラー契約が逆なので共有しない。
 pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> AppResult<String> {
     // service のコンテナ(start-first 後は通常 1 つ)。無ければ空。
     let Some(name) = list_by_service(state, service_id)
@@ -275,6 +278,27 @@ pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> Ap
         }
     }
     Ok(out)
+}
+
+/// 指定した **名前**のコンテナの直近ログ(stdout+stderr、tail 行)。ベストエフォート
+/// (取得失敗・コンテナ不在は空文字)。失敗 deploy で掃除される前の死にかけコンテナから、
+/// クラッシュ原因をエラーに載せるために使う(`logs` は現行コンテナを service_id で引く別経路)。
+pub async fn logs_by_name(state: &AppState, name: &str, tail: usize) -> String {
+    let tail_s = tail.min(2000).to_string();
+    let opts = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .tail(&tail_s)
+        .build();
+    let mut stream = state.docker.logs(name, Some(opts));
+    let mut out = String::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(line) => out.push_str(&line.to_string()),
+            Err(_) => break, // ベストエフォート:取得失敗は静かに打ち切る
+        }
+    }
+    out
 }
 
 /// owner ガバナンスの監視指標(M4 S1)。`(cpu_pct, mem_bytes)` を 1 サンプルで返す。

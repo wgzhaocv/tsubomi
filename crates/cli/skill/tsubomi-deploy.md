@@ -54,6 +54,31 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 確認:`tbm service status <service名>` の `injections` がすべて `valid: true`。
 （env 名を変えたいときは `--as <NAME>`。cache は `<NAME>_KEY_PREFIX` も併せて入る。）
 
+### 3.1 `DATABASE_URL` の TLS は言語で扱いが違う(つまずきやすい)
+
+注入される `DATABASE_URL` は **`sslmode=require`**(libpq の意味 = 暗号化はするが**証明書は検証しない**。
+内部の自己署名証明書のため検証は通らない)。この `require` の解釈がドライバで割れる:
+
+- **Go(lib/pq)/ Python(psycopg)**:`require` を「暗号化のみ・検証なし」と解釈 → **そのまま繋がる**。
+- **Node.js(`pg`)/ Next.js**:`pg` は `require` でも証明書を**厳密検証**する(libpq の
+  「require=検証なし」互換ではない)ため内部の自己署名証明書で失敗する。しかも接続文字列由来の
+  ssl 設定が明示 `ssl` を上書きするので、**URL から `sslmode` を外して** `ssl` を明示する:
+  ```js
+  const u = new URL(process.env.DATABASE_URL); u.searchParams.delete("sslmode");
+  const pool = new pg.Pool({ connectionString: u.toString(), ssl: { rejectUnauthorized: false } });
+  ```
+  併せて ioredis は **必ず `redis.on("error", …)` を付ける**(未listenの error イベントは
+  "Unhandled error event" でプロセスごと落ちる = 起動直後 exit の典型)。
+- **Rust(`postgres` / `tokio-postgres`)**:`NoTls` では `sslmode=require` に繋がらない。TLS
+  コネクタを渡す(検証なし = `require` の意味に合わせる):
+  ```rust
+  let c = native_tls::TlsConnector::builder().danger_accept_invalid_certs(true).build()?;
+  let mut db = postgres::Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(c))?;
+  ```
+
+迷ったら **起動時ではなくリクエスト時に DB へ繋ぐ**と、失敗が「起動直後 exit」ではなく
+レスポンスのエラーに出て切り分けやすい。
+
 ## 4. デプロイ — 経路を選ぶ
 
 ### 既定:GitHub 経路(`gh` を使う。CI が build/push)
@@ -104,6 +129,8 @@ GitHub 額度切れ時の主たる代替でもある。要 Docker。
 | 症状 | ほぼこれ | 一手 |
 | --- | --- | --- |
 | `succeeded` なのに 502 | アプリが 8080 で listen していない | ポート修正 → 再デプロイ |
+| Node/Next が起動直後 exit / DB で 502 | `pg` が `sslmode=require` を verify-full 扱い | §3.1(URL から sslmode を外し `ssl:{rejectUnauthorized:false}`)+ ioredis に `on("error")` |
+| Rust が起動直後 exit(DB 接続) | `NoTls` で `sslmode=require` に繋げない | §3.1(`postgres-native-tls` で TLS コネクタを渡す) |
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict` | 名前が既出 | 別名にする |
 | `code: validation` | 入力不正 | メッセージに従う |
