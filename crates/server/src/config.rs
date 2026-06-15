@@ -215,9 +215,15 @@ impl Config {
             anyhow::bail!("TSUBOMI_OWNER_EMAILS allows at most 2 owners (design v2 §7)");
         }
 
+        // 明示設定が優先。未設定なら **fail-safe**:dev(TSUBOMI_DOMAIN 未設定 / localhost)以外は
+        // Secure を付ける(env を書き忘れても本番で非 Secure cookie を出さない。security review S3)。
         let cookie_secure = std::env::var("TSUBOMI_COOKIE_SECURE")
             .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+            .unwrap_or_else(|_| {
+                std::env::var("TSUBOMI_DOMAIN")
+                    .map(|d| d != "localhost")
+                    .unwrap_or(false)
+            });
 
         let release_dir = std::env::var("TSUBOMI_RELEASE_DIR").ok().map(PathBuf::from);
 

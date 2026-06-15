@@ -64,11 +64,17 @@ pub async fn validate_token(db: &PgPool, plaintext: &str) -> AppResult<TokenAuth
 
 /// `last_used_at` のベストエフォート更新。エラーはログに残すだけで
 /// 伝播させない:リクエストの認証自体は既に成功している。
+/// **分粒度に絞る**:AI 駆動で 1 秒に何度も叩かれるので、1 分以内の更新は no-op にして
+/// 認証ホットパスの書き込み増幅を抑える(last_used_at は分粒度で十分)。
 pub async fn touch_last_used(db: &PgPool, token_id: Uuid) {
-    let r = sqlx::query("UPDATE cli_tokens SET last_used_at = now() WHERE id = $1")
-        .bind(token_id)
-        .execute(db)
-        .await;
+    let r = sqlx::query(
+        "UPDATE cli_tokens SET last_used_at = now()
+          WHERE id = $1
+            AND (last_used_at IS NULL OR last_used_at < now() - interval '1 minute')",
+    )
+    .bind(token_id)
+    .execute(db)
+    .await;
     if let Err(e) = r {
         tracing::warn!(error = ?e, %token_id, "touch_last_used failed");
     }

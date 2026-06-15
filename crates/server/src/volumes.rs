@@ -36,6 +36,8 @@ use tsubomi_shared::{
 use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
+/// 1 ディレクトリの列挙上限(これを超えると明示エラー。メモリ / ソート暴走の安全弁。perf review P2)。
+const MAX_DIR_ENTRIES: usize = 50_000;
 
 /// `?path=` クエリ。未指定は假根("")。
 #[derive(Debug, Deserialize)]
@@ -401,44 +403,57 @@ pub async fn list_files(
     Query(q): Query<PathQuery>,
 ) -> AppResult<Json<ListDirResp>> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let dir = safe_path::resolve_existing(&root, &q.path)?;
+    let path = q.path;
 
-    let meta = std::fs::metadata(&dir)?;
-    if !meta.is_dir() {
-        return Err(AppError::BadRequest(
-            "指定パスはディレクトリではありません".into(),
-        ));
-    }
+    // resolve(openat2)+ metadata + read_dir はブロッキング syscall。ランタイムスレッドを
+    // 塞がないよう spawn_blocking へ(usage と同じ作法。perf review P2)。巨大ディレクトリは
+    // メモリ / ソートを食うので上限を設け、超過は黙って切らず明示エラーにする。
+    let (rel, entries) = tokio::task::spawn_blocking(
+        move || -> AppResult<(String, Vec<FileEntryDto>)> {
+            let dir = safe_path::resolve_existing(&root, &path)?;
+            if !std::fs::metadata(&dir)?.is_dir() {
+                return Err(AppError::BadRequest(
+                    "指定パスはディレクトリではありません".into(),
+                ));
+            }
+            let mut entries: Vec<FileEntryDto> = Vec::new();
+            for entry in std::fs::read_dir(&dir)? {
+                if entries.len() >= MAX_DIR_ENTRIES {
+                    return Err(AppError::BadRequest(format!(
+                        "ディレクトリのエントリが多すぎます(上限 {MAX_DIR_ENTRIES})。サブディレクトリで絞ってください"
+                    )));
+                }
+                let entry = entry?;
+                let ft = entry.file_type()?;
+                let md = entry.metadata().ok();
+                let is_dir = ft.is_dir();
+                entries.push(FileEntryDto {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    is_dir,
+                    size: if is_dir {
+                        0
+                    } else {
+                        md.as_ref().map(|m| m.len()).unwrap_or(0)
+                    },
+                    modified: md
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .map(DateTime::<Utc>::from),
+                });
+            }
+            // ディレクトリ先・名前順。
+            entries.sort_by(|a, b| (!a.is_dir, &a.name).cmp(&(!b.is_dir, &b.name)));
+            // 応答の path は假根からの正規化済み相対(resolve_existing が組んだ dir から導出)。
+            let rel = dir
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok((rel, entries))
+        },
+    )
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!("ディレクトリ列挙タスクに失敗しました: {e}")))??;
 
-    let mut entries: Vec<FileEntryDto> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let md = entry.metadata().ok();
-        let is_dir = ft.is_dir();
-        entries.push(FileEntryDto {
-            name: entry.file_name().to_string_lossy().into_owned(),
-            is_dir,
-            size: if is_dir {
-                0
-            } else {
-                md.as_ref().map(|m| m.len()).unwrap_or(0)
-            },
-            modified: md
-                .as_ref()
-                .and_then(|m| m.modified().ok())
-                .map(DateTime::<Utc>::from),
-        });
-    }
-    // ディレクトリ先・名前順。
-    entries.sort_by(|a, b| (!a.is_dir, &a.name).cmp(&(!b.is_dir, &b.name)));
-
-    // 応答の path は假根からの正規化済み相対(resolve_existing が組んだ dir から導出 —
-    // normalize_rel を二度走らせない)。
-    let rel = dir
-        .strip_prefix(&root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
     Ok(Json(ListDirResp { path: rel, entries }))
 }
 
@@ -600,11 +615,17 @@ pub async fn delete_entry(
             "ルートは削除できません(ボリュームごと削除してください)".into(),
         ));
     }
-    if std::fs::metadata(&target)?.is_dir() {
-        std::fs::remove_dir_all(&target)?;
-    } else {
-        std::fs::remove_file(&target)?;
-    }
+    // 再帰削除はブロッキング & 大きな木で長い → spawn_blocking でランタイムを塞がない(P2)。
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        if std::fs::metadata(&target)?.is_dir() {
+            std::fs::remove_dir_all(&target)?;
+        } else {
+            std::fs::remove_file(&target)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!("削除タスクに失敗しました: {e}")))??;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -88,6 +88,19 @@ pub async fn deploy(
                 .into(),
         ));
     }
+    // git_sha は HMAC 済みなので注入はしないが、label / audit / deploys 行に入るので念のため
+    // 長さ + 文字種を縛る(`local` や sha・tag を許容。security review S5)。
+    if body.git_sha.is_empty()
+        || body.git_sha.len() > 64
+        || !body
+            .git_sha
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+    {
+        return Err(AppError::BadRequest(
+            "git_sha は 1〜64 文字の英数字 . _ - / のみにしてください".into(),
+        ));
+    }
 
     // 3. リプレイ防御(時刻窓)。
     let now = chrono::Utc::now().timestamp();

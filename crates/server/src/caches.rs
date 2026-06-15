@@ -132,8 +132,10 @@ async fn insert_rows(
 ) -> AppResult<CacheDto> {
     let mut tx = db.begin().await?;
 
-    // ユーザ単位で anon_seq の採番を直列化(同時 create の競合を防ぐ。database と同じロック鍵)。
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 42)")
+    // ユーザ単位で anon_seq の採番を直列化(同時 create の競合を防ぐ)。
+    // ロック鍵は kind ごとに別(database=42 / cache=43 / volume=44 / service=45)= 同一ユーザの
+    // 跨 kind 並行 create が無駄に直列化しないように(perf review P6)。
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 43)")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
@@ -268,10 +270,10 @@ pub async fn url(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<ConnectionUrlResp>> {
+) -> AppResult<axum::response::Response> {
     let (acl_user, _namespace, enc) = fetch_creds(&state.db, auth.user_id, id).await?;
     let pw = state.crypto.decrypt(&enc)?;
-    Ok(Json(ConnectionUrlResp {
+    Ok(crate::respond::no_store(ConnectionUrlResp {
         url: build_url(&state, &acl_user, &pw),
     }))
 }
@@ -288,7 +290,7 @@ pub async fn rotate(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<ConnectionUrlResp>> {
+) -> AppResult<axum::response::Response> {
     let (acl_user, namespace, _) = fetch_creds(&state.db, auth.user_id, id).await?;
     let new_pw = tenant::gen_password();
     let enc = state.crypto.encrypt(&new_pw)?;
@@ -303,7 +305,7 @@ pub async fn rotate(
     valkey::set_user(&state.valkey, &acl_user, &namespace, &new_pw).await?;
 
     audit(&state.db, Some(auth.user_id), "cache.rotate", id, json!({})).await;
-    Ok(Json(ConnectionUrlResp {
+    Ok(crate::respond::no_store(ConnectionUrlResp {
         url: build_url(&state, &acl_user, &new_pw),
     }))
 }

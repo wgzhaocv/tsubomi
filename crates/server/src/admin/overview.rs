@@ -10,7 +10,7 @@ use crate::state::AppState;
 use crate::volumes;
 use axum::Json;
 use axum::extract::{Query, State};
-use futures_util::future::join_all;
+use futures_util::stream::{self, StreamExt};
 use serde::Deserialize;
 use tsubomi_shared::{AdminOverviewKind, AdminOverviewResp, AdminResourceRow};
 use uuid::Uuid;
@@ -49,8 +49,18 @@ async fn gather_rows(state: &AppState) -> AppResult<Vec<AdminResourceRow>> {
     .await?;
 
     // service stats は 1 件 ~1 秒・volume du も I/O 待ち・cache は SCAN → 並行に集める。
-    Ok(join_all(raw.into_iter().map(|r| resolve_row(state, r))).await)
+    // ただし**同時実行を上限つき**に(buffer_unordered)— 単一ホストで N 個の docker stats
+    // ストリーム + du 走査 + valkey 接続を一斉に張ると箱が飽和するため(perf review P1)。
+    // 順序はこの後 overview=集計 / ranking=usage 降順ソートで作るので不問。
+    Ok(stream::iter(raw)
+        .map(|r| resolve_row(state, r))
+        .buffer_unordered(METRIC_CONCURRENCY)
+        .collect()
+        .await)
 }
+
+/// 指標採集の同時実行上限(単一 ARM64 ホストを飽和させない)。
+const METRIC_CONCURRENCY: usize = 6;
 
 async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
     let (resource_id, owner_name, kind, anon_seq, pg_dbname, host_path, namespace) = raw;

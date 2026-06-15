@@ -42,13 +42,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// owner 専用ゲート。design v2 §7「owner 操作はバックエンドで毎回検証」。
-/// AuthCtx.role は認証時に users から JOIN 済みなので追加クエリ不要。
+/// IP 許可リストは owner ガバナンス = web 専用なので、admin と同じく **owner 身分 かつ
+/// session 由来**を要求する(Bearer cli_token は拒否)。`require_owner_web` を再利用。
 fn require_owner(auth: &AuthCtx) -> AppResult<()> {
-    if auth.role == "owner" {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden)
-    }
+    crate::admin::require_owner_web(auth)
 }
 
 /// 入力 CIDR を正規化:単一 IP は /32(v4)・/128(v6)に、レンジはそのまま検証して

@@ -192,7 +192,7 @@ pub async fn deploy_config(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<DeployConfig>> {
+) -> AppResult<axum::response::Response> {
     // 所有権チェックと deploy_key 取得を一度に(他人 / 不在は 404)。
     let key_enc: Option<Vec<u8>> = sqlx::query_scalar(
         "SELECT s.deploy_key_enc FROM resources r JOIN service_details s ON s.resource_id = r.id
@@ -207,7 +207,7 @@ pub async fn deploy_config(
     let registry = registry::ensure_account(&state, auth.user_id).await?;
     let hook_url = format!("{}/api/hook/deploy", state.config.server_url);
 
-    Ok(Json(DeployConfig {
+    Ok(crate::respond::no_store(DeployConfig {
         service_id: id,
         registry,
         deploy_key,
@@ -611,7 +611,7 @@ pub async fn create(
     auth: AuthCtx,
     State(state): State<AppState>,
     Json(req): Json<CreateServiceReq>,
-) -> AppResult<(StatusCode, Json<CreateServiceResp>)> {
+) -> AppResult<axum::response::Response> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
 
     // 同名チェック(ゴミ箱内含む)。UNIQUE が最終ガードだが、先に弾いて分かりやすく。
@@ -694,18 +694,15 @@ pub async fn create(
     let setup_commands =
         workflow::setup_commands(&dto, &deploy_key, &registry, &hook_url, &platforms);
 
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateServiceResp {
-            service: dto,
-            deploy_key,
-            registry,
-            hook_url,
-            platforms,
-            workflow_yaml: workflow::TEMPLATE.to_string(),
-            setup_commands,
-        }),
-    ))
+    Ok(crate::respond::no_store_created(CreateServiceResp {
+        service: dto,
+        deploy_key,
+        registry,
+        hook_url,
+        platforms,
+        workflow_yaml: workflow::TEMPLATE.to_string(),
+        setup_commands,
+    }))
 }
 
 /// insert_attempt の失敗は 2 種:subdomain の UNIQUE 違反(呼び出し側でリトライ)と
@@ -747,7 +744,9 @@ async fn insert_attempt(
     };
 
     let mut tx = db.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 42)")
+    // anon_seq 採番の直列化。ロック鍵は kind ごとに別(database=42/cache=43/volume=44/service=45)=
+    // 跨 kind 並行 create を無駄に直列化しない(perf review P6)。
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 45)")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;

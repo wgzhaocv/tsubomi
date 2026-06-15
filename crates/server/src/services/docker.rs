@@ -51,11 +51,24 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
         .from_image(&repo)
         .tag(image_digest)
         .build();
-    let mut stream = state.docker.create_image(Some(opts), None, None);
-    while let Some(item) = stream.next().await {
-        item.map_err(|e| {
-            AppError::Other(anyhow!("イメージ pull に失敗({repo}@{image_digest}): {e}"))
-        })?;
+    // 全体に硬いタイムアウトを被せる:registry が固まると pull は無限に待ち得る。reconcile から
+    // 呼ばれた場合に 1 件の hang が後背の収束ループ全体を凍らせる穴を塞ぐ(perf review P4)。
+    let drain = async {
+        let mut stream = state.docker.create_image(Some(opts), None, None);
+        while let Some(item) = stream.next().await {
+            item.map_err(|e| {
+                AppError::Other(anyhow!("イメージ pull に失敗({repo}@{image_digest}): {e}"))
+            })?;
+        }
+        Ok::<(), AppError>(())
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(180), drain).await {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(AppError::Other(anyhow!(
+                "イメージ pull がタイムアウトしました(180s。{repo}@{image_digest})"
+            )));
+        }
     }
     Ok(format!("{repo}@{image_digest}"))
 }
