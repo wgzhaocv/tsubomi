@@ -177,8 +177,10 @@ cache → env_var(既定 REDIS_URL)= redis://<acl_user>:<password>@<内部入口
   設定する(ioredis/node-redis/go-redis 等が対応、1 行)。ACL が `~<ns>:*` で兜底するので、前缀を
   付けないアクセスは NOPERM = fail-safe。
   - **prefix env の命名(確定)**:既定注入は `REDIS_URL` + `REDIS_KEY_PREFIX` の 2 本。`--as <ENV>` で
-    URL の env_var を変えた場合、prefix は `<ENV>_KEY_PREFIX`(例 `--as CACHE_URL` → `CACHE_KEY_PREFIX`)。
-    値は常に `<namespace>:`。
+    URL の env_var を変えた場合、prefix は `<ENV>_KEY_PREFIX`(例 `--as CACHE_URL` → `CACHE_KEY_PREFIX`。
+    末尾 `_URL` を `_KEY_PREFIX` に置換、無ければ付加)。値は常に `<namespace>:`。
+    - 派生 prefix 名は**予約 / 去重しない**:静的 env や他注入と同名になれば deploy 時に後勝ち(利用者の
+      設定ミス。ACL `~ns:*` が安全境界なので機能影響のみ・情報漏れではない)。通常の `REDIS_URL` 既定では衝突しない。
 - 失効(注入元が soft 削除済み)→ 空に解決(database / volume と同じ。第 4 層 §5)。
 - 値は**コンテナ起動の瞬間に解決**(rotate / inject 後は再デプロイで効く — 決定 #5)。
 
@@ -217,16 +219,16 @@ ACL SETUSER <acl_user> on >password         # ★ パスワード追加は単一
   既知挙動)。つまり他テナントの **key 名 / 総数が列挙され得る**(値は依然 NOPERM)。完了判定の
   「越境 NOPERM」は**値アクセスには成立、key 名の列挙には成立しない**。内部ツール・key 名は機密扱い
   しない前提で**受容し明記**(§11-I)。SCAN を塞ぐと自分の key も SCAN できず実用性を損なうので塞がない。
-- **⚠ pub/sub introspection も同類の疑い(§11-I・要実測)**:`&<ns>:*` は **channel への publish / subscribe(値)**を
-  隔離するが、`PUBSUB CHANNELS *` / `PUBSUB NUMSUB` は channel パターンを引数に取らない introspection なので、
-  SCAN と同様に **他 ns の活性 channel 名が列挙され得る**疑いがある(redis/valkey の挙動はバージョン差あり)。
-  **valkey 8 で実測して確定**(S2 e2e)。出るなら §11-I の受容済みギャップに channel 名も含める(値/メッセージは
-  依然 `&<ns>:*` で NOPERM)。実用性に響かなければ `-PUBSUB`(introspection のみ)で塞ぐ選択も可。
+- **⚠ pub/sub introspection も同類のギャップ(§11-I・S2 で実測確認)**:`&<ns>:*` は **channel への
+  publish / subscribe(値・メッセージ)**を隔離する(`SUBSCRIBE otherns:*` → **NOPERM** 確認済み)が、
+  `PUBSUB CHANNELS *` / `PUBSUB NUMSUB` は channel パターンを引数に取らない introspection なので
+  **他 ns の活性 channel 名が列挙され得る**(valkey 8 で実測確認 — SCAN の key 名列挙と同類)。値/メッセージは
+  依然 NOPERM なので受容(§11-I)。`-PUBSUB` で塞ぐと自分の channel も列挙できず実用性を損なうので塞がない。
 - **e2e 完了判定**:inject した service のコンテナで `redis-cli -u $REDIS_URL`:
   - `SET <prefix>foo 1` → OK / `GET <prefix>foo` → 1
   - `GET otherns:bar`(**値**)→ **NOPERM** / `FLUSHALL` → **NOPERM** / `KEYS *` → **NOPERM**
   - (`SCAN` は許可され key 名は見える = §11-I の受容済みギャップ)
-  - **`PUBSUB CHANNELS *` を試し、他 ns の channel 名が出るか確定**(ACL-1)。挙動に応じて §11-I を更新する
+  - `PUBSUB CHANNELS *`(他 ns の channel **名**は見える = §11-I 受容済み)/ `SUBSCRIBE otherns:*` → **NOPERM**(ACL-1 確認済み)
 
 ---
 
@@ -334,7 +336,7 @@ tbm inject <cache> --into <svc> [--as REDIS_URL]   # 既存 inject に cache 種
 | **F** | **cache データは備份しない / per-namespace メモリは「key 数」で代用** | cache は易失（消えても再生成される前提）。valkey に per-namespace の正確メモリ API は無い | valkey BGSAVE の RDB を日次備份に / `MEMORY USAGE` をキー走査で集計(O(n)・高コスト) |
 | **G** | **per-cache ACL 永続化は平台の収束に委ねる(`ACL SETUSER` は揮発)。収束は起動時 **+ 周期(30s)**の両方。周期収束は毎 tick で fresh に生存 cache を読んでから SETUSER(RACE-1)** | cache_details が真実源 = 背骨。**周期収束は必須**:valkey 単独再起動(ACL 全消失・平台は無再起動)を起動時収束だけでは直せない穴を塞ぐ。再接続窓は tick 幅+クライアント再試行で吸収。**fresh スナップショット**で delete↔tick の競態(削除直後ユーザの一瞬復活)を防ぐ(§7.3) | 起動時のみ(valkey 単独再起動で ACL が永遠に欠落)/ aclfile + `ACL SAVE`(per-cache も valkey 側に二重真実源)/ 古いスナップショットで収束(delete と競態) |
 | **H** | **依存 = `redis` crate** | 成熟・tokio 対応・ACL 発行と e2e 検証に十分 | `fred`(高機能だが M5 には過剰) |
-| **I** | **key の「値」隔離は ACL `~ns:*` で硬いが、`SCAN`/`RANDOMKEY`/`DBSIZE`(+ 要実測の `PUBSUB CHANNELS/NUMSUB`)による他テナントの key 名/channel 名/総数の列挙は防げない — これを受容し明記** | これらは key/channel パターンを引数に取らず ACL のパターンで出力がフィルタされない(redis/valkey の既知挙動)。値・メッセージは依然 NOPERM。内部ツールで key/channel 名は機密扱いしない。**PUBSUB は valkey 8 で実測して確定**(ACL-1・§6) | `-SCAN -RANDOMKEY -DBSIZE`(+ 必要なら `-PUBSUB`)も禁止(自分の key も SCAN 不可で実用性を損なう)/ cache 毎に別 valkey 実例(重い) |
+| **I** | **key の「値」隔離は ACL `~ns:*` で硬いが、`SCAN`/`RANDOMKEY`/`DBSIZE` + `PUBSUB CHANNELS/NUMSUB` による他テナントの key 名/channel 名/総数の列挙は防げない — これを受容し明記** | これらは key/channel パターンを引数に取らず ACL のパターンで出力がフィルタされない(redis/valkey の既知挙動)。値・メッセージは依然 NOPERM。内部ツールで key/channel 名は機密扱いしない。**PUBSUB の channel 名列挙は valkey 8 で実測確認(SUBSCRIBE 値路径は NOPERM)**(ACL-1・§6) | `-SCAN -RANDOMKEY -DBSIZE`(+ 必要なら `-PUBSUB`)も禁止(自分の key も SCAN 不可で実用性を損なう)/ cache 毎に別 valkey 実例(重い) |
 | **J** | **valkey の `default` ユーザは off、平台専用 `tsubomi-admin`(強乱数・aclfile)だけが管理権** | valkey は edge 上で不可信コンテナから到達可能。`default` を残すと admin 入口を晒す。専用 admin + default off で攻撃面を絞る(per-cache は `-@admin` 済み) | `default` に requirepass のまま(admin 入口が edge に晒される)/ valkey を edge に載せない(注入の内部入口が成立しない) |
 
 ---
@@ -346,7 +348,7 @@ tbm inject <cache> --into <svc> [--as REDIS_URL]   # 既存 inject に cache 種
 - [ ] `tbm inject x --into <svc>` + 再デプロイ → コンテナ内 `$REDIS_URL` で自分の `<prefix>key` を読み書きできる(S2)
 - [ ] **越境(値)/ 危険コマンドが NOPERM**:`GET otherns:*` / `FLUSHALL` / `KEYS *` が弾かれる(S2・完了判定の核)。
       ※ `SCAN` による他 ns の key 名列挙は**受容済みギャップ**(§11-I)で、ここでは弾かれなくてよい
-- [ ] `PUBSUB CHANNELS *` の挙動を実測し §11-I を確定(ACL-1・S2)
+- [x] `PUBSUB CHANNELS *` 実測済み(ACL-1):他 ns の channel 名は列挙され得る(§11-I 受容)、SUBSCRIBE 値路径は NOPERM
 - [ ] `tbm cache rotate x` で旧文字列が即死、再デプロイで新文字列が効く(S3)
 - [ ] `tbm cache delete x` → ゴミ箱 → restore で凭据 + 生き残った key が復活(データは best-effort・**生存 key 数を報告** §11-D/TRASH-1)、
       purge(3d)で実体削除(S3・§7.2)

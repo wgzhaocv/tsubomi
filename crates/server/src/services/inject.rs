@@ -72,12 +72,56 @@ pub async fn resolve(
                     env.push((env_var, mount));
                 }
             }
-            // cache(REDIS_URL)は M5。未知 kind は無視。
+            "cache" => {
+                // 内部入口の ACL ユーザ接続文字列 + key 前缀。失効(None)はスキップ。
+                if let Some((acl_user, namespace, pass_enc)) =
+                    fetch_cache_creds(state, resource_id).await?
+                {
+                    let pass = state.crypto.decrypt(&pass_enc)?;
+                    let cfg = &state.config;
+                    let url = format!(
+                        "redis://{acl_user}:{pass}@{}:{}",
+                        cfg.cache_internal_host, cfg.cache_internal_port
+                    );
+                    // REDIS_KEY_PREFIX も注入する(§11-C):app はクライアントの keyPrefix にこれを設定。
+                    // ACL が `~<ns>:*` で兜底するので、前缀無しアクセスは NOPERM = fail-safe。
+                    // 名前は env_var の `_URL` を `_KEY_PREFIX` に置換(無ければ付加)。値は常に `<ns>:`。
+                    let prefix_env = key_prefix_env(&env_var);
+                    env.push((env_var, url));
+                    env.push((prefix_env, format!("{namespace}:")));
+                }
+            }
+            // 未知 kind は無視。
             _ => {}
         }
     }
 
     Ok((env, binds))
+}
+
+/// REDIS_URL の env 名から REDIS_KEY_PREFIX の env 名を導く:末尾 `_URL` を `_KEY_PREFIX` に
+/// 置換、無ければ `_KEY_PREFIX` を付加(REDIS_URL→REDIS_KEY_PREFIX / CACHE_URL→CACHE_KEY_PREFIX。§5)。
+fn key_prefix_env(env_var: &str) -> String {
+    let base = env_var.strip_suffix("_URL").unwrap_or(env_var);
+    format!("{base}_KEY_PREFIX")
+}
+
+/// 注入元 cache の (acl_user, namespace, password_enc) を引く。
+/// 削除済み(失効)/ cache でない → None。所有権は注入作成時に検証済みなので resource_id で引く。
+async fn fetch_cache_creds(
+    state: &AppState,
+    resource_id: Uuid,
+) -> AppResult<Option<(String, String, Vec<u8>)>> {
+    let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT d.acl_user, d.namespace, d.password_enc
+           FROM resources r
+           JOIN cache_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.kind = 'cache' AND r.deleted_at IS NULL",
+    )
+    .bind(resource_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row)
 }
 
 /// 注入元 database の app role を引く(pg_dbname, pg_role, password_enc)。

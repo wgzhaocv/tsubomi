@@ -9,15 +9,16 @@ use crate::commands::{
 use crate::config;
 
 /// `tbm inject <resource> --into <service> [--as ENV] [--mount /path]`。
-/// database / volume を service に注入(バインディングを保存。値は起動の瞬間に解決)。
+/// database / volume / cache を service に注入(バインディングを保存。値は起動の瞬間に解決)。
 #[derive(Args)]
 pub struct InjectArgs {
-    /// 注入するリソースの表示名(database / volume)
+    /// 注入するリソースの表示名(database / volume / cache)
     pub resource: String,
     /// 注入先サービスの表示名
     #[arg(long)]
     pub into: String,
-    /// env 変数名(既定:database=DATABASE_URL / volume=STORAGE_PATH)
+    /// env 変数名(既定:database=DATABASE_URL / volume=STORAGE_PATH / cache=REDIS_URL。
+    /// cache は加えて REDIS_KEY_PREFIX(--as 指定時は <ENV>_KEY_PREFIX)も注入される)
     #[arg(long = "as")]
     pub env_as: Option<String>,
     /// volume のコンテナ内マウント先(既定 /data/<名前>)
@@ -84,19 +85,20 @@ pub async fn run_eject(
     Ok(())
 }
 
-/// リソース表示名 → id(database + volume を横断検索)。両方ヒットは曖昧エラー。
+/// リソース表示名 → id(database + volume + cache を横断検索)。複数種別ヒットは曖昧エラー。
 async fn resolve_resource(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
     name: &str,
 ) -> Result<String> {
-    // database / volume 一覧は独立なので並行取得する。
-    let (dbs, vols) = tokio::join!(
+    // database / volume / cache 一覧は独立なので並行取得する。
+    let (dbs, vols, caches) = tokio::join!(
         api::db_list(c, server_url, token),
         api::volume_list(c, server_url, token),
+        api::cache_list(c, server_url, token),
     );
-    let (dbs, vols) = (dbs?, vols?);
+    let (dbs, vols, caches) = (dbs?, vols?, caches?);
     let mut hits: Vec<String> = Vec::new();
     for d in &dbs {
         if d.display_name == name {
@@ -108,15 +110,20 @@ async fn resolve_resource(
             hits.push(v.id.to_string());
         }
     }
+    for ca in &caches {
+        if ca.display_name == name {
+            hits.push(ca.id.to_string());
+        }
+    }
     match hits.len() {
         1 => Ok(hits.remove(0)),
         0 => Err(api::ApiError {
             code: "not_found",
-            message: format!("リソース '{name}' が見つかりません(database / volume)"),
+            message: format!("リソース '{name}' が見つかりません(database / volume / cache)"),
         }
         .into()),
         _ => bail!(
-            "'{name}' が database と volume の両方にあります。一方を改名してから注入してください"
+            "'{name}' が複数の種別(database / volume / cache)に存在します。一方を改名してから注入してください"
         ),
     }
 }

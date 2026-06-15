@@ -438,10 +438,10 @@ pub async fn create_injection(
 ) -> AppResult<(StatusCode, Json<InjectionDto>)> {
     ensure_owned(&state, auth.user_id, id).await?;
 
-    // 注入元は本人の database / volume(未削除)。kind と表示名を取る。
+    // 注入元は本人の database / volume / cache(未削除)。kind と表示名を取る。
     let resource: Option<(String, String)> = sqlx::query_as(
         "SELECT kind, display_name FROM resources
-          WHERE id=$1 AND user_id=$2 AND kind IN ('database','volume') AND deleted_at IS NULL",
+          WHERE id=$1 AND user_id=$2 AND kind IN ('database','volume','cache') AND deleted_at IS NULL",
     )
     .bind(req.resource_id)
     .bind(auth.user_id)
@@ -450,14 +450,17 @@ pub async fn create_injection(
     let (kind, name) = resource.ok_or(AppError::NotFound)?;
 
     // env_var / mount_path の既定を kind で決める。
-    let (env_var, mount_path) = if kind == "database" {
-        (req.env_var.unwrap_or_else(|| "DATABASE_URL".into()), None)
-    } else {
-        // volume
-        let ev = req.env_var.unwrap_or_else(|| "STORAGE_PATH".into());
-        let mp = req.mount_path.unwrap_or_else(|| format!("/data/{name}"));
-        validate_mount_path(&mp)?;
-        (ev, Some(mp))
+    let (env_var, mount_path) = match kind.as_str() {
+        "database" => (req.env_var.unwrap_or_else(|| "DATABASE_URL".into()), None),
+        // cache は REDIS_URL(既定)。REDIS_KEY_PREFIX は inject.rs が env_var から導出する(§5)。
+        "cache" => (req.env_var.unwrap_or_else(|| "REDIS_URL".into()), None),
+        _ => {
+            // volume
+            let ev = req.env_var.unwrap_or_else(|| "STORAGE_PATH".into());
+            let mp = req.mount_path.unwrap_or_else(|| format!("/data/{name}"));
+            validate_mount_path(&mp)?;
+            (ev, Some(mp))
+        }
     };
     validate_env_key(&env_var)?;
 

@@ -62,9 +62,12 @@ pub struct Config {
 
     // ===== M5 cache(valkey)=====
     /// valkey の admin 接続(per-cache ACL の発行 / 収束用)。`tsubomi-admin` ユーザで繋ぐ
-    /// (default は off。§11-J)。例:redis://tsubomi-admin:..@127.0.0.1:6379。dev は loopback。
-    /// 注入の内部入口(cache_internal_host/port)は S2 で足す。
+    /// (default は off。§11-J)。例:redis://tsubomi-admin:..@127.0.0.1:6433。dev は loopback。
     pub valkey_admin_url: String,
+    /// service へ注入する **内部**入口(コンテナが docker DNS で引く valkey)。外部入口は無い
+    /// (§11-B:cache は内部注入のみ)。pgbouncer と同型でコンテナは社外に出ない。REDIS_URL に載る。
+    pub cache_internal_host: String,
+    pub cache_internal_port: u16,
 
     // ===== M3 service =====
     /// service の subdomain のルートドメイン。ルーティングは `<subdomain>.<domain>`。
@@ -249,6 +252,13 @@ impl Config {
         // ローカル redis に取られがちなので衝突回避)。prod は env で実値に上書き。
         let valkey_admin_url = std::env::var("TSUBOMI_VALKEY_ADMIN_URL")
             .unwrap_or_else(|_| "redis://tsubomi-admin:tsubomi_valkey_dev@127.0.0.1:6433".to_string());
+        // 注入する内部入口(コンテナ → edge 上の valkey を docker DNS で。外部入口は無い §11-B)。
+        let cache_internal_host = std::env::var("TSUBOMI_CACHE_INTERNAL_HOST")
+            .unwrap_or_else(|_| "tsubomi-valkey".to_string());
+        let cache_internal_port: u16 = std::env::var("TSUBOMI_CACHE_INTERNAL_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(6379);
 
         let volumes_dir = std::env::var("TSUBOMI_VOLUMES_DIR")
             .map(PathBuf::from)
@@ -340,6 +350,8 @@ impl Config {
             db_internal_host,
             db_internal_port,
             valkey_admin_url,
+            cache_internal_host,
+            cache_internal_port,
             master_key,
             backup_dir,
             trash_dir,
