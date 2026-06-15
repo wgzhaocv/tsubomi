@@ -22,10 +22,14 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(3600);
 const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// バックアップ保持日数。
 const BACKUP_RETAIN_DAYS: i64 = 7;
+/// registry の未参照 blob 回収(GC)の間隔。backup と同じ日次だが別タスクにする
+/// (関心事が無関係 + 遅い backup に GC が引きずられないように)。
+const REGISTRY_GC_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
 pub fn spawn(state: AppState) {
     spawn_housekeeping(state.clone());
-    spawn_backup(state);
+    spawn_backup(state.clone());
+    spawn_registry_gc(state);
 }
 
 /// 1 時間毎:期限切れの認証行を掃除し、ゴミ箱の期限到来を物理削除する。
@@ -240,6 +244,21 @@ fn spawn_backup(state: AppState) {
             tick.tick().await;
             if let Err(e) = run_backup(&state).await {
                 tracing::warn!(error = ?e, "gc: backup run failed");
+            }
+        }
+    });
+}
+
+/// 日次:registry の未参照 blob を回収する(削除済み service の旧イメージ / 上書きで孤立した版)。
+/// backup とは独立したタスク。並行 push との競合を避けるため 1h ではなく日次。最初の回収は
+/// 起動直後(interval の 0 tick)。best-effort:失敗は log のみ。
+fn spawn_registry_gc(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(REGISTRY_GC_INTERVAL);
+        loop {
+            tick.tick().await;
+            if let Err(e) = crate::services::registry::garbage_collect(&state).await {
+                tracing::warn!(error = ?e, "gc: registry garbage-collect failed");
             }
         }
     });

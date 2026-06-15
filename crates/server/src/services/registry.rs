@@ -13,6 +13,8 @@
 //! 検証する(dev の registry は認証なし)。本モジュールはアカウントの永続化と creds
 //! 返却までを担う。
 
+use anyhow::{Context, anyhow};
+
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use tsubomi_shared::{RegistryCreds, random_b64};
@@ -20,6 +22,11 @@ use uuid::Uuid;
 
 /// registry password の乱数バイト数(base64url で ≈32 字)。
 const PASSWORD_BYTES: usize = 24;
+
+/// registry コンテナ名。dev / prod とも compose の `container_name` で `tsubomi-registry` に固定。
+/// GC コマンド(下記 [`garbage_collect`])と config パスは stock の `registry:2` イメージ前提 ——
+/// 三者まとめて「固定された配備形」として const に置く(片方だけ env 可変にしない)。
+const REGISTRY_CONTAINER: &str = "tsubomi-registry";
 
 /// ユーザの registry アカウントを取得、無ければ作る(冪等)。返すのは host を含む
 /// 完全な creds(password は平文)。同時 create にも強い:`ON CONFLICT DO NOTHING`
@@ -141,6 +148,167 @@ fn render(push_host: &str, users: &[String], tls: bool) -> String {
     s.push_str("        servers:\n");
     s.push_str("          - url: \"http://tsubomi-registry:5000\"\n");
     s
+}
+
+// ===== 永久削除時の repo 掃除 + 日次の未参照 blob 回収 =====
+
+/// service の永久削除(purge)時に呼ぶ:registry から `<service_id>` repo の全 manifest を
+/// 削除する。各 deploy は一意 tag(git_sha。git 無しは `local`)で push されるので、tag を
+/// 列挙してそれぞれ digest を引き、manifest を DELETE する。manifest が消えると layer blob は
+/// 無参照になり、日次の [`garbage_collect`] が実体を回収する(`REGISTRY_STORAGE_DELETE_ENABLED=true`)。
+///
+/// purge は rollback 対象ごと消える操作なので、活きた service の旧版を誤って消す心配はない
+/// (削除済み service の repo まるごとが対象)。repo が既に無い(404)なら冪等に `Ok`。
+/// loopback の pull registry(`registry_pull`、無認証)へ `state.http` で直結する。
+pub async fn delete_repo(state: &AppState, service_id: Uuid) -> AppResult<()> {
+    let base = format!("http://{}/v2/{}", state.config.registry_pull, service_id);
+
+    // buildx は multi-arch で OCI image index を push し得る。schema2 / OCI の両系統を Accept
+    // して、tagged な頂点 manifest(index か単一 manifest)の digest を引く。
+    const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json, \
+         application/vnd.docker.distribution.manifest.list.v2+json, \
+         application/vnd.oci.image.manifest.v1+json, \
+         application/vnd.oci.image.index.v1+json";
+
+    // 1) tag 一覧。404 = repo が無い(既に綺麗)= 冪等に成功扱い。
+    let resp = state
+        .http
+        .get(format!("{base}/tags/list"))
+        .send()
+        .await
+        .context("registry tags/list 取得に失敗")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    if !resp.status().is_success() {
+        return Err(AppError::Other(anyhow!(
+            "registry tags/list が {} を返しました",
+            resp.status()
+        )));
+    }
+    #[derive(serde::Deserialize)]
+    struct TagsList {
+        tags: Option<Vec<String>>,
+    }
+    let tags = resp
+        .json::<TagsList>()
+        .await
+        .context("registry tags/list の解析に失敗")?
+        .tags
+        .unwrap_or_default();
+
+    // 2) tag ごとに digest を引いて manifest を DELETE(同一 digest を指す tag が複数でも、
+    //    2 回目は 404 = 冪等に許容)。
+    for tag in tags {
+        let head = state
+            .http
+            .get(format!("{base}/manifests/{tag}"))
+            .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
+            .send()
+            .await
+            .context("registry manifest 取得に失敗")?;
+        if head.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        let Some(digest) = head
+            .headers()
+            .get("Docker-Content-Digest")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+        else {
+            tracing::warn!(%service_id, tag, "registry: Docker-Content-Digest 無し — manifest を削除できない");
+            continue;
+        };
+        let del = state
+            .http
+            .delete(format!("{base}/manifests/{digest}"))
+            .send()
+            .await
+            .context("registry manifest 削除に失敗")?;
+        // 202 Accepted = 受理。404 = 既に消えている(冪等)。それ以外は失敗。
+        if !del.status().is_success() && del.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(AppError::Other(anyhow!(
+                "registry manifest DELETE が {} を返しました",
+                del.status()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// 日次:registry の未参照 blob を回収する(`registry garbage-collect`)。manifest が消えた後
+/// (service purge / `local` tag の上書き)の layer 実体を解放する。storage は volume 内で
+/// サーバから直接見えないため、registry コンテナ内で docker exec して実行する。
+///
+/// `--delete-untagged` で tag の無い manifest も併せて削除する(multi-arch index を消した後に
+/// 残る子 manifest や、上書きで孤立した版を回収)。
+///
+/// **並行 push と競合し得る**(GC 実行中に upload 中の blob が消され得る)。read-only に切らない
+/// 簡易運用なので、衝突確率を下げるため 1h tick ではなく**日次**に置く(まれな失敗は push 側の
+/// リトライで回復)。best-effort:失敗は呼び出し側(gc.rs)で log する。
+pub async fn garbage_collect(state: &AppState) -> AppResult<()> {
+    use bollard::exec::{CreateExecOptions, StartExecResults};
+    use futures_util::StreamExt;
+
+    let created = state
+        .docker
+        .create_exec(
+            REGISTRY_CONTAINER,
+            CreateExecOptions {
+                cmd: Some(vec![
+                    "registry",
+                    "garbage-collect",
+                    "--delete-untagged=true",
+                    "/etc/docker/registry/config.yml",
+                ]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .context("registry GC の exec 作成に失敗")?;
+
+    // 出力はドレインしないと exec が滞留する。ただし garbage-collect は走査した blob を全部
+    // 吐くので無制限に溜めない:エラー文 / debug log に使う末尾だけ残せばよいので上限で打ち切る
+    // (打ち切り後もストリームは読み続ける)。
+    const MAX_LOG: usize = 8 * 1024;
+    let mut log = String::new();
+    if let StartExecResults::Attached { mut output, .. } = state
+        .docker
+        .start_exec(&created.id, None)
+        .await
+        .context("registry GC の exec 起動に失敗")?
+    {
+        while let Some(Ok(chunk)) = output.next().await {
+            if log.len() < MAX_LOG {
+                log.push_str(&String::from_utf8_lossy(&chunk.into_bytes()));
+            }
+        }
+    }
+
+    // exit code を確認。inspect 失敗 / exit_code 未確定(None)は「成功と確認できなかった」=
+    // エラー扱いにする(呼び出し側が warn ログ。best-effort なので次の日次 tick で再走)。
+    // ここを成功に倒すと、GC が実は走っていなくても "完了" と記録され失敗が永久に埋もれる。
+    let inspected = state
+        .docker
+        .inspect_exec(&created.id)
+        .await
+        .context("registry GC の exec 状態取得に失敗")?;
+    match inspected.exit_code {
+        Some(0) => {
+            tracing::debug!(output = %log.trim(), "registry: garbage-collect 完了");
+            Ok(())
+        }
+        Some(code) => Err(AppError::Other(anyhow!(
+            "registry garbage-collect が exit {code} で失敗: {}",
+            log.trim()
+        ))),
+        None => Err(AppError::Other(anyhow!(
+            "registry garbage-collect の exit code を確認できませんでした: {}",
+            log.trim()
+        ))),
+    }
 }
 
 #[cfg(test)]
