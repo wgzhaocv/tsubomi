@@ -10,7 +10,7 @@ export default function ActionCode() {
       <Badge color={C.mint}>確認が必要です</Badge>
       <Text style={heading}>危険な操作の確認コード</Text>
       <Text style={paragraph}>
-        owner 操作の確認コードです。下のコードを画面に入力すると、対象の{" "}
+        管理者操作の確認コードです。下のコードを画面に入力すると、対象の{" "}
         <strong>{"{{kind}}"}</strong> を <strong>{"{{action}}"}</strong> します。
       </Text>
       <Section style={{ textAlign: "center", margin: "8px 0" }}>

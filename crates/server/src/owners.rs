@@ -106,7 +106,7 @@ pub async fn add(
     // その人はそもそもログインできない = roster に永久に効かない脏項が残るだけなので弾く。
     if !crate::auth::google::email_domain_allowed(&email, &state.config.allowed_hds) {
         return Err(AppError::BadRequest(
-            "会社ドメインのメールアドレスのみ owner にできます".into(),
+            "会社ドメインのメールアドレスのみ管理者にできます".into(),
         ));
     }
 
@@ -114,11 +114,11 @@ pub async fn add(
     let mut list = roster_locked(&mut tx).await?;
     ensure_still_owner(&mut tx, auth.user_id).await?;
     if list.iter().any(|e| e == &email) {
-        return Err(AppError::Conflict("既に owner です".into()));
+        return Err(AppError::Conflict("既に管理者です".into()));
     }
     if list.len() >= MAX_OWNERS {
         return Err(AppError::BadRequest(format!(
-            "owner は最大 {MAX_OWNERS} 名です。先に誰かを外してください"
+            "管理者は最大 {MAX_OWNERS} 名です。先に誰かを外してください"
         )));
     }
     list.push(email.clone());
@@ -150,7 +150,7 @@ pub async fn remove(
     let me = actor_email(&state.db, auth.user_id).await;
     if me.as_deref() == Some(email.as_str()) {
         return Err(AppError::BadRequest(
-            "自分自身は owner から外せません(別の owner に依頼してください)".into(),
+            "自分自身は管理者から外せません(別の管理者に依頼してください)".into(),
         ));
     }
 
@@ -162,7 +162,7 @@ pub async fn remove(
     }
     if list.len() <= 1 {
         return Err(AppError::BadRequest(
-            "最後の owner は外せません(最低 1 名必要です)".into(),
+            "最後の管理者は外せません(最低 1 名必要です)".into(),
         ));
     }
     list.retain(|e| e != &email);
@@ -176,9 +176,9 @@ pub async fn remove(
 
     audit_owner(&state, auth.user_id, "owner.remove", &email).await;
     // 通知は commit 後(メールは巻き戻せない)。best-effort。
-    let subject = "[tsubomi] owner 権限が解除されました";
-    let text = "あなたの tsubomi の owner(管理者)権限が解除されました。\n\
-                心当たりがなければ、別の owner にご確認ください。";
+    let subject = "[tsubomi] 管理者権限が解除されました";
+    let text = "あなたの tsubomi の管理者権限が解除されました。\n\
+                心当たりがなければ、別の管理者にご確認ください。";
     let html = mail::render(mail::TPL_OWNER_REMOVE, &[]);
     if let Err(e) = mail::send(&state, std::slice::from_ref(&email), subject, &html, text).await {
         tracing::warn!(error = ?e, %email, "owner 解除通知メールの送信に失敗");

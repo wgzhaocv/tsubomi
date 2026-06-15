@@ -44,11 +44,11 @@ export default function AdminOwners() {
   return (
     <PageContainer>
       <div className="flex flex-col gap-7">
-        <PageMeta title="Owner 管理" />
+        <PageMeta title="管理者管理" />
 
         <header className="flex flex-wrap items-center justify-between gap-4">
           <Title size="large" color="purple">
-            Owner 管理
+            管理者管理
           </Title>
           {canAdd && (
             <Button
@@ -59,7 +59,7 @@ export default function AdminOwners() {
                 setOpen(true);
               }}
             >
-              owner を追加
+              管理者を追加
             </Button>
           )}
         </header>
@@ -67,7 +67,7 @@ export default function AdminOwners() {
         <Divider type="line-brown" />
 
         <p className="text-sm font-medium text-foreground">
-          owner は管理画面の操作(他人の資源の停止 / 削除、共有パスワード、IP 許可リスト)を
+          管理者は管理画面の操作(他人の資源の停止 / 削除、共有パスワード、IP 許可リスト)を
           行えます。<strong>最多 {MAX_OWNERS} 名</strong>・自分自身は外せません(最低 1 名必要)。
           外された人にはメールで通知します。
         </p>
@@ -130,7 +130,7 @@ export default function AdminOwners() {
         {/* owner 追加 */}
         <Modal
           open={open}
-          title="owner を追加"
+          title="管理者を追加"
           typewriter={false}
           onClose={() => setOpen(false)}
           width={460}
@@ -164,7 +164,7 @@ export default function AdminOwners() {
               value={email}
               autoFocus
               onChange={(ev) => setEmail(ev.target.value)}
-              description="まだログインしていない人も追加できます(次回ログイン時に owner になります)。"
+              description="まだログインしていない人も追加できます(次回ログイン時に管理者になります)。"
             />
             {add.error && (
               <p className="text-sm font-semibold text-[#e05a5a]">{add.error.message}</p>
@@ -175,7 +175,7 @@ export default function AdminOwners() {
         {/* 外す確認 */}
         <Modal
           open={removeTarget !== null}
-          title="owner を外す"
+          title="管理者を外す"
           typewriter={false}
           width={460}
           onClose={() => setRemoveTarget(null)}
@@ -201,7 +201,7 @@ export default function AdminOwners() {
           }
         >
           <p className="text-sm font-medium text-foreground">
-            <strong>{removeTarget?.name ?? removeTarget?.email}</strong> を owner から外します。
+            <strong>{removeTarget?.name ?? removeTarget?.email}</strong> を管理者から外します。
             この人は管理画面を操作できなくなり、メールで通知されます(必要なら後でまた追加できます)。
           </p>
           {removeTarget && (

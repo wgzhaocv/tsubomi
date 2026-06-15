@@ -71,7 +71,7 @@ export function Layout({ preview, children }: { preview: string; children: React
           >
             つぼみ — 社内 PaaS プラットフォーム
             <br />
-            このメールに心当たりがない場合は、別の owner にご確認ください。
+            このメールに心当たりがない場合は、別の管理者にご確認ください。
           </Text>
         </Container>
       </Body>

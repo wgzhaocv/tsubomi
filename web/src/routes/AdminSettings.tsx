@@ -45,7 +45,7 @@ export default function AdminSettings() {
         <p className="text-sm font-medium text-foreground">
           共有パスワードを知っている社内ユーザは、管制面(総覧 / 使用量ランキング)を
           <strong> 閲覧専用</strong> で見られます(8 時間有効)。停止 / 削除など操作は
-          owner だけです。<strong>リセットすると既存の閲覧は全て無効</strong> になります。
+          管理者だけです。<strong>リセットすると既存の閲覧は全て無効</strong> になります。
         </p>
 
         {error && (
@@ -67,7 +67,7 @@ export default function AdminSettings() {
                 </span>
               ) : (
                 <span className="text-sm font-semibold text-[#c08a2e]">
-                  未設定(共有パスワードを設定するまで、owner 以外は管制面を見られません)
+                  未設定(共有パスワードを設定するまで、管理者以外は管制面を見られません)
                 </span>
               )}
             </CardContent>

@@ -41,7 +41,7 @@ export default function IpAllowlist() {
           </Title>
           <Divider type="line-brown" />
           <p className="text-sm font-semibold text-[#e05a5a]">
-            この画面は owner だけが利用できます。
+            この画面は管理者だけが利用できます。
           </p>
         </div>
       </PageContainer>

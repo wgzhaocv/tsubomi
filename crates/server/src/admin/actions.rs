@@ -150,7 +150,7 @@ async fn issue_code(
     let to = owner_email(state, actor).await;
     let subject = format!("[tsubomi] 確認コード:{kind} を {action}");
     let body = format!(
-        "owner 操作の確認コードです。\n\n  {code}\n\n\
+        "管理者操作の確認コードです。\n\n  {code}\n\n\
          このコードを画面に入力すると、対象の {kind} を {action} します(有効期限 {CODE_TTL_MINUTES} 分)。\n\
          心当たりがなければ無視してください。"
     );

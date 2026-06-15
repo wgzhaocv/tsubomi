@@ -262,7 +262,7 @@ export default function AdminRanking() {
                 autoFocus
                 inputMode="numeric"
                 onChange={(ev) => setCode(ev.target.value)}
-                description="owner のメールに届いた 6 桁のコードを入力してください(有効期限 10 分)。"
+                description="管理者のメールに届いた 6 桁のコードを入力してください(有効期限 10 分)。"
               />
               {action.error && (
                 <p className="text-sm font-semibold text-[#e05a5a]">{action.error.message}</p>

@@ -58,7 +58,7 @@ pub async fn login(
     }
     // 未設定なら入れようがない。内部ツールなので timing oracle を隠すより親切な誘導を優先。
     let hash = stored_hash(&state.db).await?.ok_or_else(|| {
-        AppError::BadRequest("共有パスワードが未設定です。owner に設定を依頼してください".into())
+        AppError::BadRequest("共有パスワードが未設定です。管理者に設定を依頼してください".into())
     })?;
 
     // 前後空白は設定側でも落とすので、ここでも trim して一致条件を揃える(client の trim は UX)。

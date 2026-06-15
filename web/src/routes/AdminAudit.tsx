@@ -15,7 +15,7 @@ import { type AuditEntry, useAuditLog } from "@/lib/admin";
 // action の前方一致フィルタのプリセット(サーバが LIKE prefix||'%' で絞る)。
 const FILTERS: { key: string; label: string }[] = [
   { key: "", label: "すべて" },
-  { key: "owner.", label: "owner 代理" },
+  { key: "owner.", label: "管理者代理" },
   { key: "service.", label: "サービス" },
   { key: "db.", label: "データベース" },
   { key: "volume.", label: "ボリューム" },
@@ -69,7 +69,7 @@ export default function AdminAudit() {
         <Divider type="line-brown" />
 
         <p className="max-w-2xl text-sm font-medium text-muted-foreground">
-          誰が・いつ・何をしたかの記録(owner の代理操作・作成 / 削除・rotate・ディスク警告 など)。
+          誰が・いつ・何をしたかの記録(管理者の代理操作・作成 / 削除・rotate・ディスク警告 など)。
         </p>
 
         {/* action の前方一致フィルタ。 */}

@@ -176,7 +176,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
               <AdminNavLink
                 to="/admin/owners"
                 icon={Users}
-                label="Owner 管理"
+                label="管理者管理"
                 onNavigate={onNavigate}
               />
               <AdminNavLink
