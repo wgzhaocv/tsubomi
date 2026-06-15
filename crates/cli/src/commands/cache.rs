@@ -8,7 +8,6 @@ use crate::config;
 use tsubomi_shared::CacheDto;
 
 /// `tbm cache <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
-/// url / rotate / status は S3 で足す。
 #[derive(Subcommand)]
 pub enum CacheCmd {
     /// キャッシュを作成
@@ -18,6 +17,21 @@ pub enum CacheCmd {
     },
     /// 一覧
     List,
+    /// 状態(namespace / REDIS_KEY_PREFIX / キー数 / 最終 rotate)
+    Status {
+        /// 対象キャッシュの表示名(`tbm cache list` で確認)
+        name: String,
+    },
+    /// 内部接続文字列(REDIS_URL)を表示(= パスワードそのもの。git に commit しない / 共有しない)
+    Url {
+        /// 対象キャッシュの表示名(`tbm cache list` で確認)
+        name: String,
+    },
+    /// パスワードを再生成(古い接続文字列は即座に失効。反映には再デプロイが必要)
+    Rotate {
+        /// rotate するキャッシュの表示名(`tbm cache list` で確認)
+        name: String,
+    },
     /// 削除(ゴミ箱へ。3 日間は復元可能)
     Delete {
         /// 削除するキャッシュの表示名(`tbm cache list` で確認)
@@ -61,6 +75,48 @@ pub async fn run(
                 for cache in caches {
                     println!("cache{:<3} {}", cache.anon_seq, cache.display_name);
                 }
+            }
+        }
+        CacheCmd::Status { name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let d = api::cache_get(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&d)?;
+            } else {
+                println!("cache{:<3} {}", d.anon_seq, d.display_name);
+                println!("REDIS_KEY_PREFIX: {}:", d.namespace);
+                match d.key_count {
+                    Some(n) => println!("キー数:           {n}(概算)"),
+                    None => println!("キー数:           (取得不能)"),
+                }
+                if let Some(at) = d.rotated_at {
+                    println!("最終 rotate:      {at}");
+                }
+            }
+        }
+        CacheCmd::Url { name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let url = api::cache_url(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "url": url }))?;
+            } else {
+                // 警告は stderr、文字列は stdout(パイプで拾えるように)。内部入口なので
+                // 注入された service コンテナからのみ繋がる(手元からは届かない)。
+                eprintln!("⚠ この文字列はパスワードそのものです。共有・commit しないこと。");
+                eprintln!("  (内部入口のため、注入された service のコンテナからのみ接続できます)");
+                println!("{url}");
+            }
+        }
+        CacheCmd::Rotate { name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let url = api::cache_rotate(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&json!({ "url": url, "rotated": true }))?;
+            } else {
+                eprintln!(
+                    "rotate しました。古い接続文字列は失効しました(反映には再デプロイが必要)。新しい接続文字列:"
+                );
+                println!("{url}");
             }
         }
         CacheCmd::Delete { name } => {

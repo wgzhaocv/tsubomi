@@ -110,6 +110,7 @@ pub async fn restore(
 ) -> AppResult<StatusCode> {
     let (kind, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
 
+    let mut detail = json!({});
     let action = match kind.as_str() {
         "database" => {
             restore_database(&state, id, &trash_meta).await?;
@@ -118,6 +119,14 @@ pub async fn restore(
         "volume" => {
             restore_volume(&state, id, &trash_meta).await?;
             "volume.restore"
+        }
+        "cache" => {
+            // ACL を再作成 + 生存 key 数を報告(TRASH-1。allkeys-lru で温存中の key が evict され
+            // 空かもしれない = データ復元は best-effort・§11-D)。詳細表示の key_count でも見える。
+            let survived = restore_cache(&state, id).await?;
+            tracing::info!(%id, surviving_keys = ?survived, "cache 復元(データは best-effort)");
+            detail = json!({ "surviving_keys": survived });
+            "cache.restore"
         }
         // service は永続実体が無い(コンテナは deploy で再生成)。下の deleted_at=NULL の
         // 共通処理が行を active 化し、`tbm service start` で再起動できる。
@@ -142,8 +151,22 @@ pub async fn restore(
         let _ = std::fs::remove_file(dump_path(&trash_meta, &state.config.trash_dir, id));
     }
 
-    audit(&state.db, Some(auth.user_id), action, id, json!({})).await;
+    audit(&state.db, Some(auth.user_id), action, id, detail).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// cache の復元:detail の password で **同じ acl_user / namespace** の ACL を再作成
+/// (key は valkey に温存されていれば見える)。生存 key 数を返す(報告用・TRASH-1)。
+async fn restore_cache(state: &AppState, id: Uuid) -> AppResult<Option<i64>> {
+    let (acl_user, namespace, enc): (String, String, Vec<u8>) = sqlx::query_as(
+        "SELECT acl_user, namespace, password_enc FROM cache_details WHERE resource_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let pw = state.crypto.decrypt(&enc)?;
+    crate::valkey::set_user(&state.valkey, &acl_user, &namespace, &pw).await?;
+    Ok(crate::valkey::count_keys(&state.valkey, &namespace).await)
 }
 
 /// database の復元:role は残っているので DATABASE を再作成して dump を流し込む。
@@ -285,6 +308,19 @@ pub(crate) async fn purge_resource(
         // db/volume と同じ規律。管理対象外の活きたコンテナを取り残さない)。
         crate::services::docker::stop_remove(state, id).await?;
         crate::services::route::remove(state, id)?;
+    } else if kind == "cache" {
+        // cache の永久削除:ACL ユーザを消し(冪等)、namespace の key を SCAN+UNLINK で
+        // 確実に解放してから行を消す(掃除が失敗したら行を残す = 取り残し防止)。§7.2。
+        let ns: Option<(String,)> =
+            sqlx::query_as("SELECT namespace FROM cache_details WHERE resource_id = $1")
+                .bind(id)
+                .fetch_optional(&state.db)
+                .await?;
+        if let Some((namespace,)) = ns {
+            // acl_user == namespace(§2)なので namespace を DELUSER の対象に使える。
+            crate::valkey::del_user(&state.valkey, &namespace).await?;
+            crate::valkey::purge_namespace(&state.valkey, &namespace).await?;
+        }
     }
 
     sqlx::query("DELETE FROM resources WHERE id = $1")

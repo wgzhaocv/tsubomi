@@ -189,6 +189,24 @@ pub struct RenameCacheReq {
     pub name: String,
 }
 
+/// `GET /api/caches/:id`:単体詳細。一覧(CacheDto)に **namespace と key 数**を足す
+/// (key_prefix = `<namespace>:`。key_count は valkey を SCAN した概算 = §4.2。取得不能は null)。
+/// 接続文字列は秘密なので含まない(`/url` 専用)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheDetailDto {
+    pub id: Uuid,
+    pub display_name: String,
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
+    /// key 前缀のもと。`REDIS_KEY_PREFIX` = `<namespace>:`。
+    pub namespace: String,
+    /// namespace 配下の key 数(SCAN 概算)。取得不能(valkey 不通)は null。
+    #[serde(default)]
+    pub key_count: Option<i64>,
+}
+
 /// `POST /api/databases/:id/query`(web SQL)のリクエスト。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryReq {

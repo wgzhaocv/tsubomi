@@ -12,16 +12,16 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
-use tsubomi_shared::{CacheDto, CreateCacheReq};
+use tsubomi_shared::{CacheDetailDto, CacheDto, ConnectionUrlResp, CreateCacheReq, RenameCacheReq};
 use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
 
-/// `list` / `get_one` の行(id, display_name, anon_seq, created_at, rotated_at)。
+/// `list` の行(id, display_name, anon_seq, created_at, rotated_at)。
 type CacheRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>);
 
 fn row_to_dto((id, display_name, anon_seq, created_at, rotated_at): CacheRow) -> CacheDto {
@@ -37,7 +37,39 @@ fn row_to_dto((id, display_name, anon_seq, created_at, rotated_at): CacheRow) ->
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/caches", get(list).post(create))
-        .route("/caches/{id}", get(get_one).delete(delete))
+        .route("/caches/{id}", get(get_one).patch(rename).delete(delete))
+        .route("/caches/{id}/url", get(url))
+        .route("/caches/{id}/rotate", post(rotate))
+}
+
+/// 内部入口の接続文字列(REDIS_URL)を組み立てる。host は docker DNS の tsubomi-valkey(§11-A)
+/// = 注入経由でコンテナからのみ届く(利用者の手元からは繋がらない・§11-B)。
+fn build_url(state: &AppState, acl_user: &str, password: &str) -> String {
+    let cfg = &state.config;
+    format!(
+        "redis://{acl_user}:{password}@{}:{}",
+        cfg.cache_internal_host, cfg.cache_internal_port
+    )
+}
+
+/// 所有者チェック付きで (acl_user, namespace, password_enc) を引く。url / rotate が共有。
+/// 見つからない / 他ユーザ / 削除済みは 404。
+async fn fetch_creds(
+    db: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+) -> AppResult<(String, String, Vec<u8>)> {
+    let row: Option<(String, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT d.acl_user, d.namespace, d.password_enc
+           FROM resources r
+           JOIN cache_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'cache' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+    row.ok_or(AppError::NotFound)
 }
 
 /// `POST /api/caches`:cache 作成。
@@ -162,14 +194,16 @@ pub async fn list(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Jso
     Ok(Json(rows.into_iter().map(row_to_dto).collect()))
 }
 
-/// `GET /api/caches/:id`:単体。
+/// `GET /api/caches/:id`:単体詳細(namespace + key 数つき)。key 数は valkey の SCAN 概算
+/// (取得不能 = valkey 不通は null。best-effort)。
 pub async fn get_one(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> AppResult<Json<CacheDto>> {
-    let row: Option<CacheRow> = sqlx::query_as(
-        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+) -> AppResult<Json<CacheDetailDto>> {
+    type DetailRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>, String);
+    let row: Option<DetailRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, d.namespace
            FROM resources r
            JOIN cache_details d ON d.resource_id = r.id
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'cache' AND r.deleted_at IS NULL",
@@ -179,8 +213,99 @@ pub async fn get_one(
     .fetch_optional(&state.db)
     .await?;
 
+    let (id, display_name, anon_seq, created_at, rotated_at, namespace) =
+        row.ok_or(AppError::NotFound)?;
+    let key_count = valkey::count_keys(&state.valkey, &namespace).await;
+    Ok(Json(CacheDetailDto {
+        id,
+        display_name,
+        anon_seq,
+        created_at,
+        rotated_at,
+        namespace,
+        key_count,
+    }))
+}
+
+/// `PATCH /api/caches/:id`:表示名のリネーム。display_name だけ更新し、acl_user / namespace /
+/// 接続文字列は一切変えない(リネームは UI 上のラベル変更。databases と同じ)。
+pub async fn rename(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RenameCacheReq>,
+) -> AppResult<Json<CacheDto>> {
+    let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+    let row: Option<CacheRow> = sqlx::query_as(
+        "UPDATE resources r SET display_name = $1
+           FROM cache_details d
+          WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'cache' AND r.deleted_at IS NULL
+            AND d.resource_id = r.id
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at",
+    )
+    .bind(&display_name)
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| map_unique(e, format!("キャッシュ名 '{display_name}' は既に使われています")))?;
+
     let row = row.ok_or(AppError::NotFound)?;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "cache.rename",
+        id,
+        json!({ "display_name": display_name }),
+    )
+    .await;
     Ok(Json(row_to_dto(row)))
+}
+
+/// `GET /api/caches/:id/url`:内部接続文字列(REDIS_URL)。**パスワードそのもの**。
+/// 内部入口(tsubomi-valkey)なので注入された service コンテナからのみ使える(§11-B)。
+pub async fn url(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ConnectionUrlResp>> {
+    let (acl_user, _namespace, enc) = fetch_creds(&state.db, auth.user_id, id).await?;
+    let pw = state.crypto.decrypt(&enc)?;
+    Ok(Json(ConnectionUrlResp {
+        url: build_url(&state, &acl_user, &pw),
+    }))
+}
+
+/// `POST /api/caches/:id/rotate`:パスワードを差し替える(旧接続文字列は即失効)。
+/// `valkey::set_user`(reset → 新パスで再構築)で旧パスを消し新パスを設定 = 既存の key 規則
+/// /コマンド白名単は維持(§7.1)。**再デプロイで新文字列が効く**(値は起動の瞬間に解決)。
+///
+/// 順序は **DB(真実源)を先に更新 → valkey に適用**(背骨:cache_details が期望状態、valkey は
+/// そこへ収束する)。これにより set_user が落ちても reconcile が DB の新パスへ**前向きに**収束する
+/// (旧パスは復活しない)。逆順(valkey 先)だと DB 更新失敗時に reconcile が旧パスへ revert し、
+/// rotate 済みの旧資格が蘇る。
+pub async fn rotate(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<ConnectionUrlResp>> {
+    let (acl_user, namespace, _) = fetch_creds(&state.db, auth.user_id, id).await?;
+    let new_pw = tenant::gen_password();
+    let enc = state.crypto.encrypt(&new_pw)?;
+
+    // 1. DB(真実源)を先に更新。
+    sqlx::query("UPDATE cache_details SET password_enc = $1, rotated_at = now() WHERE resource_id = $2")
+        .bind(enc)
+        .bind(id)
+        .execute(&state.db)
+        .await?;
+    // 2. valkey に新パスを適用(失敗しても周期収束が DB から前向きに貼り直す)。
+    valkey::set_user(&state.valkey, &acl_user, &namespace, &new_pw).await?;
+
+    audit(&state.db, Some(auth.user_id), "cache.rotate", id, json!({})).await;
+    Ok(Json(ConnectionUrlResp {
+        url: build_url(&state, &acl_user, &new_pw),
+    }))
 }
 
 /// `DELETE /api/caches/:id`:ソフト削除(ACL DELUSER → ゴミ箱。key は温存)。

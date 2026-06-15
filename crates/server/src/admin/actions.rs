@@ -94,12 +94,12 @@ async fn resolve_resource(state: &AppState, id: Uuid) -> AppResult<(String, Uuid
         .ok_or(AppError::NotFound)
 }
 
-/// action が kind に妥当か。stop = service のみ(DB/volume に「停止」は無い — §10-G)、
-/// delete = service / database / volume(cache は M5)。
+/// action が kind に妥当か。stop = service のみ(DB/volume/cache に「停止」は無い — §10-G)、
+/// delete = service / database / volume / cache。
 fn validate_action(action: &str, kind: &str) -> AppResult<()> {
     let ok = match action {
         "stop" => kind == "service",
-        "delete" => matches!(kind, "service" | "database" | "volume"),
+        "delete" => matches!(kind, "service" | "database" | "volume" | "cache"),
         _ => false,
     };
     if ok {
@@ -222,6 +222,7 @@ async fn execute(state: &AppState, id: Uuid, action: &str, kind: &str) -> AppRes
         ("delete", "service") => services::soft_delete(state, id).await,
         ("delete", "database") => databases::soft_delete(state, id).await.map(|_| ()),
         ("delete", "volume") => volumes::soft_delete(state, id).await.map(|_| ()),
+        ("delete", "cache") => crate::caches::soft_delete(state, id).await.map(|_| ()),
         // validate_action を通っているのでここには来ない。
         _ => Err(AppError::BadRequest("未対応の操作です".into())),
     }

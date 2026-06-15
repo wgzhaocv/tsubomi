@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Plus, Zap } from "lucide-react";
+import { useNavigate } from "react-router";
 
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
@@ -16,6 +17,7 @@ import { useCaches, useCreateCache } from "@/lib/caches";
 // 詳細ページ(接続文字列の表示 / rotate / 削除)は S3 で足す — S1 は一覧 + 作成まで。
 
 export default function Caches() {
+  const navigate = useNavigate();
   const { data: caches, isPending, error } = useCaches();
   const create = useCreateCache();
 
@@ -26,9 +28,10 @@ export default function Caches() {
     const trimmed = name.trim();
     if (!trimmed || create.isPending) return; // 二重送信を防ぐ(連打 / Enter+クリック)
     create.mutate(trimmed, {
-      onSuccess: () => {
+      onSuccess: (cache) => {
         setOpen(false);
         setName("");
+        navigate(`/caches/${cache.id}`);
       },
     });
   };
@@ -86,7 +89,11 @@ export default function Caches() {
           <ul className="flex flex-col gap-3">
             {caches.map((cache) => (
               <li key={cache.id}>
-                <Card className="flex-row items-center justify-between gap-4 py-4">
+                <Card
+                  interactive
+                  onClick={() => navigate(`/caches/${cache.id}`)}
+                  className="flex-row items-center justify-between gap-4 py-4"
+                >
                   <CardContent className="flex min-w-0 items-center gap-3.5">
                     <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
                       <Zap className="size-5.5" />

@@ -7,6 +7,7 @@ import { CodeBlock } from "@/components/ui/codeblock";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
+import { Stat } from "@/components/ui/stat";
 import {
   useDatabases,
   useDeleteDatabase,
@@ -226,16 +227,6 @@ export default function DatabaseOverview() {
           {del.error && <p className="text-sm font-semibold text-[#e05a5a]">{del.error.message}</p>}
         </div>
       </Modal>
-    </div>
-  );
-}
-
-// 状態グリッドの 1 セル(ラベル + 値)。クリーム面、罫線は親の gap-px が描く。
-function Stat({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1 bg-card px-4 py-3">
-      <dt className="text-xs font-semibold text-muted-foreground">{label}</dt>
-      <dd className="text-sm font-bold text-foreground">{children}</dd>
     </div>
   );
 }

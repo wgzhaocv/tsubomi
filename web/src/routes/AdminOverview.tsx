@@ -7,9 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
 import { Title } from "@/components/ui/title";
-import { type AdminOverviewKind, KIND_LABEL, useAdminOverview } from "@/lib/admin";
+import { type AdminOverviewKind, formatUsageByKind, KIND_LABEL, useAdminOverview } from "@/lib/admin";
 import { RESOURCES } from "@/lib/resources";
-import { formatBytes } from "@/lib/volumes";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + 資源保有ユーザ数。
 // 匿名化(設計 v2 §7):資源の名前・内容は出さない。owner ゲートは <RequireOwner>
@@ -20,11 +19,13 @@ const KIND_ICON: Record<string, LucideIcon> = Object.fromEntries(
   RESOURCES.filter((r) => r.kind).map((r) => [r.kind as string, r.icon]),
 );
 
-// 使用量の単位(種別で意味が違うことを明示)。service=稼働中内存 / db=存储 / volume=占用。
+// 使用量の単位(種別で意味が違うことを明示)。service=稼働中内存 / db=存储 / volume=占用 /
+// cache=キー数(§4.2。正確なメモリは valkey に無いので key 数を代用)。
 const USAGE_LABEL: Record<string, string> = {
   service: "稼働中の内存合計",
   database: "ストレージ合計",
   volume: "占用合計",
+  cache: "キー数合計",
 };
 
 function KindCard({ k }: { k: AdminOverviewKind }) {
@@ -51,7 +52,7 @@ function KindCard({ k }: { k: AdminOverviewKind }) {
             <span className="ml-1 text-sm font-semibold text-muted-foreground">個</span>
           </span>
           <span className="font-mono text-lg font-bold text-[#0b9c93]">
-            {formatBytes(k.total_usage_bytes)}
+            {formatUsageByKind(k.kind, k.total_usage_bytes)}
           </span>
         </div>
       </CardContent>

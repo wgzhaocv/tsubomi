@@ -15,35 +15,45 @@ use serde::Deserialize;
 use tsubomi_shared::{AdminOverviewKind, AdminOverviewResp, AdminResourceRow};
 use uuid::Uuid;
 
-/// overview に並べる種別の固定順(cache は M5 なので出さない)。
-const KINDS: [&str; 3] = ["service", "database", "volume"];
+/// overview に並べる種別の固定順。cache の「使用量」は **key 数**(§4.2。正確なメモリは
+/// valkey に無い)— web は種別で単位表示を分ける(bytes / 個)。
+const KINDS: [&str; 4] = ["service", "database", "volume", "cache"];
 
-/// (resource_id, owner_name, kind, anon_seq, pg_dbname?, host_path?)。
-type RawRow = (Uuid, String, String, i32, Option<String>, Option<String>);
+/// (resource_id, owner_name, kind, anon_seq, pg_dbname?, host_path?, namespace?)。
+type RawRow = (
+    Uuid,
+    String,
+    String,
+    i32,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// 削除されていない全資源を跨ユーザで引き、各々の指標を**並行**に解決する。
-/// pg_dbname / host_path は指標採集にだけ使い、DTO には載せない(匿名化の趣旨)。
+/// pg_dbname / host_path / namespace は指標採集にだけ使い、DTO には載せない(匿名化の趣旨)。
 async fn gather_rows(state: &AppState) -> AppResult<Vec<AdminResourceRow>> {
     let raw: Vec<RawRow> = sqlx::query_as(
         "SELECT r.id, COALESCE(u.name, u.email) AS owner_name, r.kind, r.anon_seq,
-                d.pg_dbname, v.host_path
+                d.pg_dbname, v.host_path, c.namespace
            FROM resources r
            JOIN users u ON u.id = r.user_id
            LEFT JOIN database_details d ON d.resource_id = r.id
            LEFT JOIN volume_details   v ON v.resource_id = r.id
+           LEFT JOIN cache_details    c ON c.resource_id = r.id
           WHERE r.deleted_at IS NULL
-            AND r.kind IN ('service','database','volume')
+            AND r.kind IN ('service','database','volume','cache')
           ORDER BY owner_name, r.kind, r.anon_seq",
     )
     .fetch_all(&state.db)
     .await?;
 
-    // service stats は 1 件 ~1 秒・volume du も I/O 待ち → 並行に集める。
+    // service stats は 1 件 ~1 秒・volume du も I/O 待ち・cache は SCAN → 並行に集める。
     Ok(join_all(raw.into_iter().map(|r| resolve_row(state, r))).await)
 }
 
 async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
-    let (resource_id, owner_name, kind, anon_seq, pg_dbname, host_path) = raw;
+    let (resource_id, owner_name, kind, anon_seq, pg_dbname, host_path, namespace) = raw;
     let anon_label = format!("{kind}{anon_seq}");
     let (usage_bytes, cpu_pct, running) = match kind.as_str() {
         "service" => match docker::stats(state, resource_id).await {
@@ -52,7 +62,12 @@ async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
         },
         "database" => (db_size(state, pg_dbname.as_deref()).await, None, None),
         "volume" => (dir_size_bytes(host_path.as_deref()).await, None, None),
-        _ => (None, None, None), // cache = M5
+        // cache の「使用量」は key 数(§4.2)。usage_bytes に載せ、web が単位を出し分ける。
+        "cache" => match namespace.as_deref() {
+            Some(ns) => (crate::valkey::count_keys(&state.valkey, ns).await, None, None),
+            None => (None, None, None),
+        },
+        _ => (None, None, None),
     };
     AdminResourceRow {
         resource_id,

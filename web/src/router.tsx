@@ -6,6 +6,7 @@ import { RESOURCES } from "@/lib/resources";
 import AdminAudit from "@/routes/AdminAudit";
 import AdminOverview from "@/routes/AdminOverview";
 import AdminRanking from "@/routes/AdminRanking";
+import CacheDetail from "@/routes/CacheDetail";
 import Caches from "@/routes/Caches";
 import CliInstall from "@/routes/CliInstall";
 import DatabaseEditor from "@/routes/DatabaseEditor";
@@ -89,8 +90,10 @@ export const router = createBrowserRouter([
           { path: "files/*", element: <VolumeFileBrowser /> },
         ],
       },
-      // cache は一覧 + 作成を実装(M5 S1)。詳細(接続文字列 / rotate / 削除)は S3 で足す。
+      // cache:一覧 + 作成(M5 S1)+ 詳細(接続文字列 / rotate / 削除。M5 S3)。
+      // 詳細はタブが概要のみなので単一ページ(Layout/Outlet は使わない)。
       { path: "caches", element: <Caches /> },
+      { path: "caches/:id", element: <CacheDetail /> },
       // ゴミ箱は専用ページ(他の未実装リソースは当面 ResourcePage の骨格)。
       { path: "trash", element: <Trash /> },
       // IP 許可リスト(owner 専用のガバナンス画面)。サイドメニューにも owner 限定で出す。

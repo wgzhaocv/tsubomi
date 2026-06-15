@@ -1,6 +1,14 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { RESOURCES } from "@/lib/resources";
+import { formatBytes } from "@/lib/volumes";
+
+// 使用量の表示(種別で単位が違う):cache は key 数(個)、それ以外は bytes 整形(§4.2)。
+// overview(総覧)と ranking で共有する。null は「取得不能」。
+export function formatUsageByKind(kind: string, value: number | null): string {
+  if (value == null) return "—";
+  return kind === "cache" ? `${value} 個` : formatBytes(value);
+}
 
 // owner ガバナンスの管制面(M4 S1)。ipblock.ts と同じ作法:生 fetch + TanStack Query。
 // 匿名化済み(設計 v2 §7):真名は出すが資源は匿名番号、内容は出さない。読み取り専用。

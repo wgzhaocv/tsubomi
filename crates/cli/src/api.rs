@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
-    CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq, CreateInjectionReq,
-    CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto,
-    Health, InjectionDto, ListDirResp, LogsResp, Me, MoveReq, RenameVolumeReq, RollbackReq,
-    ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
+    CacheDetailDto, CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq,
+    CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseDto,
+    DeployConfig, DeployDto, Health, InjectionDto, ListDirResp, LogsResp, Me, MoveReq,
+    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -221,6 +221,55 @@ pub async fn cache_delete(
     )
     .await?;
     Ok(())
+}
+
+pub async fn cache_get(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<CacheDetailDto> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/caches/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse cache detail response")
+}
+
+pub async fn cache_url(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<String> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/caches/{id}/url"))
+            .bearer_auth(token),
+    )
+    .await?;
+    let r: ConnectionUrlResp = resp.json().await.context("failed to parse url response")?;
+    Ok(r.url)
+}
+
+pub async fn cache_rotate(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<String> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/caches/{id}/rotate"))
+            .bearer_auth(token),
+    )
+    .await?;
+    let r: ConnectionUrlResp = resp
+        .json()
+        .await
+        .context("failed to parse rotate response")?;
+    Ok(r.url)
 }
 
 // ============ M2 volume ============

@@ -12,6 +12,23 @@ use crate::state::AppState;
 use crate::tenant;
 use redis::aio::MultiplexedConnection;
 
+/// SCAN を 1 バッチ進める(cursor + `MATCH <pattern>` + COUNT)。count_keys / purge_namespace が
+/// 共有する(コマンド組み立ての重複を避ける)。返り値 = (次 cursor, このバッチの key 群)。
+async fn scan_batch(
+    conn: &mut MultiplexedConnection,
+    cursor: &str,
+    pattern: &str,
+) -> AppResult<(String, Vec<String>)> {
+    Ok(redis::cmd("SCAN")
+        .arg(cursor)
+        .arg("MATCH")
+        .arg(pattern)
+        .arg("COUNT")
+        .arg(256)
+        .query_async(conn)
+        .await?)
+}
+
 /// cache の acl_user(= namespace)を生成する:`c_<shortid>`。同値で両方を兼ねる(§2)。
 pub fn gen_name() -> String {
     format!("c_{}", tenant::short_id())
@@ -68,6 +85,49 @@ pub async fn del_user(client: &redis::Client, acl_user: &str) -> AppResult<()> {
         .arg(acl_user)
         .query_async(&mut conn)
         .await?;
+    Ok(())
+}
+
+/// namespace 配下の key 数を概算する(SCAN で数える。admin 接続)。§4.2:per-namespace の正確な
+/// メモリは valkey に無いので key 数を代用(詳細表示 / restore 報告 / owner ranking が使う)。
+/// 失敗 / valkey 不通は None(best-effort)。admin は `+@all` なので SCAN 可。
+pub async fn count_keys(client: &redis::Client, namespace: &str) -> Option<i64> {
+    let mut conn = client.get_multiplexed_async_connection().await.ok()?;
+    let pattern = format!("{namespace}:*");
+    let mut cursor = "0".to_string();
+    let mut total: i64 = 0;
+    loop {
+        let (next, keys) = scan_batch(&mut conn, &cursor, &pattern).await.ok()?;
+        total += keys.len() as i64;
+        cursor = next;
+        if cursor == "0" {
+            break;
+        }
+    }
+    Some(total)
+}
+
+/// namespace 配下の全 key を削除する(SCAN + UNLINK。purge で確実にメモリ解放。§7.2)。
+/// admin 接続。空でも冪等。
+pub async fn purge_namespace(client: &redis::Client, namespace: &str) -> AppResult<()> {
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let pattern = format!("{namespace}:*");
+    let mut cursor = "0".to_string();
+    loop {
+        let (next, keys) = scan_batch(&mut conn, &cursor, &pattern).await?;
+        if !keys.is_empty() {
+            // UNLINK(非同期解放)。key 群を 1 コマンドに束ねる。
+            let mut unlink = redis::cmd("UNLINK");
+            for k in &keys {
+                unlink.arg(k);
+            }
+            let _: i64 = unlink.query_async(&mut conn).await?;
+        }
+        cursor = next;
+        if cursor == "0" {
+            break;
+        }
+    }
     Ok(())
 }
 

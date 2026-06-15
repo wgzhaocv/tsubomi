@@ -12,11 +12,11 @@ import { Title } from "@/components/ui/title";
 import {
   type AdminAction,
   type AdminResourceRow,
+  formatUsageByKind,
   KIND_LABEL,
   useAdminAction,
   useAdminRanking,
 } from "@/lib/admin";
-import { formatBytes } from "@/lib/volumes";
 
 // 使用量ランキング(owner 専用)。匿名行(真名 + 匿名番号 + 使用量)を降順で。
 // 種別フィルタはセグメント(全て / サービス / DB / ボリューム)= 画面側で絞る
@@ -29,12 +29,13 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "service", label: "サービス" },
   { key: "database", label: "データベース" },
   { key: "volume", label: "ボリューム" },
+  { key: "cache", label: "キャッシュ" },
 ];
 
 const ACTION_LABEL: Record<AdminAction, string> = { stop: "停止", delete: "削除" };
 
 function usageText(row: AdminResourceRow): string {
-  return row.usage_bytes == null ? "—" : formatBytes(row.usage_bytes);
+  return formatUsageByKind(row.kind, row.usage_bytes);
 }
 
 function serviceState(row: AdminResourceRow): string {
