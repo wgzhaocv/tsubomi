@@ -25,7 +25,15 @@ export function Code({ children }: { children: ReactNode }) {
   );
 }
 
-function CommandCard({ title, note, command }: { title: string; note: string; command: string }) {
+function CommandCard({
+  title,
+  note,
+  command,
+}: {
+  title: string;
+  note: string;
+  command: string;
+}) {
   const { copied, copy } = useCopied();
   return (
     <Card className="w-full">
@@ -68,9 +76,9 @@ export function InstallSteps({ className }: { className?: string }) {
       />
 
       <p className="text-center text-xs font-medium text-foreground/70">
-        対応プラットフォーム:macOS(Apple Silicon)/ Linux(x86_64・arm64)/ Windows(x86_64)。更新は{" "}
-        <Code>tbm update</Code>
-        (新版があればコマンド実行後に通知が出ます)。
+        対応プラットフォーム:macOS(Apple Silicon)/ Linux(x86_64・arm64)/
+        Windows(x86_64)。更新は <Code>tbm update</Code>
+        (新しいバージョンがあればコマンド実行後に通知が出ます)。
       </p>
     </div>
   );
