@@ -5,6 +5,7 @@
 //!   1. 存在収束:DB が「走っている」と信じる(phase=running)service にコンテナが無ければ、
 //!      直近成功 deploy の digest で起こし直す(= 正規の deploy 経路。route も書き直される)。
 //!   2. 孤児掃除:DB に生きた行が無い管理コンテナ / route ファイルを消す。
+//!
 //! さらに **起動時のみ一度**:server がデプロイ途中で死んで `phase='deploying'` のまま取り残された
 //! service を収束させる(`recover_interrupted`。詳細は同関数の doc)。
 //!
