@@ -17,6 +17,7 @@ import DatabaseTables from "@/routes/DatabaseTables";
 import Forbidden from "@/routes/Forbidden";
 import IpAllowlist from "@/routes/IpAllowlist";
 import Login from "@/routes/Login";
+import NotFound from "@/routes/NotFound";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
 import ResourcePage from "@/routes/ResourcePage";
@@ -134,4 +135,8 @@ export const router = createBrowserRouter([
 
   // 開発用スタイル画廊(本番では外す想定)
   { path: "/ui", element: <UiGallery /> },
+
+  // どの route にも該当しないパスは 404 ページへ(catch-all)。
+  // 旧 /cli など削除済みパスや打ち間違いを、ブランドを保った 404 で受ける。
+  { path: "*", element: <NotFound /> },
 ]);
