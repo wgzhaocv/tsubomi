@@ -4,8 +4,10 @@ REM Usage:
 REM   curl -fsSL https://<domain>/install.bat -o %TEMP%\tbm-install.bat ^&^& %TEMP%\tbm-install.bat
 REM
 REM Installs to %LOCALAPPDATA%\tbm\bin\tbm.exe and adds that dir to the user PATH
-REM via "reg add" (setx truncates at 1024 chars, so it is avoided). "tbm uninstall"
-REM removes the PATH entry and the directory (no leftovers).
+REM via "reg add" (setx truncates at 1024 chars, so it is avoided). It also checks
+REM the prerequisite tools (git / gh) and installs whatever is missing without admin
+REM (git = MinGit zip, gh = official GitHub release). "tbm uninstall" removes the
+REM PATH entries and everything under %LOCALAPPDATA%\tbm (no leftovers).
 REM __SERVER_URL__ is replaced with the real domain by the server at serve time.
 REM
 REM IMPORTANT: keep this file ASCII-only. cmd.exe parses batch files using the
@@ -153,20 +155,150 @@ if not exist "%CFG_DIR%\config.toml" (
     echo configured server: %TSUBOMI_SERVER_URL%
 )
 
+REM Prerequisite tools (git / gh = GitHub CLI). Required by tbm's GitHub deploy
+REM path. Skip whatever already exists; install the rest with no admin. gh lands
+REM in the same bin dir as tbm (single binary; PATH + uninstall cover it). git
+REM goes to %LOCALAPPDATA%\tbm\git and its \cmd is added to PATH. GIT_CMD is set
+REM when MinGit was just installed, so the caller-PATH injection can add it too.
+echo.
+where git >nul 2>&1
+if errorlevel 1 (
+    echo git not found. Installing MinGit ^(no admin^)...
+    call :install_mingit
+    if defined GIT_OK (
+        echo git ^(MinGit^) installed.
+    ) else (
+        echo warning: failed to auto-install git. Install manually: https://gitforwindows.org/
+    )
+)
+where gh >nul 2>&1
+if errorlevel 1 (
+    echo gh ^(GitHub CLI^) not found. Installing ^(no admin^)...
+    call :install_gh
+    if defined GH_OK (
+        echo gh installed. To connect to GitHub, run: gh auth login
+    ) else (
+        echo warning: failed to auto-install gh. Install manually: https://github.com/cli/cli/releases
+    )
+)
+
 echo.
 echo next: tbm login
 
-REM Inject into the caller shell's PATH. The right-hand side is expanded before
-REM endlocal; after endlocal returns to the parent scope, "set" writes to the parent.
-REM Skip if already on PATH (no duplication on re-run).
-if defined SHELL_HAS_DIR (
+REM Inject into the caller shell's PATH so the tools work in the same window.
+REM bin holds tbm + gh; git\cmd holds MinGit (only if just installed). The
+REM right-hand side is expanded before endlocal; after endlocal it writes the
+REM parent scope. Skip dirs already present (no duplication on re-run).
+set "EXTRA="
+if not defined SHELL_HAS_DIR set "EXTRA=!EXTRA!;%INSTALL_DIR%"
+if defined GIT_CMD (
+    echo ;%PATH%; | findstr /i /c:";!GIT_CMD!;" >nul || set "EXTRA=!EXTRA!;!GIT_CMD!"
+)
+if not defined EXTRA (
     endlocal
     exit /b 0
 )
-endlocal & set "PATH=%PATH%;%LOCALAPPDATA%\tbm\bin"
+endlocal & set "PATH=%PATH%%EXTRA%"
 exit /b 0
 
 :bad_manifest
 echo incomplete manifest from %TSUBOMI_SERVER_URL%
 rmdir /s /q "%TMP_DIR%" >nul 2>&1
 exit /b 1
+
+REM ---- subroutines (reached only via "call"; the main flow exits above) ----
+
+:install_mingit
+REM git (MinGit) -> %LOCALAPPDATA%\tbm\git, add its \cmd to PATH. MinGit is a plain
+REM zip (not a self-extracting exe) so no admin is needed. Version comes from the
+REM releases/latest redirect (no GitHub API rate limit). The tag looks like
+REM "v2.54.0.windows.1": the download URL uses the FULL tag, but the asset name
+REM drops ".windows" -> "MinGit-2.54.0-64-bit.zip". Do not collapse the two (404).
+set "GIT_OK="
+for /f "delims=" %%U in ('curl -fsSLI -o nul -w "%%{url_effective}" "https://github.com/git-for-windows/git/releases/latest" 2^>nul') do set "GIT_TAGURL=%%U"
+set "GIT_TAG=!GIT_TAGURL:*/tag/=!"
+if "!GIT_TAG!"=="!GIT_TAGURL!" exit /b 0
+set "GIT_TAGNOV=!GIT_TAG:~1!"
+for /f "tokens=1,2,3 delims=." %%a in ("!GIT_TAGNOV!") do set "GIT_VER=%%a.%%b.%%c"
+if not defined GIT_VER exit /b 0
+set "GIT_ROOT=%LOCALAPPDATA%\tbm\git"
+set "GIT_TMP=%TEMP%\tbm-git-%RANDOM%%RANDOM%"
+mkdir "!GIT_TMP!" >nul 2>&1
+curl -fsSL "https://github.com/git-for-windows/git/releases/download/!GIT_TAG!/MinGit-!GIT_VER!-64-bit.zip" -o "!GIT_TMP!\mingit.zip"
+if errorlevel 1 (
+    rmdir /s /q "!GIT_TMP!" >nul 2>&1
+    exit /b 0
+)
+if exist "!GIT_ROOT!" rmdir /s /q "!GIT_ROOT!" >nul 2>&1
+mkdir "!GIT_ROOT!" >nul 2>&1
+tar -xf "!GIT_TMP!\mingit.zip" -C "!GIT_ROOT!"
+set "_TAR_ERR=!errorlevel!"
+rmdir /s /q "!GIT_TMP!" >nul 2>&1
+if not "!_TAR_ERR!"=="0" exit /b 0
+if not exist "!GIT_ROOT!\cmd\git.exe" exit /b 0
+call :add_user_path "!GIT_ROOT!\cmd"
+set "GIT_CMD=!GIT_ROOT!\cmd"
+set "GIT_OK=1"
+exit /b 0
+
+:install_gh
+REM gh -> same bin dir as tbm. Official GitHub release zip = no admin. Version from
+REM the releases/latest redirect (no API rate limit).
+set "GH_OK="
+for /f "delims=" %%U in ('curl -fsSLI -o nul -w "%%{url_effective}" "https://github.com/cli/cli/releases/latest" 2^>nul') do set "GH_TAGURL=%%U"
+set "GH_TAG=!GH_TAGURL:*/tag/=!"
+if "!GH_TAG!"=="!GH_TAGURL!" exit /b 0
+set "GH_VER=!GH_TAG:~1!"
+if not defined GH_VER exit /b 0
+set "GH_TMP=%TEMP%\tbm-gh-%RANDOM%%RANDOM%"
+mkdir "!GH_TMP!" >nul 2>&1
+curl -fsSL "https://github.com/cli/cli/releases/download/!GH_TAG!/gh_!GH_VER!_windows_amd64.zip" -o "!GH_TMP!\gh.zip"
+if errorlevel 1 (
+    rmdir /s /q "!GH_TMP!" >nul 2>&1
+    exit /b 0
+)
+tar -xf "!GH_TMP!\gh.zip" -C "!GH_TMP!"
+if errorlevel 1 (
+    rmdir /s /q "!GH_TMP!" >nul 2>&1
+    exit /b 0
+)
+set "GH_FOUND="
+for /r "!GH_TMP!" %%F in (gh.exe) do if not defined GH_FOUND set "GH_FOUND=%%F"
+if not defined GH_FOUND (
+    rmdir /s /q "!GH_TMP!" >nul 2>&1
+    exit /b 0
+)
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+move /y "!GH_FOUND!" "%INSTALL_DIR%\gh.exe" >nul
+set "_MV_ERR=!errorlevel!"
+rmdir /s /q "!GH_TMP!" >nul 2>&1
+if not "!_MV_ERR!"=="0" exit /b 0
+set "GH_OK=1"
+exit /b 0
+
+:add_user_path
+REM %~1 = directory to add to HKCU\Environment Path (idempotent). Mirrors the bin
+REM PATH logic above: write the registry directly (setx truncates at 1024) and fire
+REM WM_SETTINGCHANGE via a throwaway var so new windows pick up the change.
+REM Known limitation (same as the bin block): an existing PATH entry containing a
+REM literal "!" is mangled under delayed expansion. Such dirs are vanishingly rare,
+REM so this matches the existing behavior rather than diverging only here.
+set "_AUP_DIR=%~1"
+set "_AUP_CUR="
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>nul ^| findstr /i "REG_"') do set "_AUP_CUR=%%B"
+set "_AUP_HAS="
+if defined _AUP_CUR (
+    echo ;!_AUP_CUR!; | findstr /i /c:";!_AUP_DIR!;" >nul && set "_AUP_HAS=1"
+)
+if not defined _AUP_HAS (
+    if defined _AUP_CUR (
+        set "_AUP_NEW=!_AUP_CUR!;!_AUP_DIR!"
+    ) else (
+        set "_AUP_NEW=!_AUP_DIR!"
+    )
+    reg add "HKCU\Environment" /v Path /t REG_EXPAND_SZ /d "!_AUP_NEW!" /f >nul
+    setx _TBM_REFRESH 1 >nul 2>&1
+    reg delete "HKCU\Environment" /v _TBM_REFRESH /f >nul 2>&1
+    echo added !_AUP_DIR! to user PATH.
+)
+exit /b 0
