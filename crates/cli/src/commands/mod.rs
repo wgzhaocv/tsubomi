@@ -7,6 +7,7 @@ pub mod inject;
 pub mod login;
 pub mod logout;
 pub mod service;
+pub mod skill;
 pub mod trash;
 pub mod uninstall;
 pub mod update;

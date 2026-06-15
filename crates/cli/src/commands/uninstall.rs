@@ -38,6 +38,10 @@ pub async fn run(_server_override: Option<String>) -> Result<()> {
     #[cfg(windows)]
     remove_from_user_path();
 
+    // 2.5 AI エージェント向け skill(Claude / Codex の全 agent ターゲット)。
+    //     Claude=ディレクトリごと、Codex=管理ブロックのみ除去(共有ファイルを壊さない)。
+    crate::skill::remove();
+
     // 3. バイナリ + インストールディレクトリ
     self_destruct()?;
 

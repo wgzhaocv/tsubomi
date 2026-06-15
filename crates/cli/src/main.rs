@@ -5,6 +5,7 @@ mod api;
 mod commands;
 mod config;
 mod oauth;
+mod skill;
 mod version_check;
 
 /// tbm — tsubomi プラットフォーム CLI。
@@ -87,6 +88,12 @@ enum Cmd {
     Logout,
     /// サーバのヘルスチェック
     Health,
+    /// AI エージェント向けデプロイ skill を管理(全 agent ターゲットへ書き出し / 表示)。
+    /// 普段は毎回の self-heal が自動で最新へ揃えるので、明示実行は強制再書き出し用。
+    Skill {
+        #[command(subcommand)]
+        action: commands::skill::SkillCmd,
+    },
     /// このプラットフォーム向けの最新 tbm バイナリを取得して入れ替える
     Update,
     /// ローカル設定とバイナリ自体を削除(完全アンインストール)
@@ -124,6 +131,17 @@ async fn main() -> Result<()> {
         }
     };
 
+    // skill の self-heal:二進制内嵌の最新 skill をローカルの agent ターゲットへ投影する
+    // (旧 / 欠けのときだけ書く。ネットワーク不要 = 「二進制だけ手動 update、skill はその投影」)。
+    // json でも行う — AI が主な利用者で、書き出しは静かに(nudge は stderr のみ)。
+    // `uninstall`(去る人)/ `skill`(自分で書く)では行わない。書いたら後で nudge を出す。
+    let skill_wrote = if matches!(cli.command, Cmd::Uninstall | Cmd::Skill { .. }) {
+        false
+    } else {
+        skill::ensure_fresh()
+    };
+    let is_deploy = matches!(cli.command, Cmd::Deploy(_));
+
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
@@ -138,6 +156,7 @@ async fn main() -> Result<()> {
         Cmd::Whoami => commands::whoami::run(cli.server, cli.token, out).await,
         Cmd::Logout => commands::logout::run(cli.server, out).await,
         Cmd::Health => commands::health::run(cli.server, out).await,
+        Cmd::Skill { action } => commands::skill::run(action).await,
         Cmd::Update => commands::update::run(cli.server).await,
         Cmd::Uninstall => commands::uninstall::run(cli.server).await,
     };
@@ -146,6 +165,24 @@ async fn main() -> Result<()> {
         let current = env!("CARGO_PKG_VERSION");
         eprintln!(
             "note: tbm {latest} is available (you have {current}). Run 'tbm update' to upgrade."
+        );
+    }
+
+    // skill の案内(stderr のみ。json でも出す — AI が読む)。書き出した直後は「今セッションでは
+    // 未ロード = 直接読め」、それ以外でデプロイ系コマンドなら「手順は skill にある」と指す。
+    if skill_wrote {
+        if let Some(p) = skill::claude_skill_path() {
+            eprintln!(
+                "note: tsubomi のデプロイ skill を {} に書き出しました。今セッションでは未ロードです — デプロイ前にこのファイルを直接読んでください。",
+                p.display()
+            );
+        }
+    } else if is_deploy
+        && let Some(p) = skill::claude_skill_path()
+    {
+        eprintln!(
+            "note: デプロイ手順は skill にあります({})。未読ならまず読んでから進めてください。",
+            p.display()
         );
     }
 
