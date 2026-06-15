@@ -160,6 +160,35 @@ pub struct ConnectionUrlResp {
     pub url: String,
 }
 
+// ============ M5 cache(server ⇄ CLI / web の単一契約)============
+
+/// `GET /api/caches` の各要素 / `POST /api/caches` のレスポンス。
+/// 秘密(接続文字列 / パスワード)は含まない — それは `/url` 専用(database と同じ規律)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheDto {
+    pub id: Uuid,
+    /// ユーザの自由名(改名は接続文字列・namespace に触れない)。
+    pub display_name: String,
+    /// 匿名番号(user+kind 内連番):cache1/2…
+    pub anon_seq: i32,
+    pub created_at: DateTime<Utc>,
+    /// 最後の rotate 時刻。これより前にコピーした接続文字列は失効済み。
+    #[serde(default)]
+    pub rotated_at: Option<DateTime<Utc>>,
+}
+
+/// `POST /api/caches` のリクエストボディ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCacheReq {
+    pub name: String,
+}
+
+/// `PATCH /api/caches/:id`:表示名のリネーム(接続文字列・namespace は不変)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameCacheReq {
+    pub name: String,
+}
+
 /// `POST /api/databases/:id/query`(web SQL)のリクエスト。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryReq {

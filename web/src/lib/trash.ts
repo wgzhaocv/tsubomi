@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { cacheKeys } from "@/lib/caches";
 import { dbKeys } from "@/lib/databases";
 import { volumeKeys } from "@/lib/volumes";
 
@@ -43,6 +44,7 @@ function useTrashMutation(run: (id: string) => Promise<void>) {
         qc.invalidateQueries({ queryKey: trashKeys.all }),
         qc.invalidateQueries({ queryKey: dbKeys.all }),
         qc.invalidateQueries({ queryKey: volumeKeys.all }),
+        qc.invalidateQueries({ queryKey: cacheKeys.all }),
         qc.invalidateQueries({ queryKey: ["resources"] }),
       ]),
   });

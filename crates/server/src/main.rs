@@ -6,6 +6,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod admin;
 mod auth;
+mod caches;
 mod cli_release;
 mod config;
 mod crypto;
@@ -19,6 +20,7 @@ mod services;
 mod state;
 mod tenant;
 mod trash;
+mod valkey;
 mod validate;
 mod volumes;
 
@@ -55,6 +57,9 @@ async fn main() -> anyhow::Result<()> {
     // 起動時に IP 許可リストを traefik へ収束させる(middleware を必ず定義済みにする。
     // best-effort:書けなくてもサーバは起動する)。
     ipblock::sync_traefik(&state).await;
+    // M5 cache:起動時に valkey の per-cache ACL を期望状態へ収束させる(揮発なので。§7.3)。
+    // best-effort:valkey が落ちていても起動する(周期収束が次の tick で復活させる)。
+    valkey::reconcile_acls(&state).await;
     // 本番 TLS:registry の push 入口(basicAuth)と apex router を traefik へ書く
     // (どちらも tls=false の dev では no-op。best-effort)。
     services::registry::sync_traefik(&state).await;

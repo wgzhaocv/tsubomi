@@ -24,6 +24,9 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// valkey(cache)の接続 / ACL 操作の失敗。infra 障害なので 500 群。
+    #[error(transparent)]
+    Redis(#[from] redis::RedisError),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -36,9 +39,12 @@ impl AppError {
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::Sqlx(_) | Self::Reqwest(_) | Self::Json(_) | Self::Io(_) | Self::Other(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::Sqlx(_)
+            | Self::Reqwest(_)
+            | Self::Json(_)
+            | Self::Io(_)
+            | Self::Redis(_)
+            | Self::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

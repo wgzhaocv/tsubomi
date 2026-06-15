@@ -84,6 +84,46 @@ services:
     volumes:
       - registry_data:/var/lib/registry
 
+  valkey:
+    # M5:cache の共有実例。per-cache の ACL ユーザは平台(ホスト直走り)が実行時に
+    # ACL SETUSER で足す(揮発 → server が起動時 + 30s で収束。paas-m5-design.md §7.3)。
+    # default ユーザは off、平台専用 tsubomi-admin だけが管理権(§11-J)。admin は aclfile では
+    # なく command の --user で静的定義する(aclfile は ${VAR} を展開しないため。compose が展開)。
+    # この方式なら実行時 ACL SETUSER も使える(aclfile と inline user は排他なので aclfile は使わない)。
+    # maxmemory + allkeys-lru で整機を守る(cache は本質的に易失。§3)。
+    image: valkey/valkey:8-alpine      # 公式・multi-arch(arm64+amd64。香橙派 OK)
+    container_name: tsubomi-valkey
+    restart: unless-stopped
+    # --user は username 以降の各トークンを規則として読む。YAML 上 ~ & + > * は行頭で特殊なので
+    # 引用する。${...} は compose が插值する(.env の TSUBOMI_VALKEY_ADMIN_PASS。dev は既定値)。
+    command:
+      - valkey-server
+      - --maxmemory
+      - ${TSUBOMI_VALKEY_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --user
+      - default
+      - "off"
+      - --user
+      - tsubomi-admin
+      - "on"
+      - ">${TSUBOMI_VALKEY_ADMIN_PASS:-tsubomi_valkey_dev}"
+      - "~*"
+      - "&*"
+      - "+@all"
+    ports:
+      # 平台(ホスト直走り)が admin 接続で ACL を発行するため loopback で公開(pg-tenant と同型)。
+      # **ホスト側は 6433**:6379 はローカルの redis/valkey に取られがちなので(pg の 5434/5435 と同じ
+      # 衝突回避)。コンテナ内は 6379 のまま = ユーザコンテナの docker DNS 注入(tsubomi-valkey:6379)は不変。
+      # 外部(公網 / 会社 CIDR)入口は無い(§11-B:cache は内部注入のみ)。
+      - "127.0.0.1:6433:6379"
+    volumes:
+      - valkey_data:/data                # RDB(キー本体。per-cache ACL は平台が収束で貼り直す)
+    # default = 平台からの loopback 到達。tsubomi-edge = M3 のユーザコンテナが
+    # `tsubomi-valkey:6379`(docker DNS)で内部入口に届くため(§11-A。pgbouncer と同型)。
+    networks: [default, tsubomi-edge]
+
   traefik:
     # M3:ユーザ service の入口 + ルーティング。**file provider のみ**(docker provider は使わない)。
     # 平台(ホスト直走り)が動的設定をここに書き、watch で即時ホットリロードする:会社 IP 許可
@@ -120,3 +160,4 @@ volumes:
   pg_platform_data:
   pg_tenant_data:
   registry_data:
+  valkey_data:

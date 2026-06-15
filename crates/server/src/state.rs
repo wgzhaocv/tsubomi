@@ -16,6 +16,10 @@ pub struct AppStateInner {
     /// ユーザ DB インスタンス(pg-tenant)への admin 接続:CREATE DATABASE / ROLE
     /// などの DDL 用。web SQL は別途この URL から human role の臨時接続を作る。
     pub tenant_admin: PgPool,
+    /// valkey(cache)の admin クライアント(M5)。per-cache ACL の発行 / 削除 / 収束に使う。
+    /// `Client::open` は URL を解析するだけで接続はしない(遅延)— valkey が落ちていても
+    /// 起動はでき、収束が best-effort で復活させる(§7.3)。接続は操作毎に取る(ACL 操作は稀)。
+    pub valkey: redis::Client,
     /// at-rest 暗号化(DB パスワードの暗号化 / 復号)。
     pub crypto: Cipher,
     pub http: reqwest::Client,
@@ -59,6 +63,10 @@ impl AppState {
             .connect_with(tenant_opts)
             .await?;
 
+        // valkey(cache)の admin クライアント。open は URL 解析のみで接続しない(遅延)。
+        let valkey = redis::Client::open(config.valkey_admin_url.as_str())
+            .context("TSUBOMI_VALKEY_ADMIN_URL のパースに失敗(redis:// 形式)")?;
+
         let crypto = Cipher::new(&config.master_key.0);
 
         // redirect: none — このクライアントは Google の token / userinfo
@@ -81,6 +89,7 @@ impl AppState {
             config,
             db,
             tenant_admin,
+            valkey,
             crypto,
             http,
             docker,

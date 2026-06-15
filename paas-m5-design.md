@@ -80,35 +80,51 @@ create table cache_details (
 
 ## 3. infra の追加(`infra/docker-compose.yml`)
 
+**admin の定義方式(確定)**:aclfile は `${VAR}` を展開せず、また aclfile と inline `user` 指令は
+**排他**(両立すると valkey が起動拒否)= aclfile を使うと実行時 `ACL SETUSER` も使えない。よって
+**aclfile は使わず、admin を compose の `command --user` で静的定義**する(`${TSUBOMI_VALKEY_ADMIN_PASS}`
+は compose が插值。per-cache ユーザは実行時 `ACL SETUSER` で足し、§7.3 が収束)。YAML 上 `~ & + > *` は
+行頭で特殊なので各トークンを引用する。
+
 ```yaml
 valkey:
   image: valkey/valkey:8-alpine      # 公式・multi-arch(arm64+amd64。香橙派 OK)
   container_name: tsubomi-valkey
   restart: unless-stopped
-  # default ユーザは OFF にし、平台専用の admin ユーザだけを静的に定義(§11-I)。
-  # edge 上の不可信コンテナに「default で繋ぐ」入口を残さない。aclfile で admin を定義し、
-  # per-cache ユーザは平台が実行時に ACL SETUSER で足す(揮発、§7.3 で収束)。
-  command: >
-    valkey-server --aclfile /etc/valkey/users.acl
-    --maxmemory ${TSUBOMI_VALKEY_MAXMEMORY:-256mb} --maxmemory-policy allkeys-lru
+  # default は off、平台専用 tsubomi-admin だけが管理権(§11-J)。--user は username 以降の
+  # 各トークンを規則として読む。per-cache ユーザは平台が実行時に ACL SETUSER で足す(揮発、§7.3 で収束)。
+  command:
+    - valkey-server
+    - --maxmemory
+    - ${TSUBOMI_VALKEY_MAXMEMORY:-256mb}
+    - --maxmemory-policy
+    - allkeys-lru
+    - --user
+    - default
+    - "off"
+    - --user
+    - tsubomi-admin
+    - "on"
+    - ">${TSUBOMI_VALKEY_ADMIN_PASS:-tsubomi_valkey_dev}"
+    - "~*"
+    - "&*"
+    - "+@all"
+  ports:
+    # ホスト側 6433(6379 はローカル redis に取られがち = pg の 5434/5435 と同じ衝突回避)。
+    # コンテナ内は 6379 のまま = 注入の docker DNS(tsubomi-valkey:6379)は不変。外部入口なし(§11-B)。
+    - "127.0.0.1:6433:6379"            # 平台(host 直走り)の admin 接続用 loopback
   volumes:
-    - valkey_data:/data                          # RDB(キー本体。ACL は平台が収束)
-    - ./valkey/users.acl:/etc/valkey/users.acl:ro # admin 1 人だけ(default off)
-  networks: [default, tsubomi-edge]  # edge 参加 = コンテナが tsubomi-valkey:6379 で直連
-  # ports: 公開しない(内部入口のみ。§11-B)
-```
-
-`users.acl`(平台が初期化時に生成、admin パスワードは `TSUBOMI_VALKEY_ADMIN_PASS`):
-```
-user default off
-user tsubomi-admin on >${TSUBOMI_VALKEY_ADMIN_PASS} ~* &* +@all
+    - valkey_data:/data               # RDB(キー本体。per-cache ACL は平台が収束で貼り直す)
+  networks: [default, tsubomi-edge]   # edge 参加 = コンテナが tsubomi-valkey:6379 で直連
 ```
 
 - **edge 参加**(M3 §3.4 の pgbouncer と同型):ユーザコンテナは `tsubomi-valkey:6379` を docker DNS で
   引く。infra default 網にも居るので平台(host 直走り)からも届く。pg-platform / pg-tenant の隔離は不変。
-- **admin 認証**:`default` は **off**。平台専用 `tsubomi-admin`(強乱数パスワード、`users.acl`)だけが
+- **平台の admin 接続入口**:`ports: 127.0.0.1:6379`(loopback のみ。pg-tenant と同型)。平台はホスト直走り
+  なので docker DNS は引けず、loopback 公開で admin 接続する。公網 / 会社 CIDR には晒さない(§11-B)。
+- **admin 認証**:`default` は **off**。平台専用 `tsubomi-admin`(強乱数パスワード、compose の `--user`)だけが
   管理権を持つ。平台は `redis://tsubomi-admin:<pass>@…:6379` で `ACL SETUSER` を発行。per-cache ユーザは
-  `-@admin` 済みなので ACL/CONFIG を打てない。edge 上の不可信コンテナに admin 入口を晒さない(§11-I)。
+  `-@admin` 済みなので ACL/CONFIG を打てない。edge 上の不可信コンテナに admin 入口を晒さない(§11-J)。
 - **maxmemory + allkeys-lru**:cache は**本質的に易失**。共有実例が満ちたら LRU で**任意の key を**
   溢れさせる(整機を守る)。⇒ **delete→restore の「データ復活」は best-effort**(温存中の key も圧力下で
   evict されうる)。また 1 テナントの大量書き込みが**他テナントの key を evict** しうる(noisy neighbor、
@@ -116,7 +132,7 @@ user tsubomi-admin on >${TSUBOMI_VALKEY_ADMIN_PASS} ~* &* +@all
   evict、ただし非 TTL 書き込みで OOM 余地)に切替可 — §11-D で否決可。
 - **ACL の永続化はしない(per-cache 分)**:`ACL SETUSER` は揮発。**永続化は平台の収束に委ねる**
   (§7.3)= cache_details が真実源(背骨)。RDB はキー本体だけ戻し、per-cache ACL は平台が貼り直す。
-  admin だけは `users.acl` に静的に在る(収束の前提)。
+  admin だけは compose の `--user` で静的に在る(収束の前提)。
 
 ---
 
@@ -177,12 +193,19 @@ ACL SETUSER <acl_user> reset
 ACL SETUSER <acl_user> on >password         # ★ パスワード追加は単一の > (>> は誤り)
   ~<namespace>:*                 # この前缀の key だけ読み書き可
   resetchannels &<namespace>:*   # pub/sub もこの前缀のチャンネルだけ
-  +@all -@admin -@dangerous      # 危険(FLUSHALL/FLUSHDB/KEYS/SHUTDOWN/DEBUG/CONFIG…)を除く全コマンド
+  +@all -@admin -@dangerous      # 危険(FLUSHALL/FLUSHDB/KEYS/SHUTDOWN/DEBUG/CONFIG/SWAPDB…)を除く全コマンド
+  -function -script              # SCRIPT/FUNCTION 容器(グローバル状態)は別途禁止 — 下記
 ```
 (valkey の `ACL SETUSER` は同一ユーザへの複数呼びが累積。上は 1 回で書くなら一行に連ねる。
 `reset` で初期化してから組み立てると冪等。`>password` は**単一の `>`**。)
 
 - `~<ns>:*`:他人の namespace の key を**値として読み書き**すると **NOPERM**。
+- **`-function -script`(S1 実測で追加)**:`@dangerous` は KEYS/FLUSHALL/FLUSHDB/SWAPDB/CONFIG/SHUTDOWN/
+  REPLICAOF を覆う(valkey 8 で実測確認)が、**`SCRIPT FLUSH`(共有スクリプトキャッシュ全消し)と
+  `FUNCTION FLUSH`/`LOAD`/`DELETE`(他テナントの関数ライブラリを破壊・上書き)は @dangerous に**
+  **入らない**。関数 / スクリプトキャッシュは **key 前缀で名前空間化されないグローバル状態**なので、
+  容器コマンド `SCRIPT` / `FUNCTION` を個別に禁止する。`EVAL` / `EVALSHA` / `FCALL` は残し、スクリプト内の
+  key アクセスは ACL パターンで検査される(cross-ns は NOPERM。下の Lua 項)。
 - `-@dangerous`:FLUSHALL / FLUSHDB(共有実例を消す)/ KEYS(全 key 走査)/ SHUTDOWN / DEBUG 等を禁止。
 - `-@admin`:CONFIG / CLIENT KILL / ACL / REPLICAOF 等の管理系を禁止。
 - `&<ns>:*` + resetchannels:pub/sub も namespace 内のみ。
@@ -307,7 +330,7 @@ tbm inject <cache> --into <svc> [--as REDIS_URL]   # 既存 inject に cache 種
 | **B** | **cache は内部注入のみ(外部入口なし)** | app から使うのが主用途。db の human 外部串のような外部デバッグ需要は cache では薄い | 外部 `cache.<域名>:6379`(会社 CIDR)を足す（valkey を host 公開 + DOCKER-USER CIDR） |
 | **C** | **key 隔離 = ACL `~<ns>:*` + `REDIS_URL` と `REDIS_KEY_PREFIX` の 2 本注入**。app はクライアントの keyPrefix に設定 | 隔離を機構(ACL)で硬く保ちつつ、app 側の負担は 1 行。前缀無しは NOPERM = fail-safe | 透過プロキシで前缀を平台が付与(平台が数据路径に入る — 設計が拒否)/ valkey DB index で分離(ACL は DB を分離しない = 安全でない)/ cache 毎に valkey 実例(重い) |
 | **D** | **delete = `ACL DELUSER` のみ（key は内存温存を試みる）、restore = ACL 再作成、purge(3d) で key 削除。データ復元は best-effort** | dump 無しで凭据壳 + 生き残った key を復元。`allkeys-lru` なので**温存中の key は圧力下で evict され得る** ⇒ db/volume の完全復元とは意図的に区別(cache は本質的に易失)。**noisy neighbor**:1 テナントの大量書き込みが他テナントの key を evict しうる(cache として許容、明記) | delete 時に key も即削除(メモリ即解放だが復元でデータ喪失)/ dump してファイル trash(重い)/ `volatile-lru`(TTL 付きだけ evict、非 TTL を守るが OOM 余地) |
-| **E** | **コマンド白名単 = `+@all -@admin -@dangerous`**（key は `~<ns>:*`、channel は `&<ns>:*`） | FLUSHALL/FLUSHDB/KEYS/SHUTDOWN/DEBUG/CONFIG を一網で禁止しつつ string/hash/list/set/zset/stream/pubsub/SCAN は使える | 個別 `+GET +SET …` の許可リスト（網羅が大変・取りこぼし）/ `+@all`(危険) |
+| **E** | **コマンド白名単 = `+@all -@admin -@dangerous -function -script`**（key は `~<ns>:*`、channel は `&<ns>:*`） | `@dangerous` で FLUSHALL/FLUSHDB/KEYS/SWAPDB/SHUTDOWN/DEBUG/CONFIG を一網で禁止(valkey 8 で実測確認)しつつ string/hash/list/set/zset/stream/pubsub/SCAN/EVAL は使える。**`SCRIPT`/`FUNCTION` 容器は @dangerous に入らないが key 前缀で名前空間化されないグローバル状態(共有スクリプトキャッシュ / 関数ライブラリ)を破壊できるので個別に禁止**(S1 実測で判明・§6) | 個別 `+GET +SET …` の許可リスト（網羅が大変・取りこぼし）/ `+@all`(危険) / `-@scripting`(EVAL も失い §6 の Lua 方針に反する) |
 | **F** | **cache データは備份しない / per-namespace メモリは「key 数」で代用** | cache は易失（消えても再生成される前提）。valkey に per-namespace の正確メモリ API は無い | valkey BGSAVE の RDB を日次備份に / `MEMORY USAGE` をキー走査で集計(O(n)・高コスト) |
 | **G** | **per-cache ACL 永続化は平台の収束に委ねる(`ACL SETUSER` は揮発)。収束は起動時 **+ 周期(30s)**の両方。周期収束は毎 tick で fresh に生存 cache を読んでから SETUSER(RACE-1)** | cache_details が真実源 = 背骨。**周期収束は必須**:valkey 単独再起動(ACL 全消失・平台は無再起動)を起動時収束だけでは直せない穴を塞ぐ。再接続窓は tick 幅+クライアント再試行で吸収。**fresh スナップショット**で delete↔tick の競態(削除直後ユーザの一瞬復活)を防ぐ(§7.3) | 起動時のみ(valkey 単独再起動で ACL が永遠に欠落)/ aclfile + `ACL SAVE`(per-cache も valkey 側に二重真実源)/ 古いスナップショットで収束(delete と競態) |
 | **H** | **依存 = `redis` crate** | 成熟・tokio 対応・ACL 発行と e2e 検証に十分 | `fred`(高機能だが M5 には過剰) |

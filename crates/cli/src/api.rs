@@ -2,10 +2,10 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, CreateInjectionReq, CreateServiceReq, CreateServiceResp,
-    CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto, Health, InjectionDto, ListDirResp,
-    LogsResp, Me, MoveReq, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto,
-    VolumeDto,
+    CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq, CreateInjectionReq,
+    CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseDto, DeployConfig, DeployDto,
+    Health, InjectionDto, ListDirResp, LogsResp, Me, MoveReq, RenameVolumeReq, RollbackReq,
+    ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -174,6 +174,49 @@ pub async fn db_rotate(
 pub async fn db_delete(c: &reqwest::Client, server_url: &str, token: &str, id: &str) -> Result<()> {
     send_ok(
         c.delete(format!("{server_url}/api/databases/{id}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    Ok(())
+}
+
+// ============ M5 cache ============
+// database と同型(send_ok を共有)。url / rotate は S3 で足す。
+
+pub async fn cache_list(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+) -> Result<Vec<CacheDto>> {
+    let resp = send_ok(c.get(format!("{server_url}/api/caches")).bearer_auth(token)).await?;
+    resp.json().await.context("failed to parse caches response")
+}
+
+pub async fn cache_create(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<CacheDto> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/caches"))
+            .bearer_auth(token)
+            .json(&CreateCacheReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse create response")
+}
+
+pub async fn cache_delete(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    send_ok(
+        c.delete(format!("{server_url}/api/caches/{id}"))
             .bearer_auth(token),
     )
     .await?;

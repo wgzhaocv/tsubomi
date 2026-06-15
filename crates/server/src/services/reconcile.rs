@@ -41,6 +41,9 @@ pub fn spawn(state: AppState) {
 async fn reconcile_pass(state: &AppState) {
     converge_existence(state).await;
     cleanup_orphans(state).await;
+    // M5 cache:valkey の per-cache ACL を期望状態へ収束(揮発なので。valkey 単独再起動からの
+    // 自己回復をここで担保する — 起動時収束だけでは塞げない穴。§7.3)。best-effort(内部で log)。
+    crate::valkey::reconcile_acls(state).await;
 }
 
 /// 存在収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service で

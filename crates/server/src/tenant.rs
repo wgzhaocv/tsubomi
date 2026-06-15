@@ -80,8 +80,9 @@ pub fn gen_dbname() -> String {
     format!("db_{}", short_id())
 }
 
-/// 英小文字始まりの英数字 12 文字。識別子規則を満たす。
-fn short_id() -> String {
+/// 英小文字始まりの英数字 12 文字。識別子規則を満たす(DNS / valkey ACL 名にも安全)。
+/// database の wire 名と cache の acl_user/namespace(`c_<shortid>`)が共有する。
+pub(crate) fn short_id() -> String {
     use rand::Rng;
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut buf = [0u8; 12];

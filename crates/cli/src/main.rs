@@ -47,6 +47,11 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
+    /// キャッシュ(valkey。作成 / 一覧 / 削除)
+    Cache {
+        #[command(subcommand)]
+        action: commands::cache::CacheCmd,
+    },
     /// サービス(作成 + GitHub 連携 / 一覧 / 状態)
     Service {
         #[command(subcommand)]
@@ -122,6 +127,7 @@ async fn main() -> Result<()> {
     let result = match cli.command {
         Cmd::Login { manual, web } => commands::login::run(cli.server, manual, web).await,
         Cmd::Db { action } => commands::db::run(action, cli.server, cli.token, out).await,
+        Cmd::Cache { action } => commands::cache::run(action, cli.server, cli.token, out).await,
         Cmd::Service { action } => commands::service::run(action, cli.server, cli.token, out).await,
         Cmd::Deploy(args) => commands::deploy::run(args, cli.server, cli.token, out).await,
         Cmd::Inject(args) => commands::inject::run_inject(args, cli.server, cli.token, out).await,

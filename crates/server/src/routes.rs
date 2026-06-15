@@ -30,6 +30,7 @@ pub fn build_router(state: AppState) -> Router {
     // 同じ require_auth layer の下に束ねる(web も CLI も同じ extractor を通る)。
     let protected = auth::protected_routes()
         .merge(crate::databases::routes())
+        .merge(crate::caches::routes())
         .merge(crate::volumes::routes())
         .merge(crate::services::routes())
         .merge(crate::ipblock::routes())

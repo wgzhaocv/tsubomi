@@ -60,6 +60,12 @@ pub struct Config {
     /// メモリ/ディスクを一撃で食えるので硬上限を被せる(磁盘 quota は M4)。
     pub max_upload_bytes: usize,
 
+    // ===== M5 cache(valkey)=====
+    /// valkey の admin 接続(per-cache ACL の発行 / 収束用)。`tsubomi-admin` ユーザで繋ぐ
+    /// (default は off。§11-J)。例:redis://tsubomi-admin:..@127.0.0.1:6379。dev は loopback。
+    /// 注入の内部入口(cache_internal_host/port)は S2 で足す。
+    pub valkey_admin_url: String,
+
     // ===== M3 service =====
     /// service の subdomain のルートドメイン。ルーティングは `<subdomain>.<domain>`。
     /// dev=localhost(ブラウザが `*.localhost` を 127.0.0.1 に解決)、prod=会社ドメイン。
@@ -236,6 +242,14 @@ impl Config {
         let trash_dir = std::env::var("TSUBOMI_TRASH_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/trash"));
+        // ===== M5 cache(valkey)=====
+        // dev 既定:loopback の tsubomi-admin(compose の TSUBOMI_VALKEY_ADMIN_PASS と揃える)。
+        // prod は env で実値に上書き。default ユーザは off なので必ず tsubomi-admin で繋ぐ。
+        // dev 既定:loopback の tsubomi-admin。ホスト側 port は 6433(compose と揃える。6379 は
+        // ローカル redis に取られがちなので衝突回避)。prod は env で実値に上書き。
+        let valkey_admin_url = std::env::var("TSUBOMI_VALKEY_ADMIN_URL")
+            .unwrap_or_else(|_| "redis://tsubomi-admin:tsubomi_valkey_dev@127.0.0.1:6433".to_string());
+
         let volumes_dir = std::env::var("TSUBOMI_VOLUMES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/volumes"));
@@ -325,6 +339,7 @@ impl Config {
             db_sslmode,
             db_internal_host,
             db_internal_port,
+            valkey_admin_url,
             master_key,
             backup_dir,
             trash_dir,
