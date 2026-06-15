@@ -17,6 +17,7 @@ import {
   useAdminAction,
   useAdminRanking,
 } from "@/lib/admin";
+import { useMeQuery } from "@/lib/auth";
 
 // 使用量ランキング(owner 専用)。匿名行(真名 + 匿名番号 + 使用量)を降順で。
 // 種別フィルタはセグメント(全て / サービス / DB / ボリューム)= 画面側で絞る
@@ -52,6 +53,10 @@ export default function AdminRanking() {
   const [kind, setKind] = useState("all");
   const { data: allRows, isPending, error } = useAdminRanking();
   const action = useAdminAction();
+  // 危険操作(停止 / 削除)は owner のみ。viewer は表を見られるが操作列は出さない
+  // (表示制御は UX — 後端の actions は owner + session + メール検証を毎回確認)。
+  const { data: me } = useMeQuery();
+  const isOwner = me?.role === "owner";
 
   // 二段確認のモーダル状態(対象行 + 操作)とコード入力。
   const [pending, setPending] = useState<{ row: AdminResourceRow; act: AdminAction } | null>(null);
@@ -154,7 +159,7 @@ export default function AdminRanking() {
                     <th className="px-4 py-3 text-right">使用量</th>
                     <th className="px-4 py-3 text-right">CPU</th>
                     <th className="px-4 py-3 text-right">状態</th>
-                    <th className="px-4 py-3 text-right">操作</th>
+                    {isOwner && <th className="px-4 py-3 text-right">操作</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -181,29 +186,31 @@ export default function AdminRanking() {
                       <td className="px-4 py-3 text-right text-xs font-semibold text-muted-foreground">
                         {serviceState(row)}
                       </td>
-                      <td className="px-4 py-3">
-                        <div className="flex justify-end gap-2">
-                          {row.kind === "service" && row.running && (
+                      {isOwner && (
+                        <td className="px-4 py-3">
+                          <div className="flex justify-end gap-2">
+                            {row.kind === "service" && row.running && (
+                              <Button
+                                type="default"
+                                size="small"
+                                icon={<Square className="size-3.5" />}
+                                onClick={() => start(row, "stop")}
+                              >
+                                停止
+                              </Button>
+                            )}
                             <Button
                               type="default"
                               size="small"
-                              icon={<Square className="size-3.5" />}
-                              onClick={() => start(row, "stop")}
+                              danger
+                              icon={<Trash2 className="size-3.5" />}
+                              onClick={() => start(row, "delete")}
                             >
-                              停止
+                              削除
                             </Button>
-                          )}
-                          <Button
-                            type="default"
-                            size="small"
-                            danger
-                            icon={<Trash2 className="size-3.5" />}
-                            onClick={() => start(row, "delete")}
-                          >
-                            削除
-                          </Button>
-                        </div>
-                      </td>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

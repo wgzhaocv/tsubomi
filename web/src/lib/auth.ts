@@ -11,6 +11,9 @@ export type Me = {
   name: string | null;
   avatar_url: string | null;
   role: "user" | "owner";
+  // このセッションが共有パスワード viewer grant を持つか(web 専用・8h で失効)。
+  // 閲覧ルート守衛が role==="owner" || is_viewer で管制面の只读を許す。
+  is_viewer: boolean;
 };
 
 // ログイン画面が表示する公開情報(許可された会社ドメイン)。

@@ -1,5 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { authKeys } from "@/lib/auth";
 import { RESOURCES } from "@/lib/resources";
 import { formatBytes } from "@/lib/volumes";
 
@@ -143,5 +144,63 @@ export function useAuditLog(action: string) {
     // 1 頁が満杯なら続きがある可能性 → 最後の id を次カーソルに。満杯未満 = 終端。
     getNextPageParam: (last) => (last.length === AUDIT_PAGE ? last[last.length - 1].id : undefined),
     staleTime: STALE_MS,
+  });
+}
+
+// 共有パスワード viewer(S5、web 専用)。設計 v2 §7「見るは共有密码」。
+// login = 任意のログインユーザが共有パスワードを入れて只读 grant(8h)を得る。
+// status / set = owner のみ(後端が require_owner_web)。
+export type ViewerStatus = {
+  set: boolean;
+  updated_at: string | null;
+  updated_by_name: string | null;
+};
+
+export const viewerKeys = {
+  status: ["admin", "viewer", "status"] as const,
+};
+
+// 共有パスワードを入れて閲覧 grant を得る。成功したら me を無効化(is_viewer が翻る)。
+export function useViewerLogin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (password: string): Promise<void> => {
+      const res = await fetch("/api/admin/viewer/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) return failBody(res);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: authKeys.me }),
+  });
+}
+
+// 共有パスワードの設定状態(owner の設定ページ表示用)。
+async function fetchViewerStatus(): Promise<ViewerStatus> {
+  const res = await fetch("/api/admin/viewer/password");
+  if (!res.ok) return failBody(res);
+  return (await res.json()) as ViewerStatus;
+}
+
+export function useViewerStatus() {
+  return useQuery({ queryKey: viewerKeys.status, queryFn: fetchViewerStatus, staleTime: STALE_MS });
+}
+
+// 共有パスワードを設定 / リセット(owner)。旧 grant は後端で全失効する。
+export function useSetViewerPassword() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (password: string): Promise<ViewerStatus> => {
+      const res = await fetch("/api/admin/viewer/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as ViewerStatus;
+    },
+    // サーバが最新状態を返すので、再 GET せずキャッシュに直接書く(LEFT JOIN の一往復を節約)。
+    onSuccess: (data) => qc.setQueryData(viewerKeys.status, data),
   });
 }

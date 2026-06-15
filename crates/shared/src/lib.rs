@@ -122,6 +122,11 @@ pub struct Me {
     pub avatar_url: Option<String>,
     /// `"user"` か `"owner"`。
     pub role: String,
+    /// このセッションが現在、有効な共有パスワード viewer grant を持つか
+    /// (web 専用・8h で失効)。前端の閲覧ルート守衛が `role=="owner" || is_viewer`
+    /// で判定する(表示制御は UX、実防御は後端ゲート)。
+    #[serde(default)]
+    pub is_viewer: bool,
 }
 
 // ============ M1 database(server ⇄ CLI / web の単一契約)============
@@ -573,6 +578,35 @@ pub struct AuditEntryDto {
     pub target_resource: Option<Uuid>,
     /// 付帯情報(非機密の jsonb)。
     pub detail: Option<serde_json::Value>,
+}
+
+// ============ ガバナンス:共有パスワード viewer(M4 S5、web 専用)============
+// design v2 §7「見るは共有密码」— ログイン済み社内ユーザが共有パスワードを入れると
+// 管制面を**只读**で見られる(overview / ranking)。owner は設定 / リセットでき、
+// リセットすると旧 grant は全失効する。
+
+/// `POST /api/admin/viewer/login` のリクエスト。共有パスワード平文(HTTPS 前提)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerLoginReq {
+    pub password: String,
+}
+
+/// `POST /api/admin/viewer/password`(owner)のリクエスト。新しい共有パスワード。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerPasswordReq {
+    pub password: String,
+}
+
+/// `GET /api/admin/viewer/password`(owner)のレスポンス。設定ページ表示用。
+/// パスワード本体・hash は返さない(設定済みか否かとメタだけ)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewerStatusResp {
+    pub set: bool,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    /// 最後に設定した owner の真名(無ければ null)。
+    #[serde(default)]
+    pub updated_by_name: Option<String>,
 }
 
 #[cfg(test)]

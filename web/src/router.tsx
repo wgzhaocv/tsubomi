@@ -2,11 +2,13 @@ import { createBrowserRouter } from "react-router";
 
 import { DashboardLayout } from "@/components/dashboard-layout";
 import { RequireOwner } from "@/components/require-owner";
+import { RequireViewer } from "@/components/require-viewer";
 import { RESOURCES } from "@/lib/resources";
 import About from "@/routes/About";
 import AdminAudit from "@/routes/AdminAudit";
 import AdminOverview from "@/routes/AdminOverview";
 import AdminRanking from "@/routes/AdminRanking";
+import AdminSettings from "@/routes/AdminSettings";
 import CacheDetail from "@/routes/CacheDetail";
 import Caches from "@/routes/Caches";
 import DatabaseEditor from "@/routes/DatabaseEditor";
@@ -100,15 +102,23 @@ export const router = createBrowserRouter([
       // IP 許可リスト(owner 専用のガバナンス画面)。サイドメニューにも owner 限定で出す。
       // バックエンドが 403 で守るので、ここはルート自体は誰でも辿れる(画面側で弾く)。
       { path: "ip-allowlist", element: <IpAllowlist /> },
-      // 管制面の可視化(owner 専用・M4 S1)。総覧 + 使用量ランキング。匿名化(真名 +
-      // 匿名番号 + 使用量、資源名/内容は出さない)。後端が owner + session を毎回検証。
-      // owner ゲートはルート単位の <RequireOwner> に集約(各ページに内蔵しない)。
+      // 管制面の可視化(M4 S1 + S5)。匿名化(真名 + 匿名番号 + 使用量、資源名/内容は
+      // 出さない)。総覧 + 使用量ランキングは**閲覧**(owner または共有パスワード viewer):
+      // <RequireViewer> = 未解錠なら解錠フォームを出す。後端は require_viewer_web で守る。
       {
-        element: <RequireOwner />,
+        element: <RequireViewer />,
         children: [
           { path: "admin", element: <AdminOverview /> },
           { path: "admin/ranking", element: <AdminRanking /> },
+        ],
+      },
+      // 監査ログ(真名 + 操作流水の明文 = §7 匿名化の範囲外)と共有パスワード設定は
+      // owner のみ。<RequireOwner> に集約(後端も require_owner_web)。
+      {
+        element: <RequireOwner />,
+        children: [
           { path: "admin/audit", element: <AdminAudit /> },
+          { path: "admin/settings", element: <AdminSettings /> },
         ],
       },
       ...RESOURCES.filter(

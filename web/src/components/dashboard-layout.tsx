@@ -3,6 +3,7 @@ import {
   BarChart3,
   ChevronRight,
   Gauge,
+  KeyRound,
   LogOut,
   type LucideIcon,
   Menu,
@@ -36,9 +37,9 @@ function FullPageLoading() {
   );
 }
 
-// 管理(owner 専用)セクションのナビ項目。リソースナビと同じ薬形 + active の葉っぱ揺れ。
-// 3 項目(管制面 / ランキング / IP 許可リスト)で同じマークアップを繰り返すので 1 つに束ねる。
-function OwnerNavLink({
+// 管理セクションのナビ項目。リソースナビと同じ薬形 + active の葉っぱ揺れ。
+// 複数項目(管制面 / ランキング / 監査ログ / 設定 / IP)で同じマークアップを繰り返すので束ねる。
+function AdminNavLink({
   to,
   end,
   icon: Icon,
@@ -147,32 +148,44 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         })}
       </nav>
 
-      {/* 管理(owner 専用)。表示制御はただの UX — バックエンドが 403 で守る。 */}
-      {me?.role === "owner" && (
+      {/* 管理。表示制御はただの UX — バックエンドが 403 で守る。管制面 / ランキングは
+          閲覧(owner または共有パスワード viewer。未解錠なら解錠フォームへ)、監査ログ /
+          共有パスワード設定 / IP 許可リストは owner のみ(§7 / S5)。 */}
+      {me && (
         <nav className="flex flex-col gap-1.5 px-3 pb-2" aria-label="管理">
           <span className="px-3.5 pt-2 pb-0.5 text-[11px] font-bold tracking-wide text-muted-foreground">
             管理
           </span>
           {/* end:/admin は総覧のみ active(/admin/ranking では非 active にする)。 */}
-          <OwnerNavLink to="/admin" end icon={Gauge} label="管制面" onNavigate={onNavigate} />
-          <OwnerNavLink
+          <AdminNavLink to="/admin" end icon={Gauge} label="管制面" onNavigate={onNavigate} />
+          <AdminNavLink
             to="/admin/ranking"
             icon={BarChart3}
             label="使用量ランキング"
             onNavigate={onNavigate}
           />
-          <OwnerNavLink
-            to="/admin/audit"
-            icon={ScrollText}
-            label="監査ログ"
-            onNavigate={onNavigate}
-          />
-          <OwnerNavLink
-            to="/ip-allowlist"
-            icon={ShieldCheck}
-            label="IP 許可リスト"
-            onNavigate={onNavigate}
-          />
+          {me.role === "owner" && (
+            <>
+              <AdminNavLink
+                to="/admin/audit"
+                icon={ScrollText}
+                label="監査ログ"
+                onNavigate={onNavigate}
+              />
+              <AdminNavLink
+                to="/admin/settings"
+                icon={KeyRound}
+                label="共有パスワード設定"
+                onNavigate={onNavigate}
+              />
+              <AdminNavLink
+                to="/ip-allowlist"
+                icon={ShieldCheck}
+                label="IP 許可リスト"
+                onNavigate={onNavigate}
+              />
+            </>
+          )}
         </nav>
       )}
 

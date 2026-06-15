@@ -25,6 +25,11 @@ pub struct AuthCtx {
     /// リクエスト毎に取り直すので常に新鮮。)
     pub role: String,
     pub source: AuthSource,
+    /// **このセッションが現在、有効な共有パスワード viewer grant を持つか**
+    /// (ユーザ属性ではない — session 単位・8h で失効)。閲覧ゲート
+    /// `admin::require_viewer_web` の入力。viewer は web/session 専用なので
+    /// Bearer 経路では常に false。(design v2 §7「見るは共有密码」)
+    pub is_viewer: bool,
 }
 
 #[derive(Clone, Debug)]

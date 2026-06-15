@@ -293,6 +293,8 @@ pub async fn me(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Json<
         name: row.1,
         avatar_url: row.2,
         role: auth.role,
+        // このセッションの実時 viewer grant をそのまま返す(前端の閲覧守衛用)。
+        is_viewer: auth.is_viewer,
     }))
 }
 

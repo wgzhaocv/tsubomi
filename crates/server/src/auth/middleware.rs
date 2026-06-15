@@ -39,6 +39,8 @@ pub async fn require_auth(
             source: AuthSource::Token {
                 token_id: auth.token_id,
             },
+            // viewer は web/session 専用 — Bearer 経路では grant を持たない。
+            is_viewer: false,
         });
         return Ok(next.run(req).await);
     }
@@ -48,7 +50,7 @@ pub async fn require_auth(
         .map(|c| c.value())
         .ok_or(AppError::Unauthorized)?;
 
-    let (user_id, role) = session::get(&state.db, session_token)
+    let (user_id, role, is_viewer) = session::get(&state.db, session_token)
         .await?
         .ok_or(AppError::Unauthorized)?;
 
@@ -56,6 +58,7 @@ pub async fn require_auth(
         user_id,
         role,
         source: AuthSource::Session,
+        is_viewer,
     });
 
     Ok(next.run(req).await)

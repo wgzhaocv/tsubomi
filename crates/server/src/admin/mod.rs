@@ -15,6 +15,7 @@ use axum::routing::{get, post};
 mod actions;
 mod audit_view;
 mod overview;
+mod viewer;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -25,6 +26,12 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/resources/{id}/delete", post(actions::delete))
         // 監査ログ閲覧(S4)。
         .route("/admin/audit", get(audit_view::list))
+        // 共有パスワード viewer(S5):login = 任意の session、password = owner のみ。
+        .route("/admin/viewer/login", post(viewer::login))
+        .route(
+            "/admin/viewer/password",
+            get(viewer::status).post(viewer::set_password),
+        )
 }
 
 /// admin ゲート:owner 身分 **かつ** session 由来(Bearer cli_token は拒否)。
@@ -32,6 +39,18 @@ pub fn routes() -> Router<AppState> {
 /// AuthCtx.role / source は認証時に解決済みなので追加クエリ不要。
 pub(crate) fn require_owner_web(auth: &AuthCtx) -> AppResult<()> {
     if auth.is_owner() && auth.is_session() {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
+
+/// 閲覧ゲート(S5):web セッション由来 **かつ**(owner **または** 有効な viewer grant)。
+/// 設計 v2 §7「見るは共有密码」— 共有パスワードを入れた社内ユーザは只读で管制面を
+/// 見られる。**只读の可視化(overview / ranking)専用**。危険操作(stop/delete)・
+/// viewer パスワード設定・監査ログ・IP 許可リストは owner のみ(require_owner_web)。
+pub(crate) fn require_viewer_web(auth: &AuthCtx) -> AppResult<()> {
+    if auth.is_session() && (auth.is_owner() || auth.is_viewer) {
         Ok(())
     } else {
         Err(AppError::Forbidden)

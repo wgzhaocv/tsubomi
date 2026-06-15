@@ -2,7 +2,7 @@
 //! 指標採集はオンデマンド + best-effort(§3.4):service=bollard stats(稼働中内存 + CPU%)、
 //! database=`pg_database_size`、volume=`volumes::dir_usage`(時間予算で打ち切り)。取得不能は null / 0。
 
-use crate::admin::require_owner_web;
+use crate::admin::require_viewer_web;
 use crate::auth::AuthCtx;
 use crate::error::AppResult;
 use crate::services::docker;
@@ -74,7 +74,11 @@ async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
         "volume" => (dir_size_bytes(host_path.as_deref()).await, None, None),
         // cache の「使用量」は key 数(§4.2)。usage_bytes に載せ、web が単位を出し分ける。
         "cache" => match namespace.as_deref() {
-            Some(ns) => (crate::valkey::count_keys(&state.valkey, ns).await, None, None),
+            Some(ns) => (
+                crate::valkey::count_keys(&state.valkey, ns).await,
+                None,
+                None,
+            ),
             None => (None, None, None),
         },
         _ => (None, None, None),
@@ -119,13 +123,13 @@ pub struct RankingQuery {
     pub limit: Option<usize>,
 }
 
-/// `GET /api/admin/ranking?kind=&limit=`:匿名行を使用量降順で。owner(web)のみ。
+/// `GET /api/admin/ranking?kind=&limit=`:匿名行を使用量降順で。owner または viewer(web)。
 pub async fn ranking(
     auth: AuthCtx,
     State(state): State<AppState>,
     Query(q): Query<RankingQuery>,
 ) -> AppResult<Json<Vec<AdminResourceRow>>> {
-    require_owner_web(&auth)?;
+    require_viewer_web(&auth)?;
     let mut rows = gather_rows(&state).await?;
     if let Some(kind) = q.kind.as_deref() {
         rows.retain(|r| r.kind == kind);
@@ -138,12 +142,12 @@ pub async fn ranking(
     Ok(Json(rows))
 }
 
-/// `GET /api/admin/overview`:種別ごと総数 + 総使用量 + 資源保有ユーザ数。owner(web)のみ。
+/// `GET /api/admin/overview`:種別ごと総数 + 総使用量 + 資源保有ユーザ数。owner または viewer(web)。
 pub async fn overview(
     auth: AuthCtx,
     State(state): State<AppState>,
 ) -> AppResult<Json<AdminOverviewResp>> {
-    require_owner_web(&auth)?;
+    require_viewer_web(&auth)?;
     let rows = gather_rows(&state).await?;
 
     let kinds = KINDS
