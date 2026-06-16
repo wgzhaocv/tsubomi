@@ -8,6 +8,7 @@ import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Stat } from "@/components/ui/stat";
+import { useAuthInfoQuery } from "@/lib/auth";
 import {
   useDatabases,
   useDeleteDatabase,
@@ -25,14 +26,12 @@ export default function DatabaseOverview() {
   const { data: dbs } = useDatabases();
   const db = dbs?.find((d) => d.id === id);
   const { data: tables } = useTables(id);
+  // 外部接続文字列機能が有効か(部署のトポロジ依存)。off の環境では接続文字列カードを隠す
+  // (防御は後端 — ここは UX)。authInfo はアプリ起動時に取得済みでほぼキャッシュ命中。
+  const { data: authInfo } = useAuthInfoQuery();
 
-  const reveal = useRevealUrl();
-  const rotate = useRotate();
   const del = useDeleteDatabase();
 
-  // 表示中の接続文字列(reveal / rotate が入れる)。null = 隠している。
-  const [url, setUrl] = useState<string | null>(null);
-  const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
 
@@ -63,66 +62,14 @@ export default function DatabaseOverview() {
       {/* ===== 接続文字列 ===== */}
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-bold text-foreground">接続文字列</h2>
-        <div className="flex items-start gap-2 rounded-2xl border-2 border-[#f5c31c] bg-[rgba(245,195,28,0.1)] px-4 py-3">
-          <TriangleAlert className="mt-0.5 size-4.5 shrink-0 text-[#dba90e]" />
-          <p className="text-sm font-semibold text-[#8a6d12]">
-            この文字列は<strong>パスワードそのもの</strong>です。git に commit
-            したり、人に共有したりしないでください。漏れたら rotate で失効できます。
+        {authInfo?.db_public_enabled ? (
+          <ConnectionStringSection />
+        ) : authInfo ? (
+          <p className="text-sm font-medium text-muted-foreground">
+            この環境では外部からの直接接続は無効です(管理者設定)。データの確認・編集は上部の
+            <strong>「SQL」</strong>・<strong>「テーブル」</strong>タブを使ってください。
           </p>
-        </div>
-
-        {url ? (
-          <div className="flex flex-col gap-2">
-            <CodeBlock code={url} language="postgres" showCopy />
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="text"
-                size="small"
-                icon={<EyeOff className="size-4" />}
-                onClick={() => setUrl(null)}
-              >
-                隠す
-              </Button>
-              <Button
-                type="default"
-                size="small"
-                danger
-                icon={<RotateCw className="size-4" />}
-                onClick={() => setRotateOpen(true)}
-              >
-                rotate(再生成)
-              </Button>
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="primary"
-              icon={<Eye className="size-4" />}
-              loading={reveal.isPending}
-              onClick={() => reveal.mutate(id, { onSuccess: setUrl })}
-            >
-              接続文字列を表示
-            </Button>
-            <Button
-              type="default"
-              danger
-              icon={<RotateCw className="size-4" />}
-              onClick={() => setRotateOpen(true)}
-            >
-              rotate(再生成)
-            </Button>
-          </div>
-        )}
-        {reveal.error && (
-          <p className="text-sm font-semibold text-[#e05a5a]">{reveal.error.message}</p>
-        )}
-        {db?.rotated_at && (
-          <p className="text-xs font-medium text-muted-foreground">
-            最終 rotate:{new Date(db.rotated_at).toLocaleString("ja-JP")}
-            (これより前にコピーした文字列は失効しています)
-          </p>
-        )}
+        ) : null}
       </section>
 
       <Divider type="line-brown" />
@@ -146,42 +93,6 @@ export default function DatabaseOverview() {
           このデータベースを削除
         </Button>
       </section>
-
-      {/* rotate 確認 */}
-      <Modal
-        open={rotateOpen}
-        title="接続文字列を rotate"
-        typewriter={false}
-        width={460}
-        onClose={() => setRotateOpen(false)}
-        footer={
-          <>
-            <Button type="text" onClick={() => setRotateOpen(false)}>
-              キャンセル
-            </Button>
-            <Button
-              type="primary"
-              danger
-              loading={rotate.isPending}
-              onClick={() =>
-                rotate.mutate(id, {
-                  onSuccess: (newUrl) => {
-                    setUrl(newUrl);
-                    setRotateOpen(false);
-                  },
-                })
-              }
-            >
-              rotate する
-            </Button>
-          </>
-        }
-      >
-        <p>
-          新しいパスワードを発行し、<strong>古い接続文字列は即座に失効</strong>
-          します。注入済みのサービスは再デプロイするまで古い文字列のままです。続けますか?
-        </p>
-      </Modal>
 
       {/* 削除確認(名前入力) */}
       <Modal
@@ -228,5 +139,121 @@ export default function DatabaseOverview() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// 接続文字列カード(表示 / rotate + rotate 確認モーダル)。外部接続が有効な部署でのみ親が描画する。
+// サーバ状態は自前のフックで引く(props で配らない方針 — [[frontend-state-and-components]])。
+// 秘密の接続文字列は Query に載せず、表示 / rotate 要求時だけ取得して画面ローカルに置く。
+function ConnectionStringSection() {
+  const { id = "" } = useParams();
+  const { data: dbs } = useDatabases();
+  const db = dbs?.find((d) => d.id === id);
+  const reveal = useRevealUrl();
+  const rotate = useRotate();
+
+  // 表示中の接続文字列(reveal / rotate が入れる)。null = 隠している。
+  const [url, setUrl] = useState<string | null>(null);
+  const [rotateOpen, setRotateOpen] = useState(false);
+
+  return (
+    <>
+      <div className="flex items-start gap-2 rounded-2xl border-2 border-[#f5c31c] bg-[rgba(245,195,28,0.1)] px-4 py-3">
+        <TriangleAlert className="mt-0.5 size-4.5 shrink-0 text-[#dba90e]" />
+        <p className="text-sm font-semibold text-[#8a6d12]">
+          この文字列は<strong>パスワードそのもの</strong>です。git に commit
+          したり、人に共有したりしないでください。漏れたら rotate で失効できます。
+        </p>
+      </div>
+
+      {url ? (
+        <div className="flex flex-col gap-2">
+          <CodeBlock code={url} language="postgres" showCopy />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="text"
+              size="small"
+              icon={<EyeOff className="size-4" />}
+              onClick={() => setUrl(null)}
+            >
+              隠す
+            </Button>
+            <Button
+              type="default"
+              size="small"
+              danger
+              icon={<RotateCw className="size-4" />}
+              onClick={() => setRotateOpen(true)}
+            >
+              rotate(再生成)
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="primary"
+            icon={<Eye className="size-4" />}
+            loading={reveal.isPending}
+            onClick={() => reveal.mutate(id, { onSuccess: setUrl })}
+          >
+            接続文字列を表示
+          </Button>
+          <Button
+            type="default"
+            danger
+            icon={<RotateCw className="size-4" />}
+            onClick={() => setRotateOpen(true)}
+          >
+            rotate(再生成)
+          </Button>
+        </div>
+      )}
+      {reveal.error && (
+        <p className="text-sm font-semibold text-[#e05a5a]">{reveal.error.message}</p>
+      )}
+      {db?.rotated_at && (
+        <p className="text-xs font-medium text-muted-foreground">
+          最終 rotate:{new Date(db.rotated_at).toLocaleString("ja-JP")}
+          (これより前にコピーした文字列は失効しています)
+        </p>
+      )}
+
+      {/* rotate 確認 */}
+      <Modal
+        open={rotateOpen}
+        title="接続文字列を rotate"
+        typewriter={false}
+        width={460}
+        onClose={() => setRotateOpen(false)}
+        footer={
+          <>
+            <Button type="text" onClick={() => setRotateOpen(false)}>
+              キャンセル
+            </Button>
+            <Button
+              type="primary"
+              danger
+              loading={rotate.isPending}
+              onClick={() =>
+                rotate.mutate(id, {
+                  onSuccess: (newUrl) => {
+                    setUrl(newUrl);
+                    setRotateOpen(false);
+                  },
+                })
+              }
+            >
+              rotate する
+            </Button>
+          </>
+        }
+      >
+        <p>
+          新しいパスワードを発行し、<strong>古い接続文字列は即座に失効</strong>
+          します。注入済みのサービスは再デプロイするまで古い文字列のままです。続けますか?
+        </p>
+      </Modal>
+    </>
   );
 }

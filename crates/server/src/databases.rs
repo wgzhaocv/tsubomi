@@ -142,6 +142,24 @@ fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> Stri
     )
 }
 
+/// 外部接続文字列機能(human role の公開接続)が有効か。無効な部署(CF Tunnel など公網
+/// TCP 入口を持たない)では reveal / rotate を後端で拒否する。web も同フラグでカードを隠すが、
+/// 防御は後端(`破ってはいけない一線`:前端の表示制御は UX)。
+/// 拒否は **403(`ForbiddenMsg`)** = ポリシー拒否:入力を直しても通らないので CLI/AI は再試行しない
+/// (400 だと `validation` 扱いで無駄に再試行する)。文案は次の一手(web SQL)を含める。
+/// 注:漏れた接続文字列を無効化したいなら、機能を off にする**前**に rotate すること。
+fn require_db_public(state: &AppState) -> AppResult<()> {
+    if state.config.db_public_enabled {
+        Ok(())
+    } else {
+        Err(AppError::ForbiddenMsg(
+            "この環境では外部接続文字列を提供していません(公開 DB は無効)。\
+             データの確認・編集は web の SQL タブを使ってください"
+                .into(),
+        ))
+    }
+}
+
 // ===== ハンドラ =====
 
 /// sqlx の UNIQUE 制約違反(23505)を Conflict(409)へ変換し、それ以外は Sqlx(500)
@@ -386,11 +404,13 @@ pub async fn get_one(
 }
 
 /// `GET /api/databases/:id/url`:外部(human)接続文字列。**パスワードそのもの**。
+/// 公開 DB が無効な部署では拒否する(§ `require_db_public`)。
 pub async fn url(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<axum::response::Response> {
+    require_db_public(&state)?;
     let (dbname, role, enc) = fetch_human(&state.db, auth.user_id, id).await?;
     let pw = state.crypto.decrypt(&enc)?;
     Ok(crate::respond::no_store(ConnectionUrlResp {
@@ -399,11 +419,13 @@ pub async fn url(
 }
 
 /// `POST /api/databases/:id/rotate`:human のパスワードを差し替える(非破壊 — app は不変)。
+/// 公開 DB が無効な部署では拒否する(外部接続文字列ごと機能を畳む)。
 pub async fn rotate(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<axum::response::Response> {
+    require_db_public(&state)?;
     let (dbname, role, _) = fetch_human(&state.db, auth.user_id, id).await?;
     let new_pw = tenant::gen_password();
     tenant::rotate_password(&state.tenant_admin, &role, &new_pw).await?;

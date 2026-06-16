@@ -66,6 +66,12 @@ M1 で入ったもの:`resources` スーパーテーブル + `database_details`/
 一覧/接続文字列/rotate/web SQL/ソフト削除→ゴミ箱→復元/日次バックアップ;at-rest
 暗号化(crypto.rs、XChaCha20-Poly1305);`tbm db` サブコマンド。**双 role**:app
 (内部、M3 で service に注入)+ human(外部、rotate 可)— 詳細は §2/§5。
+**外部接続文字列は部署トポロジで開閉**(`TSUBOMI_DB_PUBLIC_ENABLED`、既定 false):CF Tunnel など
+公網 TCP 入口を持たない部署では web が接続文字列カードを隠し `/url`・`/rotate` も後端で拒否
+(`require_db_public`。届かない LAN IP の誤誘導を断つ)。公網 IP の VPS でのみ true。web SQL タブと
+human role 自体はこのフラグと無関係で常に動く(web SQL は tenant_admin_url 経由 = 公開ホスト不使用)。
+AuthInfo(`/auth/info`)に `db_public_enabled` を載せ前端が判定。**残:DB の ipblock**(公開 DB を
+有効にした VPS で、会社 IP 許可リストを Traefik TCP 入口に流用 — VPS 落地後に実装)。
 
 M2 で入ったもの:`volume_details`;**volume は顶层リソース**(service 所有ではない)。
 各 volume は独立した假根サンドボックス `volumes/<user>/<id>`。**唯一のハード境界 =

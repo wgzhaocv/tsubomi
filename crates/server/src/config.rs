@@ -46,6 +46,12 @@ pub struct Config {
     /// 接続文字列の sslmode。dev=disable(pgbouncer に TLS なし)、prod は env で調整。
     /// 外部(human)も内部(注入する app)も同じ pgbouncer なので sslmode を共有する。
     pub db_sslmode: String,
+    /// 外部(human)接続文字列を提供するか(`TSUBOMI_DB_PUBLIC_ENABLED`、既定 false)。
+    /// **off**(CF Tunnel など公網 TCP 入口を持たない部署):web は接続文字列カードを出さず、
+    /// `/url`・`/rotate` も後端で拒否する(届かない LAN IP を見せて誤誘導するのを断つ)。
+    /// **on**(公網 IP の VPS):提供する。web SQL タブと human role 自体は本フラグと無関係で
+    /// 常に動く(web SQL は tenant_admin_url 経由・公開ホストを使わないため)。
+    pub db_public_enabled: bool,
     /// service へ注入する **内部**接続文字列のホスト / ポート(コンテナが docker DNS で引く
     /// pgbouncer)。外部入口 db_public_host とは別 — コンテナは社外に出ず内部路径で繋ぐ(§7.2)。
     pub db_internal_host: String,
@@ -268,6 +274,11 @@ impl Config {
             .unwrap_or(6432);
         let db_sslmode =
             std::env::var("TSUBOMI_DB_SSLMODE").unwrap_or_else(|_| "disable".to_string());
+        // 外部接続文字列の提供可否。既定 false(公網 TCP 入口を持たない CF 部署で誤って
+        // 届かない接続文字列を見せないため)。公網 IP の VPS / ローカル dev で明示的に true にする。
+        let db_public_enabled = std::env::var("TSUBOMI_DB_PUBLIC_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         // 注入する内部入口(コンテナ → edge 上の pgbouncer を docker DNS で)。§7.2。
         let db_internal_host = std::env::var("TSUBOMI_DB_INTERNAL_HOST")
             .unwrap_or_else(|_| "tsubomi-pgbouncer".to_string());
@@ -386,6 +397,7 @@ impl Config {
             db_public_host,
             db_public_port,
             db_sslmode,
+            db_public_enabled,
             db_internal_host,
             db_internal_port,
             valkey_admin_url,

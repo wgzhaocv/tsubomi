@@ -109,6 +109,11 @@ pub struct Health {
 pub struct AuthInfo {
     /// ログインを許可された Google Workspace ドメイン(`TSUBOMI_ALLOWED_HD`)。
     pub allowed_domains: Vec<String>,
+    /// 外部(human)接続文字列機能が有効か(`TSUBOMI_DB_PUBLIC_ENABLED`)。off の部署
+    /// (CF Tunnel 等、公網 TCP 入口なし)では web が DB の接続文字列カードを隠す。
+    /// 秘密ではない(機能の有無を示すだけ)。古いクライアント互換のため `serde(default)`。
+    #[serde(default)]
+    pub db_public_enabled: bool,
 }
 
 /// `GET /api/auth/me` のレスポンスボディ。

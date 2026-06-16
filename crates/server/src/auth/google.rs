@@ -58,6 +58,7 @@ struct UserInfo {
 pub async fn info(State(state): State<AppState>) -> Json<AuthInfo> {
     Json(AuthInfo {
         allowed_domains: state.config.allowed_hds.clone(),
+        db_public_enabled: state.config.db_public_enabled,
     })
 }
 

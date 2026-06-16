@@ -11,6 +11,11 @@ pub enum AppError {
     Unauthorized,
     #[error("権限がありません")]
     Forbidden,
+    /// 403 だが理由を文案で伝える版(機能がこの環境で無効、等の**ポリシー拒否**)。固定文言の
+    /// `Forbidden` と違い次の一手を載せられる。CLI 契約では 403 = `forbidden`(端末扱い = AI は
+    /// 入力を直しても無駄なので再試行しない。`validation`(400)だと誤って再試行する)。
+    #[error("{0}")]
+    ForbiddenMsg(String),
     #[error("{0}")]
     BadRequest(String),
     /// 409。重複(同名リソースなど)。500 に潰さず、原因が分かる 4xx で返す。
@@ -36,7 +41,7 @@ impl AppError {
         match self {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::ForbiddenMsg(_) => StatusCode::FORBIDDEN,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Sqlx(_)

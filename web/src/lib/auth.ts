@@ -19,6 +19,9 @@ export type Me = {
 // ログイン画面が表示する公開情報(許可された会社ドメイン)。
 export type AuthInfo = {
   allowed_domains: string[];
+  // 外部(human)接続文字列機能が有効か。off の部署(CF Tunnel 等、公網 TCP 入口なし)では
+  // DB 詳細の接続文字列カードを隠す。秘密ではない(機能の有無のみ)。
+  db_public_enabled: boolean;
 };
 
 export const authKeys = {
