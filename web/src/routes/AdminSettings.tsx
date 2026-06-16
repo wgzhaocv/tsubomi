@@ -33,7 +33,7 @@ export default function AdminSettings() {
 
   return (
     <PageContainer>
-      <div className="flex max-w-xl flex-col gap-7">
+      <div className="mx-auto flex max-w-xl flex-col gap-7">
         <PageMeta title="共有パスワード設定" />
 
         <Title size="large" color="purple">

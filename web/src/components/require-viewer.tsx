@@ -32,7 +32,7 @@ export function RequireViewer() {
 
   return (
     <PageContainer>
-      <div className="flex max-w-md flex-col gap-7">
+      <div className="mx-auto flex max-w-md flex-col gap-7">
         <Title size="large" color="purple">
           管理画面(閲覧)
         </Title>
