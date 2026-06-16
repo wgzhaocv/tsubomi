@@ -5,6 +5,13 @@ import { useEffect, useState } from "react";
 // だけ接続**し、unmount で close する(= 誰も見ていなければ後端のサンプラも止まる)。
 // 各値は best-effort:取得不能(dev macOS は /proc 無しで CPU/メモリ)は null → UI は「—」。
 
+// 平台自身の 1 コンテナ(server / pg-platform / valkey …)の使用量。加総せず個別表示。
+export type ContainerStat = {
+  name: string;
+  cpu_pct: number | null;
+  mem_bytes: number;
+};
+
 export type HostMetrics = {
   cpu_pct: number | null;
   mem_used: number | null;
@@ -12,6 +19,8 @@ export type HostMetrics = {
   disk_used: number | null;
   disk_total: number | null;
   disk_pct: number | null;
+  // 平台自身(server + infra)の各コンテナ。dev は server が容器でないので出ない。
+  platform: ContainerStat[];
 };
 
 // 接続状態。WS が開けないと "closed"(rendering 側で控えめに扱う)。

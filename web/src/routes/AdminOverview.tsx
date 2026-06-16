@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { BarChart3, type LucideIcon, Server, Users } from "lucide-react";
+import { BarChart3, Boxes, type LucideIcon, Server, Users } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
@@ -13,7 +13,7 @@ import {
   KIND_LABEL,
   useAdminOverview,
 } from "@/lib/admin";
-import { useHostMetrics } from "@/lib/host-metrics";
+import { type HostMetrics, useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
 import { formatBytes } from "@/lib/volumes";
 
@@ -97,10 +97,9 @@ function formatPair(used: number | null | undefined, total: number | null | unde
   return `${formatBytes(used)} / ${formatBytes(total)}`;
 }
 
-// サーバー本体(ホスト)の使用状況。WS(useHostMetrics)で 5s 毎に更新。データが来る前 /
+// サーバー本体(ホスト)の使用状況。データは WS(useHostMetrics)で 5s 毎に更新。来る前 /
 // 取得不能(dev の CPU・メモリ)は「—」と 0 幅バー。HTTP の overview とは独立。
-function HostCard() {
-  const { data, connected } = useHostMetrics();
+function HostCard({ data, connected }: { data: HostMetrics | null; connected: boolean }) {
   const cpu = data?.cpu_pct ?? null;
   const memPct =
     data?.mem_used != null && data.mem_total ? (data.mem_used / data.mem_total) * 100 : null;
@@ -138,8 +137,55 @@ function HostCard() {
   );
 }
 
+// プラットフォーム自身(server + infra コンテナ)の使用量を**各コンテナ別**に出す。
+// 加総せず一覧 — どの基礎設施が重いか分かる。用户 app は含めない。dev は server が
+// 容器でないので並ばない(infra のみ)。データは HostCard と同じ WS から(props で受ける)。
+function PlatformCard({ items }: { items: HostMetrics["platform"] }) {
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
+            <Boxes className="size-5.5" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-base font-bold text-foreground">プラットフォーム自身</span>
+            <span className="text-xs font-medium text-muted-foreground">
+              各コンテナの CPU / メモリ(利用者のアプリは含みません)
+            </span>
+          </div>
+        </div>
+        {items.length === 0 ? (
+          <span className="text-sm font-medium text-muted-foreground">
+            コンテナ情報がありません(取得待ち、または dev では server は対象外)。
+          </span>
+        ) : (
+          <dl className="flex flex-col divide-y divide-[rgba(196,184,158,0.3)]">
+            {items.map((c) => (
+              <div key={c.name} className="flex items-center justify-between gap-3 py-2.5">
+                <dt className="font-mono text-sm font-bold text-foreground">{c.name}</dt>
+                <dd className="flex items-center gap-5">
+                  <span className="text-sm tabular-nums text-muted-foreground">
+                    CPU {c.cpu_pct == null ? "—" : `${c.cpu_pct.toFixed(0)}%`}
+                  </span>
+                  <span className="w-20 text-right font-mono text-sm font-bold text-[#0b9c93]">
+                    {formatBytes(c.mem_bytes)}
+                  </span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AdminOverview() {
   const { data, isPending, error } = useAdminOverview();
+  // ホスト指標 WS は**この 1 箇所だけ**で開く(HostCard / PlatformCard に props で配る)。
+  // 2 回呼ぶと WS が 2 本張られるため。
+  const host = useHostMetrics();
 
   return (
     <PageContainer>
@@ -165,7 +211,7 @@ export default function AdminOverview() {
           どれだけ使っているかだけ)。
         </p>
 
-        <HostCard />
+        <HostCard data={host.data} connected={host.connected} />
 
         {error && (
           <p className="text-sm font-semibold text-[#e05a5a]">
@@ -203,6 +249,9 @@ export default function AdminOverview() {
             </div>
           </>
         )}
+
+        {/* 最下部:プラットフォーム自身(server + infra)のコンテナ別使用量。 */}
+        <PlatformCard items={host.data?.platform ?? []} />
       </div>
     </PageContainer>
   );

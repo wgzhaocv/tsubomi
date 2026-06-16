@@ -323,19 +323,79 @@ pub async fn stats(state: &AppState, service_id: Uuid) -> Option<ServiceStat> {
         .into_iter()
         .find(|c| matches!(c.state, Some(ContainerSummaryStateEnum::RUNNING)))
         .and_then(|c| c.id)?;
+    let (cpu_pct, mem_bytes) = sample_stats(state, &name).await?;
+    Some(ServiceStat {
+        cpu_pct,
+        mem_bytes: mem_bytes as i64,
+    })
+}
 
+/// 1 コンテナ(名前 or id)を 1 サンプル stats して `(cpu_pct, mem_bytes)` を返す。
+/// `stream=false` で daemon の 2 サンプルから precpu を埋めるので CPU% が出る(~1 秒)。
+/// service stats と platform stats が共有する。取得失敗は None(best-effort)。
+async fn sample_stats(state: &AppState, name_or_id: &str) -> Option<(Option<f64>, u64)> {
     let opts = StatsOptionsBuilder::default().stream(false).build();
-    let sample = state.docker.stats(&name, Some(opts)).next().await?.ok()?;
-
+    let sample = state.docker.stats(name_or_id, Some(opts)).next().await?.ok()?;
     let mem_bytes = sample
         .memory_stats
         .as_ref()
         .and_then(|m| m.usage)
-        .unwrap_or(0) as i64;
-    Some(ServiceStat {
-        cpu_pct: compute_cpu_pct(&sample),
-        mem_bytes,
-    })
+        .unwrap_or(0);
+    Some((compute_cpu_pct(&sample), mem_bytes))
+}
+
+/// 平台自身の 1 コンテナの監視指標(リソース概要「プラットフォーム自身」。各コンテナ別に出す)。
+#[derive(Clone, serde::Serialize)]
+pub struct ContainerStat {
+    /// 表示名(先頭の `tsubomi-` を剥がした短名。例 server / pg-platform / valkey)。
+    pub name: String,
+    /// CPU 使用率(%)。算出不能は None。
+    pub cpu_pct: Option<f64>,
+    /// 内存使用量(bytes)。
+    pub mem_bytes: u64,
+}
+
+/// 平台自身(server + infra)の各コンテナの 1 サンプル stats を返す(リソース概要の
+/// 「プラットフォーム自身」)。対象 = 名前が `tsubomi-` で始まり、かつ用户 app の
+/// `tsubomi.managed` ラベルを**持たない** running コンテナ(= infra + server。用户 service
+/// コンテナは managed ラベルで除外)。各コンテナを並行に 1 サンプルする。best-effort:
+/// 列挙 / 各 stats の失敗は黙って飛ばす。閲覧者がいる時だけ 5s 毎に呼ばれる(metrics サンプラ)。
+pub async fn platform_stats(state: &AppState) -> Vec<ContainerStat> {
+    let opts = ListContainersOptionsBuilder::default().all(false).build(); // running のみ
+    let Ok(list) = state.docker.list_containers(Some(opts)).await else {
+        return Vec::new();
+    };
+    let targets: Vec<(String, String)> = list
+        .into_iter()
+        .filter_map(|c| {
+            let id = c.id?;
+            let raw = c.names.as_ref()?.first()?.trim_start_matches('/').to_string();
+            // 平台容器だけ:tsubomi- 名前 かつ managed ラベル無し(用户 app を除外)。
+            let managed = c
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key(LABEL_MANAGED));
+            (raw.starts_with("tsubomi-") && !managed).then_some((id, raw))
+        })
+        .collect();
+
+    let futs = targets.into_iter().map(|(id, raw)| async move {
+        let (cpu_pct, mem_bytes) = sample_stats(state, &id).await?;
+        let name = raw.strip_prefix("tsubomi-").unwrap_or(&raw).to_string();
+        Some(ContainerStat {
+            name,
+            cpu_pct,
+            mem_bytes,
+        })
+    });
+    let mut stats: Vec<ContainerStat> = futures_util::future::join_all(futs)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
+    // server を先頭、残りは名前順(安定表示)。
+    stats.sort_by_key(|c| (c.name != "server", c.name.clone()));
+    stats
 }
 
 /// Docker 公式の CPU% 算出:`(cpu_delta / system_delta) * online_cpus * 100`。

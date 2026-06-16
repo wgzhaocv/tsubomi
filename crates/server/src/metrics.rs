@@ -47,6 +47,9 @@ pub struct HostMetrics {
     pub disk_total: Option<u64>,
     /// ディスク使用率(%)。
     pub disk_pct: Option<u8>,
+    /// 平台自身(server + infra)の**各コンテナ**の CPU/メモリ(加総せず個別に出す)。
+    /// 用户 app は含めない(managed ラベルで除外)。dev は server が容器でないので出ない。
+    pub platform: Vec<crate::services::docker::ContainerStat>,
 }
 
 /// `df -Pk` の 1 行を解析したディスク容量。`gc` のディスク警告(使用率)とも共有する。
@@ -119,14 +122,33 @@ fn spawn_sampler(state: AppState) {
         // CPU% は前回サンプルとの差分。初回は前回が無いので None(メモリ/ディスクは即出る)。
         let mut prev_cpu: Option<CpuTimes> = None;
         let mut tick = tokio::time::interval(SAMPLE_INTERVAL);
+        // 1 回の採取(docker stats ~1-2s)が間隔を超えても**バースト追い上げしない** —
+        // 取りこぼした tick は捨てて次の周期へ。負荷を一定に保つ(性能影響を出さない要件)。
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await; // 0th tick は即発火 → 初回スナップショットは接続直後に届く
-            // 採取はロックの外(数 ms の I/O。ロックは送信判定だけ短く保つ)。
+            // 採取前に受信者ゼロを判定して停止する(要件③)。これが無いと、最後の閲覧者が
+            // 切れても**次 tick で docker stats を 1 バッチ余計に走らせて**から send Err で
+            // 気づく。先に弾けば「誰も見ていない時は重い採取を一切しない」が完全になる。
+            // handle_socket の「subscribe → lock → !running で起動」と同ロックで直列化される
+            // ので、判定と新規接続の race は無い(subscribe 済みなら count>0 を見る)。
+            {
+                let mut running = state.metrics_running.lock().await;
+                if state.metrics_tx.receiver_count() == 0 {
+                    *running = false;
+                    tracing::debug!("host metrics サンプラ停止(閲覧者ゼロ)");
+                    break;
+                }
+            }
+            // 採取はロックの外(数 ms の I/O + docker stats。ロックは送信判定だけ短く保つ)。
             let cur_cpu = read_cpu_times().await;
             let cpu_pct = prev_cpu.zip(cur_cpu).and_then(|(p, c)| cpu_delta_pct(p, c));
             prev_cpu = cur_cpu;
             let mem = read_mem().await;
             let disk = disk_metrics(&state.config.volumes_dir).await;
+            // 平台自身の各コンテナ(server + infra)。docker stats を並行に取る(~1-2s)。
+            // 採取はロックの外なので host 指標の鮮度を妨げない。
+            let platform = crate::services::docker::platform_stats(&state).await;
             let snap = HostMetrics {
                 cpu_pct,
                 mem_used: mem.map(|(used, _)| used),
@@ -134,11 +156,13 @@ fn spawn_sampler(state: AppState) {
                 disk_used: disk.map(|d| d.used),
                 disk_total: disk.map(|d| d.total),
                 disk_pct: disk.map(|d| d.pct),
+                platform,
             };
 
             let mut running = state.metrics_running.lock().await;
             if state.metrics_tx.send(snap).is_err() {
-                *running = false; // 受信者ゼロ → 停止(要件③)
+                // backstop:採取中(~1-2s)に最後の 1 人が切れた場合はここで気づく。
+                *running = false;
                 tracing::debug!("host metrics サンプラ停止(閲覧者ゼロ)");
                 break;
             }
