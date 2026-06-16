@@ -11,7 +11,7 @@ import { Modal } from "@/components/ui/modal";
 import { Title } from "@/components/ui/title";
 import { type AdminOwner, useAddOwner, useOwners, useRemoveOwner } from "@/lib/owners";
 
-// owner 管理(owner 専用)。design v2 §7:最多 2 名の対等 owner、互いに外せるが自分は外せない
+// owner 管理(owner 専用)。design v2 §7:最大 2 名の対等 owner、互いに外せるが自分は外せない
 // (最低 1 名)、外された人へメール通知。env は冷启动种のみ — 運用中はここで増減する。
 // 表示制御はただの UX(後端が require_owner_web で守る)。
 
@@ -68,7 +68,7 @@ export default function AdminOwners() {
 
         <p className="text-sm font-medium text-foreground">
           管理者は管理画面の操作(他人の資源の停止 / 削除、共有パスワード、IP 許可リスト)を
-          行えます。<strong>最多 {MAX_OWNERS} 名</strong>・自分自身は外せません(最低 1 名必要)。
+          行えます。<strong>最大 {MAX_OWNERS} 名</strong>・自分自身は外せません(最低 1 名必要)。
           外された人にはメールで通知します。
         </p>
 

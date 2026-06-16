@@ -71,11 +71,11 @@ export default function AdminOverview() {
   return (
     <PageContainer>
       <div className="flex flex-col gap-7">
-        <PageMeta title="管制面の総覧" />
+        <PageMeta title="リソース概要" />
 
         <header className="flex flex-wrap items-center justify-between gap-4">
           <Title size="large" color="purple">
-            管制面の総覧
+            リソース概要
           </Title>
           <Button type="default" asChild>
             <Link to="/admin/ranking" className="inline-flex items-center gap-2">

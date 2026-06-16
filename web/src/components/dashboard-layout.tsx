@@ -158,7 +158,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             管理
           </span>
           {/* end:/admin は総覧のみ active(/admin/ranking では非 active にする)。 */}
-          <AdminNavLink to="/admin" end icon={Gauge} label="管制面" onNavigate={onNavigate} />
+          <AdminNavLink to="/admin" end icon={Gauge} label="リソース概要" onNavigate={onNavigate} />
           <AdminNavLink
             to="/admin/ranking"
             icon={BarChart3}

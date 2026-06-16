@@ -1,4 +1,4 @@
-//! owner 管理(env→DB、web で 2 人目の owner を増減)。design v2 §7:最多 2 名の対等 owner、
+//! owner 管理(env→DB、web で 2 人目の owner を増減)。design v2 §7:最大 2 名の対等 owner、
 //! 互いに外せるが自分は外せない(最低 1 名)、外された人へメール通知、初期 owner は env 種。
 //! web と CLI は同一ハンドラの 2 入口だが、owner ガバナンスは **web 専用**
 //! (`require_owner_web` が Bearer cli_token を拒否)。
