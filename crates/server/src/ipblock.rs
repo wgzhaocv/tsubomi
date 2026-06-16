@@ -32,6 +32,14 @@ use uuid::Uuid;
 /// `<NAME>@file` で参照する(file provider 由来を示す `@file` サフィックス)。
 pub const TRAEFIK_MIDDLEWARE: &str = "tsubomi-ipallow";
 
+/// 公開 DB(Postgres)を Traefik の TCP 入口経由にする時の入口名。**`compose.prod.db-public.yml`
+/// の `--entrypoints.postgres.address` と一致させること**(compose ↔ コードの契約。route.rs の
+/// ENTRYPOINT_HTTP/TLS と同じ約束)。
+const POSTGRES_ENTRYPOINT: &str = "postgres";
+
+/// 公開 DB の TCP ipAllowList middleware 名(HTTP の TRAEFIK_MIDDLEWARE とは別系統 = `tcp:` 配下)。
+const TRAEFIK_TCP_MIDDLEWARE: &str = "tsubomi-pg-ipallow";
+
 /// メモの最大長(表示名と同じ感覚の自由文字列。暴走入力だけ弾く)。
 const MAX_NOTE_LEN: usize = 200;
 
@@ -183,9 +191,9 @@ pub async fn delete(
 
 // ===== traefik への収束 =====
 
-/// 現在の許可リストを読んで traefik の動的設定ファイル(ipallow.yml)を原子的に書き直す。
-/// 起動時(main)と各変更後に呼ぶ。best-effort:失敗してもリクエストは止めない
-/// (DB が真実源。起動時同期や次回変更で収束する)。
+/// 現在の許可リストを読んで traefik の動的設定を原子的に書き直す:HTTP の `ipallow.yml`(常時)+
+/// 公開 DB 有効時の TCP `db-tcp.yml`(無効なら削除)。起動時(main)と各変更後に呼ぶ。best-effort:
+/// 失敗してもリクエストは止めない(DB が真実源。起動時同期や次回変更で収束する)。
 pub async fn sync_traefik(state: &AppState) {
     if let Err(e) = sync_traefik_inner(state).await {
         tracing::error!(
@@ -210,19 +218,49 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     tokio::fs::write(&tmp, render_yaml(&cidrs)).await?;
     tokio::fs::rename(&tmp, &target).await?;
     tracing::info!(count = cidrs.len(), "IP 許可リストを traefik へ同期した");
+
+    // 公開 DB(VPS)では Postgres も Traefik の TCP 入口(postgres)経由にし、**同じ許可リスト**を
+    // TCP の ipAllowList として流用する(HTTP は pgbouncer 直結を通らないので別途 tcp: で被せる)。
+    // 無効な部署(CF Tunnel 等)では db-tcp.yml を置かない(在れば消す = off に倒した時に確実に閉じる)。
+    let db_tcp = dir.join("db-tcp.yml");
+    if state.config.db_public_enabled {
+        let backend = format!(
+            "{}:{}",
+            state.config.db_internal_host, state.config.db_internal_port
+        );
+        let tmp = dir.join(".db-tcp.yml.tmp");
+        tokio::fs::write(&tmp, render_db_tcp_yaml(&cidrs, &backend)).await?;
+        tokio::fs::rename(&tmp, &db_tcp).await?;
+        tracing::info!(
+            count = cidrs.len(),
+            "公開 DB(TCP)の IP 許可リストを traefik へ同期した"
+        );
+    } else {
+        match tokio::fs::remove_file(&db_tcp).await {
+            Ok(()) => tracing::info!("公開 DB が無効なので db-tcp.yml を削除した"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
     Ok(())
+}
+
+/// 許可リストを traefik の sourceRange へ。空 = fail-open(`0.0.0.0/0` + `::/0` で全 v4/v6 許可)。
+/// HTTP(`render_yaml`)と TCP(`render_db_tcp_yaml`)の両描画が共有する **fail-open ポリシーの唯一の真実**
+/// (片方だけ変えてズレるのを防ぐ)。CIDR は normalize_cidr を通った値だけなので安全。
+fn fail_open_ranges(cidrs: &[String]) -> Vec<&str> {
+    if cidrs.is_empty() {
+        vec!["0.0.0.0/0", "::/0"]
+    } else {
+        cidrs.iter().map(String::as_str).collect()
+    }
 }
 
 /// traefik 動的設定(YAML)を組み立てる。空リスト = fail-open(全 IP 許可)。
 /// CIDR は normalize_cidr を通った値だけなので安全(それでも引用符で包む)。
 fn render_yaml(cidrs: &[String]) -> String {
-    // 空 = 制限なし。0.0.0.0/0 + ::/0 で全 v4/v6 を許可(middleware は常に定義する —
-    // ルータが参照する name が未定義だと traefik がそのルートを弾くため)。
-    let ranges: Vec<&str> = if cidrs.is_empty() {
-        vec!["0.0.0.0/0", "::/0"]
-    } else {
-        cidrs.iter().map(String::as_str).collect()
-    };
+    // middleware は常に定義する(ルータが参照する name が未定義だと traefik がそのルートを弾くため)。
+    let ranges = fail_open_ranges(cidrs);
 
     let mut s = String::new();
     s.push_str("# 平台(tsubomi-server)が自動生成。手で編集しない —\n");
@@ -236,6 +274,48 @@ fn render_yaml(cidrs: &[String]) -> String {
     for c in ranges {
         s.push_str(&format!("          - \"{c}\"\n"));
     }
+    s
+}
+
+/// 公開 DB(Postgres)用の traefik **TCP** 動的設定(YAML)。HTTP と同じ会社 IP 許可リストを
+/// TCP の ipAllowList として流用する。空リスト = fail-open(HTTP と同じ約束)。
+/// pgbouncer が client TLS を終端するので Traefik は **素の TCP passthrough**(`HostSNI(*)`・TLS 無し)=
+/// client の `sslmode=require` は pgbouncer と端到端で TLS を張る。`backend` = 内部 pgbouncer の
+/// `host:port`(db_internal_host:db_internal_port。値は平台生成なのでそのまま埋めて安全)。
+fn render_db_tcp_yaml(cidrs: &[String], backend: &str) -> String {
+    let ranges = fail_open_ranges(cidrs);
+
+    let mut s = String::new();
+    s.push_str("# 平台(tsubomi-server)が自動生成。手で編集しない —\n");
+    s.push_str(
+        "# 公開 DB(TSUBOMI_DB_PUBLIC_ENABLED)有効時のみ書かれ、IP 許可リスト変更で上書きされる。\n",
+    );
+    s.push_str(
+        "# Postgres を Traefik の TCP 入口(postgres)経由にし、HTTP と同じ許可リストを流用する。\n",
+    );
+    s.push_str("# 空リスト = 全 IP 許可(fail-open)。1 件以上 = その CIDR だけ許可。\n");
+    s.push_str("tcp:\n");
+    s.push_str("  routers:\n");
+    s.push_str("    tsubomi-postgres:\n");
+    s.push_str(&format!("      entryPoints: [\"{POSTGRES_ENTRYPOINT}\"]\n"));
+    // HostSNI(`*`) = 非 TLS の素 TCP を全マッチ(pgbouncer が TLS 終端 = Traefik は passthrough)。
+    s.push_str("      rule: \"HostSNI(`*`)\"\n");
+    s.push_str("      service: \"tsubomi-postgres\"\n");
+    s.push_str(&format!(
+        "      middlewares: [\"{TRAEFIK_TCP_MIDDLEWARE}@file\"]\n"
+    ));
+    s.push_str("  middlewares:\n");
+    s.push_str(&format!("    {TRAEFIK_TCP_MIDDLEWARE}:\n"));
+    s.push_str("      ipAllowList:\n");
+    s.push_str("        sourceRange:\n");
+    for c in ranges {
+        s.push_str(&format!("          - \"{c}\"\n"));
+    }
+    s.push_str("  services:\n");
+    s.push_str("    tsubomi-postgres:\n");
+    s.push_str("      loadBalancer:\n");
+    s.push_str("        servers:\n");
+    s.push_str(&format!("          - address: \"{backend}\"\n"));
     s
 }
 
@@ -270,6 +350,27 @@ mod tests {
     #[test]
     fn nonempty_list_only_lists_given_ranges() {
         let yaml = render_yaml(&["10.0.0.0/8".to_string()]);
+        assert!(yaml.contains("10.0.0.0/8"));
+        assert!(!yaml.contains("0.0.0.0/0"));
+    }
+
+    #[test]
+    fn db_tcp_render_is_passthrough_and_fail_open() {
+        let yaml = render_db_tcp_yaml(&[], "tsubomi-pgbouncer:6432");
+        // TCP 入口 + 素 passthrough + backend + middleware を含む。
+        assert!(yaml.contains("tcp:"));
+        assert!(yaml.contains("HostSNI(`*`)"));
+        assert!(yaml.contains(POSTGRES_ENTRYPOINT));
+        assert!(yaml.contains(TRAEFIK_TCP_MIDDLEWARE));
+        assert!(yaml.contains("tsubomi-pgbouncer:6432"));
+        // 空リスト = fail-open。
+        assert!(yaml.contains("0.0.0.0/0"));
+        assert!(yaml.contains("::/0"));
+    }
+
+    #[test]
+    fn db_tcp_render_restricts_to_given_cidrs() {
+        let yaml = render_db_tcp_yaml(&["10.0.0.0/8".to_string()], "tsubomi-pgbouncer:6432");
         assert!(yaml.contains("10.0.0.0/8"));
         assert!(!yaml.contains("0.0.0.0/0"));
     }

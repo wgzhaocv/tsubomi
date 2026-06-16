@@ -70,8 +70,12 @@ M1 で入ったもの:`resources` スーパーテーブル + `database_details`/
 公網 TCP 入口を持たない部署では web が接続文字列カードを隠し `/url`・`/rotate` も後端で拒否
 (`require_db_public`。届かない LAN IP の誤誘導を断つ)。公網 IP の VPS でのみ true。web SQL タブと
 human role 自体はこのフラグと無関係で常に動く(web SQL は tenant_admin_url 経由 = 公開ホスト不使用)。
-AuthInfo(`/auth/info`)に `db_public_enabled` を載せ前端が判定。**残:DB の ipblock**(公開 DB を
-有効にした VPS で、会社 IP 許可リストを Traefik TCP 入口に流用 — VPS 落地後に実装)。
+AuthInfo(`/auth/info`)に `db_public_enabled` を載せ前端が判定。**公開 DB の ipblock も実装済み**:
+有効時 `ipblock::sync_traefik` が `db-tcp.yml`(Traefik **TCP** router + ipAllowList + service=
+内部 pgbouncer)を書き、**会社 IP 許可リスト(`ip_allow_entries`)を TCP にも流用**(無効なら削除)。
+pgbouncer が client TLS を終端するので Traefik は素の TCP passthrough。VPS は `compose.prod.db-public.yml`
+を重ねて Traefik に `postgres`(:6432)入口を生やす(`db_public_enabled=true` と override はセット)。
+描画 + 単体テストは dev で検証済み・**活体検証は VPS 落地後**。実装級は **`paas-db-public-design.md`**。
 
 M2 で入ったもの:`volume_details`;**volume は顶层リソース**(service 所有ではない)。
 各 volume は独立した假根サンドボックス `volumes/<user>/<id>`。**唯一のハード境界 =

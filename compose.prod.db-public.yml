@@ -1,0 +1,46 @@
+# 公開 DB(VPS)で **Postgres を Traefik の TCP 入口経由**にし、HTTP と同じ会社 IP 許可リストを
+# 流用する場合の上書き。**公網 IP を持つ VPS でのみ使う**(CF Tunnel 部署では使わない — CF は裸 TCP を
+# 通さず、その部署は db_public_enabled=false で外部 DB を畳んでいる)。
+#
+# 使い方(VPS):
+#   .env.production:
+#     TSUBOMI_DB_PUBLIC_ENABLED=true        # 平台が db-tcp.yml を書く条件(ipblock.rs)
+#     TSUBOMI_DB_PUBLIC_HOST=<VPS 公開名>    # 接続文字列(build_url)の host
+#     TSUBOMI_DB_PUBLIC_PORT=6432
+#     TSUBOMI_DB_SSLMODE=require             # pgbouncer が client TLS を終端
+#     (+ db.<域名> 等の A レコードを VPS 公網 IP へ。:6432 が公網到達できること)
+#   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.db-public.yml up -d
+#
+# 仕組み:平台(server)が db_public_enabled=true の時 db-tcp.yml(tcp router + ipAllowList +
+#   service=tsubomi-pgbouncer:6432)を動的設定へ書く(ipblock::sync_traefik)。Traefik は **素の TCP
+#   passthrough** で pgbouncer へ流し、client の sslmode=require は pgbouncer と端到端で TLS を張る
+#   (pgbouncer が証明書を持ち終端する)。会社 IP 許可リスト(ip_allow_entries)が TCP にも効く。
+#
+# 地雷:
+#  * **真の client IP**:Traefik が直接 client の TCP を受ける構成でのみ ipAllowList が正しい IP を見る。
+#    前段に L4 proxy/LB を挟むなら traefik に `--entrypoints.postgres.proxyProtocol.trustedIPs=<上流>`
+#    を足し、上流で PROXY protocol を有効化すること(でないと全 client が上流 IP に見え許可リストが無意味)。
+#  * **db_public_enabled=true とこの override はセット**。フラグだけ true でこれを重ねないと
+#    db-tcp.yml が未定義の postgres 入口を参照し router が不活性になる(Traefik は警告のみ・無害だが繋がらない)。
+#  * **compose.prod.tls.yml と同居**(直 VPS で traefik が :443 も終端)する場合、両者とも `command` を
+#    全置換するので web+websecure+postgres を**一つの command に統合**すること(本ファイル単体は
+#    上流 TLS = HTTP は :80 のみ、という常用形を想定)。
+#
+# ※ `command`(リスト)は後勝ちで全置換なので base(compose.prod.yml)の行も再掲する。`ports` はマージ
+#   (:6432 が base に足される)。pgbouncer の host publish は `!reset` で落とす — 公開 6432 は Traefik が
+#   単独で持つ(二重 bind 回避)。pgbouncer へは Traefik も注入 app も docker DNS `tsubomi-pgbouncer:6432`
+#   で内部到達するので host publish は不要。
+services:
+  traefik:
+    command:
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      # 公開 DB の TCP 入口。名前 `postgres` は ipblock.rs::POSTGRES_ENTRYPOINT と一致させること。
+      - --entrypoints.postgres.address=:6432
+    ports:
+      - "${TRAEFIK_POSTGRES_BIND_ADDR:-0.0.0.0}:6432:6432"
+
+  pgbouncer:
+    # 公開 6432 は Traefik が持つので pgbouncer の host publish は落とす(!reset = base のリストを空に)。
+    ports: !reset []
