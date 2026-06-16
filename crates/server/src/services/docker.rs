@@ -10,6 +10,7 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
+use tsubomi_shared::ExecResult;
 use bollard::models::{
     ContainerCreateBody, ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum,
     HostConfig, RestartPolicy, RestartPolicyNameEnum,
@@ -18,7 +19,8 @@ use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     LogsOptionsBuilder, RemoveContainerOptionsBuilder, StatsOptionsBuilder,
 };
-use futures_util::StreamExt;
+use axum::extract::ws::{Message, WebSocket};
+use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -299,6 +301,251 @@ pub async fn logs_by_name(state: &AppState, name: &str, tail: usize) -> String {
         }
     }
     out
+}
+
+/// service の **稼働中**コンテナ名を返す(start-first 後は通常 1 つ)。停止中 / 未デプロイ /
+/// 不在は None。exec / terminal が共有する「中に入れる相手」の解決ロジック。`logs` は停止直前の
+/// クラッシュ診断のため**任意状態**のコンテナを引く別契約なので共有しない(こちらは exec 可能 =
+/// RUNNING 限定。stats[:319] と同じ絞り込み)。
+pub async fn running_container_name(
+    state: &AppState,
+    service_id: Uuid,
+) -> AppResult<Option<String>> {
+    Ok(list_by_service(state, service_id)
+        .await?
+        .into_iter()
+        .find(|c| matches!(c.state, Some(ContainerSummaryStateEnum::RUNNING)))
+        .and_then(|c| c.id))
+}
+
+/// 出力捕獲の上限(stdout+stderr 合計の概算 bytes)。超えたら打ち切り `truncated=true`。
+/// 巨大出力をメモリに丸ごと載せない(`tbm service exec app -- cat huge` 等)。
+const EXEC_OUTPUT_CAP: usize = 1024 * 1024;
+/// 1 コマンドの最大実行時間。超えたら捕獲済みを返して `timed_out=true`(長時間 / 対話は
+/// web ターミナルへ誘導)。exec プロセス自体は容器内に残り、容器の終了 / 再デプロイで回収される。
+const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 稼働中コンテナ内で 1 コマンドを **非対話**に実行し、stdout/stderr/exit_code を捕獲して返す
+/// (`docker exec`(`-it` なし)相当)。CLI `tbm service exec` / 線上診断の土台。対話 PTY が
+/// 要るときは web ターミナル(`handle_terminal`)。registry GC[:249] とほぼ同型だが、こちらは
+/// **tty なし** = daemon が多重化で stdout/stderr を分離するので別々に蓄積する。
+pub async fn exec_capture(
+    state: &AppState,
+    container_name: &str,
+    cmd: Vec<String>,
+) -> AppResult<ExecResult> {
+    use bollard::container::LogOutput;
+    use bollard::exec::{CreateExecOptions, StartExecResults};
+
+    let created = state
+        .docker
+        .create_exec(
+            container_name,
+            CreateExecOptions::<String> {
+                cmd: Some(cmd),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                // tty は立てない(既定 false):多重化を効かせて stdout/stderr を分離捕獲する。
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| AppError::Other(anyhow!("コマンドの起動準備に失敗: {e}")))?;
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut truncated = false;
+    let mut timed_out = false;
+
+    if let StartExecResults::Attached { mut output, .. } = state
+        .docker
+        .start_exec(&created.id, None)
+        .await
+        .map_err(|e| AppError::Other(anyhow!("コマンドの起動に失敗: {e}")))?
+    {
+        // 出力はドレインしないと exec が滞留する。上限到達後もストリームは読み続ける
+        // (registry GC と同じ作法)。全体に硬いタイムアウトを被せる。
+        let drain = async {
+            while let Some(item) = output.next().await {
+                let Ok(chunk) = item else { break };
+                // 残り予算を先に計算してから 1 つの buffer を借りる(両 len を借用衝突なく読む)。
+                let remaining = EXEC_OUTPUT_CAP.saturating_sub(stdout.len() + stderr.len());
+                let (buf, message) = match chunk {
+                    LogOutput::StdErr { message } => (&mut stderr, message),
+                    // tty なしで StdIn/Console は通常来ないが、来ても stdout 側へ寄せる。
+                    LogOutput::StdOut { message }
+                    | LogOutput::Console { message }
+                    | LogOutput::StdIn { message } => (&mut stdout, message),
+                };
+                if message.len() > remaining {
+                    // 1 フレームで予算を超える分は切り詰める(cap を厳密に保つ)。残りはドレイン継続。
+                    buf.push_str(&String::from_utf8_lossy(&message[..remaining]));
+                    truncated = true;
+                } else {
+                    buf.push_str(&String::from_utf8_lossy(&message));
+                }
+            }
+        };
+        if tokio::time::timeout(EXEC_TIMEOUT, drain).await.is_err() {
+            timed_out = true;
+        }
+    }
+
+    // exit_code を確認(timeout 時はまだ走っているので None になり得る = データとして返す)。
+    let exit_code = state
+        .docker
+        .inspect_exec(&created.id)
+        .await
+        .ok()
+        .and_then(|i| i.exit_code);
+
+    Ok(ExecResult {
+        stdout,
+        stderr,
+        exit_code,
+        truncated,
+        timed_out,
+    })
+}
+
+/// 対話ターミナル 1 セッションの最大時間。逆プロキシ(CF Tunnel)越しの半開き接続で
+/// `recv` も `output` も EOF せず `sh` が生き残るのを防ぐ backstop(axum は Ping に自動 Pong
+/// するので liveness はプロキシ依存 = この timeout が最後の砦)。
+const TERMINAL_MAX_SESSION: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// 1 WS セッション:所有者が自分の稼働中コンテナ内で対話シェル(`/bin/sh`)を開く(web 専用)。
+/// 升级前に `ensure_owned` + コンテナ稼働中は確認済み。container_name は解決済み。
+///
+/// ワイヤープロトコル:**client→server** は `Binary`=生 stdin / `Text`=制御 `{"type":"resize",…}`、
+/// **server→client** は exec 出力を `Binary`。詳細・地雷はコメント参照(Plan critique 反映)。
+pub async fn handle_terminal(socket: WebSocket, state: AppState, container_name: String) {
+    use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
+    use tokio::io::AsyncWriteExt;
+
+    // 1) exec を作る。**tty を create / start の両方で立てる**:片方だけだと daemon の 8 バイト
+    //    多重化ヘッダの有無が decoder とずれ、出力が壊れる(xterm にゴミ)。env に TERM。
+    let created = match state
+        .docker
+        .create_exec(
+            &container_name,
+            CreateExecOptions {
+                cmd: Some(vec!["/bin/sh"]),
+                tty: Some(true),
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                env: Some(vec!["TERM=xterm-256color"]),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(c) => c,
+        // 升级後はもう HTTP ステータスを返せない。開いた socket に人間可読のバイト列
+        //(xterm がそのまま表示)+ Close で伝える。内部 docker 詳細は漏らさない。
+        Err(_) => return terminal_fail(socket, "シェルを起動できませんでした").await,
+    };
+
+    // 2) start も tty:true。これで PTY が生まれる(resize は start 後にのみ有効)。
+    let (mut output, mut input) = match state
+        .docker
+        .start_exec(
+            &created.id,
+            Some(StartExecOptions {
+                detach: false,
+                tty: true,
+                output_capacity: None,
+            }),
+        )
+        .await
+    {
+        Ok(StartExecResults::Attached { output, input }) => (output, input),
+        // Detached / エラーともシェルは使えない。
+        _ => return terminal_fail(socket, "シェルを起動できませんでした").await,
+    };
+
+    // 3) WS を送受信に分割する。**input と output は同一ハイジャック TCP の両半分** なので、
+    //    1 つの select で直列化すると遅い write が出力を塞ぐ(HOL ブロック)。2 方向を独立に進める。
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // 方向A:コンテナ → クライアント。背圧は send().await に任せる(余分な mpsc を挟まない =
+    //    暴走プロセスで無制限バッファになる)。tty 下なので into_bytes() は生 PTY バイト。
+    let to_client = async {
+        while let Some(item) = output.next().await {
+            let Ok(chunk) = item else { break };
+            if ws_tx
+                .send(Message::Binary(chunk.into_bytes()))
+                .await
+                .is_err()
+            {
+                break; // client 切断
+            }
+        }
+        let _ = ws_tx.send(Message::Close(None)).await; // output EOF = シェル終了
+    };
+
+    // 方向B:クライアント → コンテナ。Binary=stdin、Text=制御(resize)。この async を抜けると
+    //    input が drop → stdin EOF → sh 終了 → daemon が exec を回収する。`delete_exec` は無いので
+    //    **input の drop が唯一の後始末** = この future が確実に drop されないとゾンビ exec が残る。
+    let to_container = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            match msg {
+                Message::Binary(b) => {
+                    let ok = input.write_all(&b).await.is_ok() && input.flush().await.is_ok();
+                    if !ok {
+                        break;
+                    }
+                }
+                Message::Text(t) => {
+                    if let Some((cols, rows)) = parse_resize(t.as_str()) {
+                        // best-effort:resize 失敗で切断はしない。
+                        let _ = state
+                            .docker
+                            .resize_exec(
+                                &created.id,
+                                ResizeExecOptions {
+                                    width: cols,
+                                    height: rows,
+                                },
+                            )
+                            .await;
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {} // Ping は axum が自動 Pong。Pong 等は無視。
+            }
+        }
+    };
+
+    // 4) どちらか一方が終われば全体を畳む(select! 終了で両 future が drop = input drop)。
+    //    最大セッション timeout で半開き接続の sh 生存を防ぐ。
+    let session = async {
+        tokio::select! {
+            _ = to_client => {}
+            _ = to_container => {}
+        }
+    };
+    let _ = tokio::time::timeout(TERMINAL_MAX_SESSION, session).await;
+}
+
+/// 升级後の失敗を、開いた socket に人間可読バイト列(xterm がそのまま表示)+ Close で伝える。
+/// Text ではなく Binary:前端は inbound を端末へ食わせるだけで Text 制御の受信を持たないため。
+async fn terminal_fail(mut socket: WebSocket, note: &str) {
+    let body = format!("\r\n[tsubomi] {note}\r\n");
+    let _ = socket.send(Message::Binary(body.into_bytes().into())).await;
+    let _ = socket.send(Message::Close(None)).await;
+}
+
+/// `{"type":"resize","cols":N,"rows":M}` を `(cols, rows)` に。型不一致 / 別種は None。
+/// 暴走値は上限でクランプ(daemon に変な PTY サイズを渡さない)。
+fn parse_resize(json: &str) -> Option<(u16, u16)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if v.get("type")?.as_str()? != "resize" {
+        return None;
+    }
+    let cols = v.get("cols")?.as_u64()?.clamp(1, 1000) as u16;
+    let rows = v.get("rows")?.as_u64()?.clamp(1, 1000) as u16;
+    Some((cols, rows))
 }
 
 /// owner ガバナンスの監視指標(M4 S1)。`(cpu_pct, mem_bytes)` を 1 サンプルで返す。

@@ -51,9 +51,7 @@ function KindCard({ kind, row }: { kind: string; row: AdminOverviewKind | null }
             <Icon className="size-5.5" />
           </div>
           <div className="flex min-w-0 flex-col">
-            <span className="text-base font-bold text-foreground">
-              {KIND_LABEL[kind] ?? kind}
-            </span>
+            <span className="text-base font-bold text-foreground">{KIND_LABEL[kind] ?? kind}</span>
             <span className="text-xs font-medium text-muted-foreground">
               {USAGE_LABEL[kind] ?? "使用量"}
             </span>

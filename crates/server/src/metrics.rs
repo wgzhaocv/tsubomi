@@ -70,8 +70,12 @@ pub struct DiskBytes {
 pub async fn metrics_ws(
     auth: AuthCtx,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<impl IntoResponse> {
+    // CSWSH 対策:升级の Origin を管制面オリジンに固定する(terminal WS と同じ — SameSite=Lax は
+    // same-site のテナント app からの WS 乗っ取りを防げない)。読み取り専用だが同種の経路を塞ぐ。
+    crate::auth::require_ws_origin(&headers, &state.config)?;
     require_viewer_web(&auth)?;
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }

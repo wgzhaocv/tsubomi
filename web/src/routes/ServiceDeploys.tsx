@@ -71,7 +71,9 @@ function StatusDot({ status }: { status: Deploy["status"] }) {
   return (
     <span className="mr-1 inline-flex items-center gap-1.5">
       <span className={`size-2 rounded-full ${color}`} />
-      <span className="text-xs font-semibold text-muted-foreground">{deployStatusLabel(status)}</span>
+      <span className="text-xs font-semibold text-muted-foreground">
+        {deployStatusLabel(status)}
+      </span>
     </span>
   );
 }

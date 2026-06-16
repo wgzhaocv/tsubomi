@@ -4,8 +4,9 @@ use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
     CacheDetailDto, CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq,
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseDto,
-    DeployConfig, DeployDto, Health, InjectionDto, ListDirResp, LogsResp, Me, MoveReq,
-    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto, VolumeDto,
+    DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
+    MoveReq, QueryReq, QueryResp, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto,
+    VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -178,6 +179,27 @@ pub async fn db_delete(c: &reqwest::Client, server_url: &str, token: &str, id: &
     )
     .await?;
     Ok(())
+}
+
+/// 任意 SQL を実行(web SQL と同じ `/query` ハンドラ。自身の human role で接続)。
+/// 複数文を投げると文ごとに 1 集合ずつ返る。SQL エラーはサーバが 400 で返し、
+/// send_ok が `validation` コード + pg のエラー本文に変換する。
+pub async fn db_query(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    sql: &str,
+) -> Result<QueryResp> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/databases/{id}/query"))
+            .bearer_auth(token)
+            .json(&QueryReq {
+                sql: sql.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse query response")
 }
 
 // ============ M5 cache ============
@@ -655,6 +677,25 @@ pub async fn service_logs(
     let resp = send_ok(c.get(url).bearer_auth(token)).await?;
     let r: LogsResp = resp.json().await.context("failed to parse logs response")?;
     Ok(r.logs)
+}
+
+/// 稼働中コンテナ内で 1 コマンドを **非対話**に実行し、stdout/stderr/exit_code を捕獲して返す
+/// (web の対話ターミナルと対照的に AI / スクリプト / 線上診断向け)。argv はそのまま送る
+/// (shell 解釈なし — pipe/glob は呼び出し側が `sh -c` を組む)。
+pub async fn service_exec(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    cmd: &[String],
+) -> Result<ExecResult> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services/{id}/exec"))
+            .bearer_auth(token)
+            .json(&ExecReq { cmd: cmd.to_vec() }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse exec response")
 }
 
 pub async fn service_rollback(

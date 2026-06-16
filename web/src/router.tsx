@@ -30,6 +30,7 @@ import ServiceInjections from "@/routes/ServiceInjections";
 import ServiceLayout from "@/routes/ServiceLayout";
 import ServiceLogs from "@/routes/ServiceLogs";
 import ServiceOverview from "@/routes/ServiceOverview";
+import ServiceTerminal from "@/routes/ServiceTerminal";
 import Services from "@/routes/Services";
 import Trash from "@/routes/Trash";
 import UiGallery from "@/routes/UiGallery";
@@ -57,7 +58,7 @@ export const router = createBrowserRouter([
       // service 一覧 + 作成導線(M3 S4)。
       { path: "services", element: <Services /> },
       {
-        // 詳細の外殻(見出し + サブナビ)。子が 概要 / デプロイ / 注入 / 環境変数 / ログ。
+        // 詳細の外殻(見出し + サブナビ)。子が 概要 / デプロイ / 注入 / 環境変数 / ログ / ターミナル。
         path: "services/:id",
         element: <ServiceLayout />,
         children: [
@@ -66,6 +67,7 @@ export const router = createBrowserRouter([
           { path: "injections", element: <ServiceInjections /> },
           { path: "env", element: <ServiceEnv /> },
           { path: "logs", element: <ServiceLogs /> },
+          { path: "terminal", element: <ServiceTerminal /> },
         ],
       },
       // database は実装済み(一覧 + 詳細 3 ページ)。他の種別は当面 ResourcePage の骨格。

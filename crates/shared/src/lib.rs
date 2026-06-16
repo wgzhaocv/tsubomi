@@ -479,6 +479,30 @@ pub struct RollbackReq {
     pub deploy_id: Uuid,
 }
 
+/// `POST /api/services/:id/exec` のリクエスト。稼働中コンテナ内で **1 コマンド**を
+/// 非対話に実行する(`docker exec`(`-it` なし)相当 = AI / スクリプト / 線上診断用。
+/// 対話シェルは web ターミナルが担う)。argv はそのまま渡す(shell 解釈なし):
+/// pipe/glob が要るときは呼び出し側が `["sh","-c","ps | grep node"]` と組む。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecReq {
+    /// 実行する argv(空は 400)。
+    pub cmd: Vec<String>,
+}
+
+/// `POST /api/services/:id/exec` のレスポンス。捕獲した stdout/stderr と終了コード。
+/// `exit_code` は **データ**(コマンドが非零で終わってもリクエスト自体は成功 = CLI は 0 終了、
+/// AI は JSON のこの値を読む)。inspect で確定できない場合のみ None。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i64>,
+    /// 出力が上限を超えて打ち切られたか。
+    pub truncated: bool,
+    /// サーバ側タイムアウトで打ち切ったか(長時間コマンドは web ターミナルへ誘導)。
+    pub timed_out: bool,
+}
+
 // ============ ガバナンス:IP 許可リスト(server ⇄ CLI / web の単一契約)============
 
 /// `GET /api/ip-allowlist` の各要素。会社 IP 許可リストの 1 エントリ。

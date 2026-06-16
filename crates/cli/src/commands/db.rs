@@ -1,11 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use serde_json::json;
 
 use crate::api;
 use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
 use crate::config;
-use tsubomi_shared::DatabaseDto;
+use tsubomi_shared::{DatabaseDto, QueryResp};
 
 /// `tbm db <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
 #[derive(Subcommand)]
@@ -36,6 +36,13 @@ pub enum DbCmd {
     Connect {
         /// 接続するデータベースの表示名(`tbm db list` で確認)
         name: String,
+    },
+    /// SQL を実行(psql 不要。web の SQL エディタと同じ経路。複数文可)
+    Query {
+        /// 対象データベースの表示名(`tbm db list` で確認)
+        name: String,
+        /// 実行する SQL(`-` を渡すと標準入力から読む)
+        sql: String,
     },
 }
 
@@ -114,8 +121,94 @@ pub async fn run(
                 connect_psql(&url)?;
             }
         }
+        DbCmd::Query { name, sql } => {
+            let sql = read_sql_arg(&sql)?;
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let resp = api::db_query(&c, &server_url, &token, &id, &sql).await?;
+            if json {
+                // 共有 DTO(QueryResp)をそのまま出す:{ "results": [ { columns, rows,
+                // row_count, truncated, rows_affected }, ... ] }。jq で拾える。
+                print_json(&resp)?;
+            } else {
+                print_results_text(&resp);
+            }
+        }
     }
     Ok(())
+}
+
+/// SQL 引数を解決する。`-` のときは標準入力から全部読む(大きな SQL / here-doc 用)。
+fn read_sql_arg(arg: &str) -> Result<String> {
+    if arg == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .context("標準入力の読み取りに失敗しました")?;
+        Ok(buf)
+    } else {
+        Ok(arg.to_owned())
+    }
+}
+
+/// text モードの結果表示。文ごとに 1 ブロック:SELECT 系は表 + 件数、それ以外
+/// (INSERT/UPDATE/DDL)は影響行数を出す。複数文のときは見出しで区切る。
+fn print_results_text(resp: &QueryResp) {
+    // 空 SQL / コメントのみ等でサーバが結果集合を 1 つも返さないとき。json は
+    // `{"results":[]}` で自明だが、text だと無出力で紛らわしいので一言出す。
+    if resp.results.is_empty() {
+        println!("(結果なし)");
+        return;
+    }
+    let multi = resp.results.len() > 1;
+    for (i, rs) in resp.results.iter().enumerate() {
+        if multi {
+            if i > 0 {
+                println!();
+            }
+            println!("-- 文 {} --", i + 1);
+        }
+        if rs.columns.is_empty() {
+            // 非 SELECT(列が無い)= 影響行数で結果を示す。
+            println!("OK({} 行に影響)", rs.rows_affected);
+        } else {
+            print_table(&rs.columns, &rs.rows);
+            if rs.truncated {
+                println!("({} 行、上限で切り詰め)", rs.row_count);
+            } else {
+                println!("({} 行)", rs.row_count);
+            }
+        }
+    }
+}
+
+/// 簡易な整列テーブル(NULL は `NULL` 表示)。幅は char 数で揃える
+/// (CJK 全角は厳密には合わないが dev 確認用としては十分。AI 経路は JSON)。
+fn print_table(cols: &[String], rows: &[Vec<Option<String>>]) {
+    // NULL(None)は `NULL` と表示。クロージャだと借用寿命を表せないので fn にする。
+    fn cell(c: Option<&String>) -> &str {
+        c.map(String::as_str).unwrap_or("NULL")
+    }
+    let mut widths: Vec<usize> = cols.iter().map(|c| c.chars().count()).collect();
+    for row in rows {
+        for (i, c) in row.iter().enumerate() {
+            if let Some(w) = widths.get_mut(i) {
+                *w = (*w).max(cell(c.as_ref()).chars().count());
+            }
+        }
+    }
+    let pad = |s: &str, w: usize| {
+        let n = s.chars().count();
+        format!("{s}{}", " ".repeat(w.saturating_sub(n)))
+    };
+    let header: Vec<String> = cols.iter().enumerate().map(|(i, c)| pad(c, widths[i])).collect();
+    println!("{}", header.join(" | "));
+    let sep: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    println!("{}", sep.join("-+-"));
+    for row in rows {
+        let line: Vec<String> = (0..cols.len())
+            .map(|i| pad(cell(row.get(i).and_then(|c| c.as_ref())), widths[i]))
+            .collect();
+        println!("{}", line.join(" | "));
+    }
 }
 
 /// 表示名 → id を一覧から解決する(専用エンドポイントを増やさない)。

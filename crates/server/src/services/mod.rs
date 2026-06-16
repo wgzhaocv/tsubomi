@@ -21,15 +21,17 @@ use crate::state::AppState;
 use crate::validate;
 use axum::Json;
 use axum::Router;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
-    CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, InjectionDto,
-    LogsResp, RollbackReq, ServiceDto, SetEnvReq,
+    CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ExecReq,
+    ExecResult, InjectionDto, LogsResp, RollbackReq, ServiceDto, SetEnvReq,
 };
 use uuid::Uuid;
 
@@ -46,6 +48,8 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/start", post(start))
         .route("/services/{id}/stop", post(stop))
         .route("/services/{id}/logs", get(logs))
+        .route("/services/{id}/exec", post(exec))
+        .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
@@ -348,6 +352,92 @@ pub async fn logs(
     ensure_owned(&state, auth.user_id, id).await?;
     let logs = docker::logs(&state, id, q.tail).await?;
     Ok(Json(LogsResp { logs }))
+}
+
+/// exec の argv 制限(暴走入力だけ弾く。表示名と同じ感覚の素直な上限)。
+const MAX_EXEC_ARGS: usize = 64;
+const MAX_EXEC_ARG_LEN: usize = 8192;
+
+/// exec / terminal 共通:稼働中コンテナ名を解決するか、無ければ 400(停止中 / 未デプロイ)。
+/// 所有権は呼び出し側が先に `ensure_owned` で確認する(exec は間に argv 検証を挟むため分離)。
+async fn running_container_or_400(state: &AppState, id: Uuid) -> AppResult<String> {
+    docker::running_container_name(state, id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(
+                "コンテナが走っていません。先にデプロイして running にしてください".into(),
+            )
+        })
+}
+
+/// `POST /api/services/:id/exec`:稼働中コンテナ内で 1 コマンドを **非対話**に実行し、
+/// stdout/stderr/exit_code を捕獲して返す(`docker exec`(`-it` なし)相当 = AI / スクリプト /
+/// 線上診断用。対話シェルは web ターミナル)。所有者の自資源のみ(`ensure_owned`)= 既存の
+/// web SQL と同一ティアの暴露(env 注入値が見える等は受容済み)。argv はそのまま渡す
+/// (shell 解釈なし):pipe/glob は呼び出し側が `sh -c` を組む。
+pub async fn exec(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ExecReq>,
+) -> AppResult<Json<ExecResult>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    if req.cmd.is_empty() {
+        return Err(AppError::BadRequest(
+            "実行するコマンドが空です(例:tbm service exec <name> -- ps aux)".into(),
+        ));
+    }
+    if req.cmd.len() > MAX_EXEC_ARGS || req.cmd.iter().any(|a| a.len() > MAX_EXEC_ARG_LEN) {
+        return Err(AppError::BadRequest("コマンドが長すぎます".into()));
+    }
+    let name = running_container_or_400(&state, id).await?;
+    // 監査は exec の **起動イベントと argv** を記録する(対話 PTY の打鍵は記録不可なのと対照的に、
+    // 一発 exec はコマンドが残せる)。出力は秘密を含み得るので記録しない。
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.exec",
+        id,
+        json!({ "cmd": req.cmd }),
+    )
+    .await;
+    let result = docker::exec_capture(&state, &name, req.cmd).await?;
+    Ok(Json(result))
+}
+
+/// `GET /api/services/:id/terminal`(WebSocket):所有者が自分の稼働中コンテナ内で対話シェルを
+/// 開く(**web 専用** — 対話 PTY は CLI の AI フレンドリ JSON 契約に合わない。CLI は一発 exec)。
+/// 所有者の自資源のみ(`ensure_owned`)= web SQL と同一ティアの暴露。升级前にコンテナ稼働中を
+/// 確認し、双方向ポンプは `docker::handle_terminal`(地雷はそちらのコメント)。
+pub async fn terminal(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+    ws: WebSocketUpgrade,
+) -> AppResult<impl IntoResponse> {
+    // CSWSH 対策:升级の Origin を管制面オリジンに固定する(SameSite=Lax は same-site の
+    // テナント app からの WS 乗っ取りを防げない)。
+    crate::auth::require_ws_origin(&headers, &state.config)?;
+    // 対話ターミナルは **web 専用**(owner ガバナンスと同じく session 由来を要求 =
+    // Bearer cli_token は拒否)。対話 PTY は CLI の AI フレンドリ JSON 契約に合わないので
+    // 入口を web セッションに限る(`require_owner_web` と同じ作法)。
+    if !auth.is_session() {
+        return Err(AppError::Forbidden);
+    }
+    ensure_owned(&state, auth.user_id, id).await?;
+    let name = running_container_or_400(&state, id).await?;
+    // 監査は **open イベント**のみ記録する(対話 PTY の打鍵内容は裸ストリームで記録不可。
+    // 一発 exec[service.exec] が argv を残せるのと対照的)。
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.terminal.open",
+        id,
+        json!({}),
+    )
+    .await;
+    Ok(ws.on_upgrade(move |socket| docker::handle_terminal(socket, state, name)))
 }
 
 /// `DELETE /api/services/:id`:ソフト削除(コンテナ/route を消し、ゴミ箱へ。3 日で purge)。

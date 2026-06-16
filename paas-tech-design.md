@@ -386,6 +386,7 @@ tbm service create|list|status|logs|start|stop|delete
 tbm deploy [--local]
 tbm db create|list|url|rotate|delete
 tbm db connect <db>                              # 無密码:CLI 認証済み → human 外部文字列 → psql を exec(PGPASSWORD、履歴に残さない)
+tbm db query <db> <SQL>                          # 任意 SQL(psql 不要・AI 向け)。web SQL と同じ /query を叩く(human role・statement_timeout 10s・上限 1000 行)。`-` で stdin
 tbm volume create|list|delete|rename
 tbm volume ls|put|get|rm|mkdir|mv <vol> …        # 假根内のファイル操作(全て safe_path を通る)
 tbm cache create|…                               # M5

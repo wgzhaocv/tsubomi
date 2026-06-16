@@ -11,10 +11,27 @@ pub mod oauth_state;
 pub mod session;
 pub mod tokens;
 
+use crate::config::Config;
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::Router;
+use axum::http::HeaderMap;
 use axum::routing::{delete, get, post};
 use uuid::Uuid;
+
+/// WebSocket 升级の `Origin` が管制面オリジンか検証する(CSWSH 対策)。不一致 / 欠落は
+/// Forbidden。terminal / metrics の両 WS ハンドラが升级前に呼ぶ(SameSite=Lax は same-site の
+/// テナント app からの WS 乗っ取りを防げないため、Origin で明示的に弾く)。
+pub fn require_ws_origin(headers: &HeaderMap, config: &Config) -> AppResult<()> {
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    if config.origin_allowed(origin) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AuthCtx {

@@ -143,10 +143,7 @@ export default function AdminAudit() {
                       return (
                         <div
                           key={e.id}
-                          className={cn(
-                            COLS,
-                            "border-b border-[rgba(61,52,40,0.06)] py-3 text-sm",
-                          )}
+                          className={cn(COLS, "border-b border-[rgba(61,52,40,0.06)] py-3 text-sm")}
                           style={{
                             position: "absolute",
                             top: 0,
@@ -163,7 +160,9 @@ export default function AdminAudit() {
                             {e.action}
                           </div>
                           <div className="truncate font-semibold text-foreground">
-                            {e.actor_name ?? <span className="text-muted-foreground">システム</span>}
+                            {e.actor_name ?? (
+                              <span className="text-muted-foreground">システム</span>
+                            )}
                           </div>
                           <div className="truncate font-medium text-foreground">
                             {e.target_user_name ?? <span className="text-muted-foreground">—</span>}

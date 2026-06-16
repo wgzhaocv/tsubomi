@@ -40,6 +40,20 @@ CLI `tbm cache`。**最終 e2e 済み**:cache を使う service(Node ioredis カ
 `up -d --no-recreate`(不足 infra=valkey 等を起こす)+ `up -d server`(server だけ入替=全 app 無瞬断)で展開
 (前提:Pi の `.env.production` に `TSUBOMI_VALKEY_ADMIN_PASS`/`_URL`)。実装級は **`paas-m5-design.md`**。
 
+**M5 後の追加(マイルストーン外):コンテナ内アクセス**。service 詳細から動いているコンテナの中を
+確認する 2 入口を `bollard exec` ひとつを土台に足した(新テーブル・migration なし)。**A. web 対話
+ターミナル**(`GET /services/{id}/terminal` WS + PTY、`@wterm/react`、`services/docker.rs::handle_terminal`、
+web `ServiceTerminal.tsx`)+ **B. CLI 一発 exec**(`POST /services/{id}/exec`、`tbm service exec <name> --
+<cmd…>`、`{stdout,stderr,exit_code,truncated,timed_out}`)。役割分担:**対話 PTY は CLI の AI フレンドリ
+JSON 契約に合わないので web 専用**、一発 exec は捕獲出力 = AI 駆動可なので CLI に乗せる。どちらも
+`ensure_owned`(**所有者の自資源のみ**・owner→他人は不可)で守り、暴露は **web SQL と同一ティア**
+(env 注入値が見える等は受容済み)。監査は exec=argv 記録 / terminal=open イベントのみ(PTY 打鍵は
+記録不可)。terminal は **session 由来必須**(Bearer 拒否 = web 専用)+ **WS 升级で Origin を管制面
+オリジンに固定**(`auth::require_ws_origin` / `Config.control_origins` 既定 server_url +
+`TSUBOMI_CONTROL_ORIGIN`。CSWSH 対策 — テナント app は same-site なので SameSite=Lax だけでは
+不足。既存 metrics WS にも同適用)。地雷(tty 一致・WS split で 2 方向・input drop が唯一の回収・
+最大セッション timeout・出力 cap 厳守)は **`paas-terminal-design.md`** に集約。
+
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
 本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =

@@ -38,8 +38,8 @@ export function RequireViewer() {
         </Title>
         <Divider type="line-brown" />
         <p className="text-sm font-medium text-foreground">
-          共有パスワードを入力すると、管理画面を <strong>閲覧専用</strong> で見られます
-          (8 時間有効)。資源の停止 / 削除など操作は管理者のみです。
+          共有パスワードを入力すると、管理画面を <strong>閲覧専用</strong> で見られます (8
+          時間有効)。資源の停止 / 削除など操作は管理者のみです。
         </p>
         <form
           onSubmit={(ev) => {

@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   ScrollText,
   SlidersHorizontal,
+  SquareTerminal,
 } from "lucide-react";
 import { Link, NavLink, Outlet, useParams } from "react-router";
 
@@ -16,7 +17,7 @@ import { useService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 
 // サービス詳細の外殻:戻りリンク + 見出し(phase バッジ)+ サブナビ(概要 / デプロイ /
-// 注入 / 環境変数 / ログ)。各ページはこの <Outlet> に差さる。DatabaseLayout と同じ構造。
+// 注入 / 環境変数 / ログ / ターミナル)。各ページはこの <Outlet> に差さる。DatabaseLayout と同じ構造。
 
 const NAV = [
   { to: "", end: true, label: "概要", icon: LayoutDashboard },
@@ -24,6 +25,7 @@ const NAV = [
   { to: "injections", end: false, label: "注入", icon: Cable },
   { to: "env", end: false, label: "環境変数", icon: SlidersHorizontal },
   { to: "logs", end: false, label: "ログ", icon: ScrollText },
+  { to: "terminal", end: false, label: "ターミナル", icon: SquareTerminal },
 ] as const;
 
 export default function ServiceLayout() {

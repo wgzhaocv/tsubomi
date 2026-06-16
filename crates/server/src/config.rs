@@ -17,6 +17,11 @@ pub struct Config {
     /// redirect_uri 許可リストの組み立てに使う — ブラウザから到達する
     /// オリジンと一致させること(dev では vite の :5173)。
     pub server_url: String,
+    /// WebSocket 升级で許可する管制面オリジン(CSWSH 対策)。テナント app は `<sub>.<domain>` =
+    /// 管制面と same-site なので `SameSite=Lax` cookie だけでは WS 乗っ取りを防げない。升级時に
+    /// `Origin` をこの allowlist と照合して弾く。既定は `server_url`(= ブラウザが到達するオリジン)、
+    /// `TSUBOMI_CONTROL_ORIGIN`(カンマ区切り)で追加できる(管制面が複数オリジンを持つ場合)。
+    pub control_origins: Vec<String>,
     /// Google Workspace の hosted domain(env ではカンマ区切りで複数可)。
     /// アカウントの `hd` claim と email ドメインの両方がこのリストに
     /// 含まれないとログイン拒否。登録制限はここ(.env)にあり、検証は
@@ -175,6 +180,18 @@ impl Config {
         format!("{scheme}://{subdomain}.{}", self.domain)
     }
 
+    /// WebSocket 升级の `Origin` が管制面オリジンか(CSWSH 対策)。ブラウザは WS 升级で必ず
+    /// `Origin` を送るため、**欠落も拒否**する(対話 WS は web 専用 = ブラウザ経路のみ想定)。
+    pub fn origin_allowed(&self, origin: Option<&str>) -> bool {
+        match origin {
+            Some(o) => {
+                let o = o.trim_end_matches('/');
+                self.control_origins.iter().any(|a| a == o)
+            }
+            None => false,
+        }
+    }
+
     pub fn from_env() -> anyhow::Result<Self> {
         // 既定は **loopback** :9090(同居する amber は 8080)。本番は前段(CF Tunnel / 逆代理)が
         // localhost へ転送する想定なので公網露出しないのが安全側。直 VPS で traefik コンテナが
@@ -195,6 +212,20 @@ impl Config {
             .context("TSUBOMI_SERVER_URL must be set")?
             .trim_end_matches('/')
             .to_string();
+        // 管制面オリジンの allowlist(WS の CSWSH 対策)。常に server_url を含め、
+        // TSUBOMI_CONTROL_ORIGIN の各値を追加する(設定し忘れで自分を締め出さないよう union)。
+        let mut control_origins = vec![server_url.clone()];
+        if let Ok(extra) = std::env::var("TSUBOMI_CONTROL_ORIGIN") {
+            for o in extra
+                .split(',')
+                .map(|o| o.trim().trim_end_matches('/'))
+                .filter(|o| !o.is_empty())
+            {
+                if !control_origins.iter().any(|x| x == o) {
+                    control_origins.push(o.to_string());
+                }
+            }
+        }
         let allowed_hds: Vec<String> = std::env::var("TSUBOMI_ALLOWED_HD")
             .context("TSUBOMI_ALLOWED_HD must be set (company Google Workspace domain(s), comma-separated)")?
             .split(',')
@@ -346,6 +377,7 @@ impl Config {
             google_client_secret,
             google_redirect_uri,
             server_url,
+            control_origins,
             allowed_hds,
             owner_emails,
             cookie_secure,

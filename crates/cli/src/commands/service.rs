@@ -46,6 +46,16 @@ pub enum ServiceCmd {
         #[arg(long)]
         tail: Option<usize>,
     },
+    /// コンテナ内で 1 コマンドを実行(非対話。`docker exec` 相当 = 線上診断 / スクリプト用。
+    /// 対話シェルは web のターミナルを使う)。例:`tbm service exec myapp -- ps aux`
+    Exec {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// コンテナ内で実行する argv(`--` の後ろにそのまま。例:`-- ps aux` /
+        /// pipe/glob は `-- sh -c "ps | grep node"`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
     /// サービスを削除(ゴミ箱へ。3 日間は復元可能)
     Delete {
         /// 対象サービスの表示名
@@ -133,6 +143,40 @@ pub async fn run(
                 println!("(ログがありません。コンテナが走っていない可能性があります)");
             } else {
                 print!("{logs}");
+            }
+        }
+        ServiceCmd::Exec { name, command } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let result = api::service_exec(&c, &server_url, &token, &id, &command).await?;
+            if json {
+                // 共有 DTO をそのまま:{ stdout, stderr, exit_code, truncated, timed_out }。
+                // exit_code は **データ**(tbm 自身は 0 で終わる = リクエスト成功 ≠ 業務エラー。
+                // AI はこの値で分岐する)。
+                print_json(&result)?;
+            } else {
+                // text(端末)は ssh / docker exec 風:stdout は stdout・stderr は stderr へ
+                // 素通しし、コンテナ内コマンドの終了コードを tbm の終了コードへ伝播する
+                // (シェルの `&&` 連結のため)。
+                print!("{}", result.stdout);
+                eprint!("{}", result.stderr);
+                if result.truncated {
+                    eprintln!("(出力が上限を超えたため切り詰めました)");
+                }
+                if result.timed_out {
+                    eprintln!(
+                        "(タイムアウトで打ち切りました。長時間 / 対話は web のターミナルを使ってください)"
+                    );
+                }
+                // process::exit は main の version nudge をスキップするが、exec はスクリプト用途
+                // なのでクリーンな終了コードを優先する。終了コードは 0..=255 のみ素直に伝播し、
+                // 想定外の値 / 確定不能(timeout 等で None)は「成功と確認できない」= 1 に倒す。
+                std::io::stdout().flush().ok();
+                std::io::stderr().flush().ok();
+                let code = match result.exit_code {
+                    Some(c) if (0..=255).contains(&c) => c as i32,
+                    _ => 1,
+                };
+                std::process::exit(code);
             }
         }
         ServiceCmd::Delete { name } => {
