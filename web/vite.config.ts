@@ -23,9 +23,10 @@ export default defineConfig({
   },
   server: {
     // API 呼び出しを axum サーバへ転送し、dev でも SPA を same-origin に保つ。
-    // 9090:8080 は amber が使う(衝突回避)。
+    // 9090:8080 は amber が使う(衝突回避)。ws:true = リソース概要の host 指標 WS
+    // (/api/admin/metrics)も dev で転送する。
     proxy: {
-      "/api": "http://localhost:9090",
+      "/api": { target: "http://localhost:9090", ws: true },
     },
   },
 });

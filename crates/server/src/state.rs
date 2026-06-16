@@ -33,6 +33,13 @@ pub struct AppStateInner {
     /// 中身 = 各 service の tokio Mutex(.await をまたいで保持するため)。
     /// map は service 数ぶんしか増えない(小さな Arc が残るだけ。単機規模では掃除不要)。
     pub deploy_locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    /// ホスト指標(CPU/メモリ/ディスク)の WS 配信チャンネル(metrics.rs)。閲覧者が
+    /// 繋いでいる間だけ共有サンプラが 5s 毎に送る。初期受信者は捨てる(`subscribe` は
+    /// 接続時に取る)ので、閲覧者ゼロ = 受信者ゼロ。
+    pub metrics_tx: tokio::sync::broadcast::Sender<crate::metrics::HostMetrics>,
+    /// サンプラ task が稼働中か。WS 接続時の「起動判定」とサンプラの「停止(受信者ゼロ)」を
+    /// このロックで直列化する(無人 / 二重起動の防止。詳細は metrics::spawn_sampler)。
+    pub metrics_running: Arc<tokio::sync::Mutex<bool>>,
 }
 
 #[derive(Clone)]
@@ -90,6 +97,10 @@ impl AppState {
             "docker daemon に ping できない(docker は起動しているか / DOCKER_HOST を確認)",
         )?;
 
+        // ホスト指標の broadcast。初期受信者は即捨てる(閲覧者が WS 接続時に subscribe する)。
+        // 容量は小さくてよい(5s 周期・遅い client は Lagged で最新へ追従するだけ)。
+        let (metrics_tx, _) = tokio::sync::broadcast::channel(8);
+
         Ok(Self(Arc::new(AppStateInner {
             config,
             db,
@@ -99,6 +110,8 @@ impl AppState {
             http,
             docker,
             deploy_locks: Mutex::new(HashMap::new()),
+            metrics_tx,
+            metrics_running: Arc::new(tokio::sync::Mutex::new(false)),
         })))
     }
 

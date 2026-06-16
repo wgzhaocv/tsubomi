@@ -13,7 +13,9 @@ import {
   KIND_LABEL,
   useAdminOverview,
 } from "@/lib/admin";
+import { useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
+import { formatBytes } from "@/lib/volumes";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + 資源保有ユーザ数。
 // 匿名化(設計 v2 §7):資源の名前・内容は出さない。owner ゲートは <RequireOwner>
@@ -65,6 +67,77 @@ function KindCard({ k }: { k: AdminOverviewKind }) {
   );
 }
 
+// 用量バー(VolumeFileBrowser のアップロード進捗バーと同じ意匠)。pct が null なら 0 幅。
+function UsageBar({ pct }: { pct: number | null }) {
+  return (
+    <div className="h-2 w-full overflow-hidden rounded-full bg-[rgba(196,184,158,0.3)]">
+      <div
+        className="h-full rounded-full bg-[#0CC0B5] transition-[width] duration-150 ease-out"
+        style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }}
+      />
+    </div>
+  );
+}
+
+function MetricRow({ label, pct, detail }: { label: string; pct: number | null; detail: string }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-baseline justify-between gap-3">
+        <span className="text-sm font-bold text-foreground">{label}</span>
+        <span className="font-mono text-sm font-bold text-[#0b9c93]">{detail}</span>
+      </div>
+      <UsageBar pct={pct} />
+    </div>
+  );
+}
+
+// used / total を「1.2 GB / 8.0 GB」に。どちらか欠ければ「—」(dev macOS は /proc 無しで null)。
+function formatPair(used: number | null | undefined, total: number | null | undefined): string {
+  if (used == null || total == null) return "—";
+  return `${formatBytes(used)} / ${formatBytes(total)}`;
+}
+
+// サーバー本体(ホスト)の使用状況。WS(useHostMetrics)で 5s 毎に更新。データが来る前 /
+// 取得不能(dev の CPU・メモリ)は「—」と 0 幅バー。HTTP の overview とは独立。
+function HostCard() {
+  const { data, connected } = useHostMetrics();
+  const cpu = data?.cpu_pct ?? null;
+  const memPct =
+    data?.mem_used != null && data.mem_total ? (data.mem_used / data.mem_total) * 100 : null;
+  const diskPct = data?.disk_pct ?? null;
+
+  return (
+    <Card>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-center gap-3.5">
+          <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
+            <Server className="size-5.5" />
+          </div>
+          <div className="flex flex-col">
+            <span className="text-base font-bold text-foreground">サーバー</span>
+            <span className="text-xs font-medium text-muted-foreground">
+              本体(ホスト)の使用状況{connected ? "" : "(接続待ち…)"}
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-col gap-3.5">
+          <MetricRow label="CPU" pct={cpu} detail={cpu == null ? "—" : `${cpu.toFixed(0)}%`} />
+          <MetricRow
+            label="メモリ"
+            pct={memPct}
+            detail={formatPair(data?.mem_used, data?.mem_total)}
+          />
+          <MetricRow
+            label="ディスク"
+            pct={diskPct}
+            detail={formatPair(data?.disk_used, data?.disk_total)}
+          />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AdminOverview() {
   const { data, isPending, error } = useAdminOverview();
 
@@ -91,6 +164,8 @@ export default function AdminOverview() {
           全ユーザの資源と使用量の総覧です。資源の名前や中身は表示されません(誰が・何種類・
           どれだけ使っているかだけ)。
         </p>
+
+        <HostCard />
 
         {error && (
           <p className="text-sm font-semibold text-[#e05a5a]">

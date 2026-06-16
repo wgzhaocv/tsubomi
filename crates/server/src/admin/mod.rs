@@ -21,6 +21,9 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/admin/overview", get(overview::overview))
         .route("/admin/ranking", get(overview::ranking))
+        // ホスト(サーバ本体)の CPU/メモリ/ディスク使用量を WS で配信(共有サンプラ)。
+        // 升级は cookie 付き GET なので require_auth + AuthCtx が効く(handler 内で viewer 検証)。
+        .route("/admin/metrics", get(crate::metrics::metrics_ws))
         // 最後の砦(S3):owner が他人の資源を停止 / 削除(二段確認 + 検証コード)。
         .route("/admin/resources/{id}/stop", post(actions::stop))
         .route("/admin/resources/{id}/delete", post(actions::delete))

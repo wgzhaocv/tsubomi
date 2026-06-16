@@ -174,23 +174,10 @@ async fn check_disk(state: &AppState) {
     }
 }
 
-/// 指定パスを含む filesystem の使用率(%)を `df -Pk` で取る。POSIX `-P` で 1 行・固定列
-/// (Filesystem 1024-blocks Used Available Capacity Mounted-on)になり、Capacity は 5 列目。
-/// macOS/Linux 両対応。解析失敗は None(best-effort)。
+/// 指定パスを含む filesystem の使用率(%)。`df` 解析は metrics と共有(`metrics::disk_metrics`)。
+/// 解析失敗は None(best-effort)。
 async fn disk_used_pct(path: &Path) -> Option<u8> {
-    let out = tokio::process::Command::new("df")
-        .arg("-Pk")
-        .arg(path)
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = text.lines().nth(1)?; // ヘッダの次の行
-    let cap = line.split_whitespace().nth(4)?; // "NN%"
-    cap.trim_end_matches('%').parse().ok()
+    crate::metrics::disk_metrics(path).await.map(|d| d.pct)
 }
 
 async fn sweep_auth(state: &AppState) {
