@@ -35,8 +35,13 @@ const USAGE_LABEL: Record<string, string> = {
   cache: "キー数合計",
 };
 
-function KindCard({ k }: { k: AdminOverviewKind }) {
-  const Icon = KIND_ICON[k.kind] ?? Server;
+// 概要に並べる種別の固定順(後端 KINDS と一致)。骨架も実データも同じ順で描く。
+const KIND_ORDER = ["service", "database", "volume", "cache"] as const;
+
+// 種別カード。`row` が null(読み込み中)なら数字は「—」を出す — 骨架を最初から描いて
+// データ到着で数字だけ差し替える(spinner→カードの差し替えで起きるレイアウト抖動を無くす)。
+function KindCard({ kind, row }: { kind: string; row: AdminOverviewKind | null }) {
+  const Icon = KIND_ICON[kind] ?? Server;
   return (
     <Card>
       <CardContent className="flex flex-col gap-3">
@@ -46,20 +51,20 @@ function KindCard({ k }: { k: AdminOverviewKind }) {
           </div>
           <div className="flex min-w-0 flex-col">
             <span className="text-base font-bold text-foreground">
-              {KIND_LABEL[k.kind] ?? k.kind}
+              {KIND_LABEL[kind] ?? kind}
             </span>
             <span className="text-xs font-medium text-muted-foreground">
-              {USAGE_LABEL[k.kind] ?? "使用量"}
+              {USAGE_LABEL[kind] ?? "使用量"}
             </span>
           </div>
         </div>
         <div className="flex items-end justify-between gap-3">
           <span className="text-3xl font-extrabold tracking-tight text-foreground">
-            {k.count}
+            {row ? row.count : "—"}
             <span className="ml-1 text-sm font-semibold text-muted-foreground">個</span>
           </span>
           <span className="font-mono text-lg font-bold text-[#0b9c93]">
-            {formatUsageByKind(k.kind, k.total_usage_bytes)}
+            {row ? formatUsageByKind(kind, row.total_usage_bytes) : "—"}
           </span>
         </div>
       </CardContent>
@@ -182,7 +187,7 @@ function PlatformCard({ items }: { items: HostMetrics["platform"] }) {
 }
 
 export default function AdminOverview() {
-  const { data, isPending, error } = useAdminOverview();
+  const { data, error } = useAdminOverview();
   // ホスト指標 WS は**この 1 箇所だけ**で開く(HostCard / PlatformCard に props で配る)。
   // 2 回呼ぶと WS が 2 本張られるため。
   const host = useHostMetrics();
@@ -219,11 +224,10 @@ export default function AdminOverview() {
           </p>
         )}
 
-        {isPending && !data && (
-          <p className="text-sm font-medium text-muted-foreground">読み込み中…</p>
-        )}
-
-        {data && (
+        {/* カード骨架は最初から描き、読み込み中は数字を「—」にする(spinner→カードの
+            差し替えで起きるレイアウト抖動を防ぐ。host カードと同じ作法)。error 時は
+            上のメッセージだけ出してカードは出さない。 */}
+        {!error && (
           <>
             <Card>
               <CardContent className="flex items-center gap-3.5">
@@ -232,7 +236,7 @@ export default function AdminOverview() {
                 </div>
                 <div className="flex flex-col">
                   <span className="text-2xl font-extrabold tracking-tight text-foreground">
-                    {data.user_count}
+                    {data ? data.user_count : "—"}
                     <span className="ml-1 text-sm font-semibold text-muted-foreground">名</span>
                   </span>
                   <span className="text-xs font-medium text-muted-foreground">
@@ -243,8 +247,12 @@ export default function AdminOverview() {
             </Card>
 
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {data.kinds.map((k) => (
-                <KindCard key={k.kind} k={k} />
+              {KIND_ORDER.map((kind) => (
+                <KindCard
+                  key={kind}
+                  kind={kind}
+                  row={data?.kinds.find((k) => k.kind === kind) ?? null}
+                />
               ))}
             </div>
           </>
