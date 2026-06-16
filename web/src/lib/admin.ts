@@ -71,8 +71,18 @@ export function useAdminOverview() {
   return useQuery({ queryKey: adminKeys.overview, queryFn: fetchOverview, staleTime: STALE_MS });
 }
 
+// 使用量は緩やかに変わる(ディスク/DB 容量はほぼ動かない)+ 採集が重い(資源ごとに docker
+// stats / pg_database_size / du)ので、WS ではなく 60s の定期 refetch で「ゆっくり活きる」程度に
+// 留める。開いている間だけ更新(TanStack はタブ非表示で自動停止する)。
+const RANKING_REFETCH_MS = 60_000;
+
 export function useAdminRanking() {
-  return useQuery({ queryKey: adminKeys.ranking, queryFn: fetchRanking, staleTime: STALE_MS });
+  return useQuery({
+    queryKey: adminKeys.ranking,
+    queryFn: fetchRanking,
+    staleTime: STALE_MS,
+    refetchInterval: RANKING_REFETCH_MS,
+  });
 }
 
 /** kind → 日本語ラベル(画面表示用)。RESOURCES(単一の真実源)から導出 — ラベルが

@@ -39,6 +39,19 @@ function usageText(row: AdminResourceRow): string {
   return formatUsageByKind(row.kind, row.usage_bytes);
 }
 
+// 「使用量」は種別で意味が違う(service=稼働中メモリ / database=ストレージ / volume=ディスク /
+// cache=キー数)。1 列に混ぜて降順にしているので、行ごとに何の指標かを併記して誤読を防ぐ。
+const USAGE_METRIC: Record<string, string> = {
+  service: "メモリ",
+  database: "ストレージ",
+  volume: "ディスク",
+  cache: "キー数",
+};
+
+function usageMetric(row: AdminResourceRow): string {
+  return USAGE_METRIC[row.kind] ?? "使用量";
+}
+
 function serviceState(row: AdminResourceRow): string {
   if (row.kind !== "service" || row.running == null) return "—";
   return row.running ? "稼働中" : "停止中";
@@ -177,8 +190,11 @@ export default function AdminRanking() {
                           {KIND_LABEL[row.kind] ?? row.kind}
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right font-mono font-bold text-foreground">
-                        {usageText(row)}
+                      <td className="px-4 py-3 text-right">
+                        <div className="font-mono font-bold text-foreground">{usageText(row)}</div>
+                        <div className="text-xs font-medium text-muted-foreground">
+                          {usageMetric(row)}
+                        </div>
                       </td>
                       <td className="px-4 py-3 text-right font-mono text-muted-foreground">
                         {cpuText(row)}

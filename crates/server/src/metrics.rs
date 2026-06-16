@@ -30,6 +30,11 @@ use tokio::sync::broadcast;
 
 /// 採样間隔。頻度は高くなくてよい(要件②)— 5s。
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+/// CPU% を初回フレームから出すための暖機間隔(差分窓)。CPU は 2 サンプルの差分なので、
+/// これが無いと初回は prev 無しで None になり「CPU だけ数秒遅れて出る」。起動時に 1 度
+/// /proc/stat を読み、この間隔を置いてから初回フレームを出す。短すぎると差分のノイズが
+/// 大きいので ~1s(以降は 5s 窓で平準化される)。
+const CPU_WARMUP: Duration = Duration::from_millis(1000);
 
 /// ホスト指標のスナップショット。WS で JSON テキストとして送る。各値は best-effort:
 /// 取得不能(dev の macOS で /proc 無し、df 失敗 等)は None で、前端は「—」を出す。
@@ -119,14 +124,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 fn spawn_sampler(state: AppState) {
     tokio::spawn(async move {
         tracing::debug!("host metrics サンプラ起動(閲覧者あり)");
-        // CPU% は前回サンプルとの差分。初回は前回が無いので None(メモリ/ディスクは即出る)。
-        let mut prev_cpu: Option<CpuTimes> = None;
+        // CPU% は 2 サンプルの差分。**ループ前に 1 度読んで短い暖機間隔を置く**ことで、
+        // 初回フレームから CPU% を出す(これが無いと初回は prev 無し=None で「CPU だけ
+        // 数秒遅れて出る」。mem/disk は瞬時値なので元々すぐ出る)。dev(/proc 無し)は
+        // read が None なので CPU は「—」のまま(挙動は変わらない)。
+        let mut prev_cpu = read_cpu_times().await;
+        tokio::time::sleep(CPU_WARMUP).await;
         let mut tick = tokio::time::interval(SAMPLE_INTERVAL);
         // 1 回の採取(docker stats ~1-2s)が間隔を超えても**バースト追い上げしない** —
         // 取りこぼした tick は捨てて次の周期へ。負荷を一定に保つ(性能影響を出さない要件)。
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            tick.tick().await; // 0th tick は即発火 → 初回スナップショットは接続直後に届く
+            tick.tick().await; // 0th tick は即発火 → 初回フレーム(暖機済みで CPU も値あり)
             // 採取前に受信者ゼロを判定して停止する(要件③)。これが無いと、最後の閲覧者が
             // 切れても**次 tick で docker stats を 1 バッチ余計に走らせて**から send Err で
             // 気づく。先に弾けば「誰も見ていない時は重い採取を一切しない」が完全になる。
