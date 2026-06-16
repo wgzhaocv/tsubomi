@@ -112,6 +112,15 @@ function highlightJSX(code: string): React.ReactNode[] {
   return result;
 }
 
+// シンタックスハイライトを当てない言語(ログや素のテキスト)。JSX 用の正規表現で
+// 着色すると意味のない色が付く上、長文 + 自動更新だと描画毎に全文へ ~16 趟の正規表現を
+// 走らせて無駄。これらは生文字列をそのまま <pre> へ流す(色は既定の #e8d5bc 一色)。
+const PLAINTEXT_LANGS = new Set(["log", "text", "txt", "plain"]);
+
+function isPlaintext(language?: string): boolean {
+  return language != null && PLAINTEXT_LANGS.has(language.toLowerCase());
+}
+
 export interface CodeBlockProps extends Omit<React.HTMLAttributes<HTMLDivElement>, "title"> {
   /** ハイライト表示するソースコード */
   code: string;
@@ -214,7 +223,9 @@ export function CodeBlock({
         {/* a11y(P2 セマンティクス):トークンを <code> でラップし pre > code に。
             見た目は <pre> から継承させるため、ブラウザ既定の等幅/色を持ち込まない
             よう font/color を inherit に倒すだけ(色・寸法は一切変えない)。 */}
-        <code className="font-[inherit] text-inherit">{highlightJSX(code)}</code>
+        <code className="font-[inherit] text-inherit">
+          {isPlaintext(language) ? code : highlightJSX(code)}
+        </code>
       </pre>
       {/* a11y(P2 コピーのライブ通知):コピー成功をスクリーンリーダーへ通知する
           視覚非表示の status 領域。視覚レイアウトには影響しない(sr-only 相当)。 */}
