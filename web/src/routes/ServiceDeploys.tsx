@@ -1,7 +1,13 @@
 import { useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
-import { type Deploy, shortDigest, useRollbackService, useServiceDeploys } from "@/lib/services";
+import {
+  type Deploy,
+  deployStatusLabel,
+  shortDigest,
+  useRollbackService,
+  useServiceDeploys,
+} from "@/lib/services";
 
 // デプロイ履歴。各 succeeded 行は「このデプロイに戻す」(rollback = 旧 digest を再起動、再 build なし)。
 export default function ServiceDeploys() {
@@ -65,7 +71,7 @@ function StatusDot({ status }: { status: Deploy["status"] }) {
   return (
     <span className="mr-1 inline-flex items-center gap-1.5">
       <span className={`size-2 rounded-full ${color}`} />
-      <span className="text-xs font-semibold text-muted-foreground">{status}</span>
+      <span className="text-xs font-semibold text-muted-foreground">{deployStatusLabel(status)}</span>
     </span>
   );
 }

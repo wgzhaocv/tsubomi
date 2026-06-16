@@ -7,6 +7,8 @@ import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import {
+  desiredLabel,
+  phaseLabel,
   shortDigest,
   useDeleteService,
   useService,
@@ -76,8 +78,8 @@ export default function ServiceOverview() {
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-bold text-foreground">状態</h2>
         <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border-2 border-[#e8e2d6] bg-[#e8e2d6] sm:grid-cols-3">
-          <Stat label="phase">{svc?.phase ?? "…"}</Stat>
-          <Stat label="希望状態">{svc?.desired_state ?? "…"}</Stat>
+          <Stat label="現在の状態">{svc ? phaseLabel(svc.phase) : "…"}</Stat>
+          <Stat label="希望状態">{svc ? desiredLabel(svc.desired_state) : "…"}</Stat>
           <Stat label="ポート">{svc?.container_port ?? "…"}</Stat>
           <Stat label="サブドメイン">{svc?.subdomain ?? "…"}</Stat>
           <Stat label="イメージ">

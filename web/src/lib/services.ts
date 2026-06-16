@@ -44,6 +44,38 @@ export function shortDigest(d: string): string {
   return i >= 0 ? `${d.slice(0, i + 1)}${d.slice(i + 1, i + 13)}` : d.slice(0, 19);
 }
 
+// 状態の日本語ラベル(画面表示用)。wire 値(英語の enum)はそのまま色分け等に使い、
+// 表示だけ日本語にする。未知の値はそのまま出す(前方互換)。
+const PHASE_LABEL: Record<string, string> = {
+  created: "作成済み",
+  deploying: "デプロイ中",
+  running: "稼働中",
+  stopped: "停止中",
+  failed: "失敗",
+};
+const DESIRED_LABEL: Record<string, string> = { running: "稼働", stopped: "停止" };
+const DEPLOY_STATUS_LABEL: Record<string, string> = {
+  received: "受付",
+  pulling: "取得中",
+  deploying: "デプロイ中",
+  starting: "起動中",
+  succeeded: "成功",
+  failed: "失敗",
+};
+
+// service の観測段階(phase)。
+export function phaseLabel(phase: string): string {
+  return PHASE_LABEL[phase] ?? phase;
+}
+// 期望状態(desired_state)。
+export function desiredLabel(state: string): string {
+  return DESIRED_LABEL[state] ?? state;
+}
+// デプロイ status。
+export function deployStatusLabel(status: string): string {
+  return DEPLOY_STATUS_LABEL[status] ?? status;
+}
+
 // deploys 履歴の 1 行(DeployDto 鏡)。
 export type Deploy = {
   id: string;
