@@ -5,6 +5,7 @@ import { PageMeta } from "@/components/page-meta";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
+import { TableSkeletonRows } from "@/components/ui/table-skeleton";
 import { Title } from "@/components/ui/title";
 import { type AuditEntry, useAuditLog } from "@/lib/admin";
 
@@ -92,17 +93,9 @@ export default function AdminAudit() {
           </p>
         )}
 
-        {isPending && <p className="text-sm font-medium text-muted-foreground">読み込み中…</p>}
-
-        {!isPending && rows.length === 0 && (
-          <Card type="dashed">
-            <CardContent className="px-6 py-12 text-center">
-              <p className="text-sm font-medium text-muted-foreground">記録がありません。</p>
-            </CardContent>
-          </Card>
-        )}
-
-        {rows.length > 0 && (
+        {/* 読み込み中も表頭 + 骨架行を出し、データ到着で tbody だけ差し替える
+            (spinner→表の差し替えで起きるレイアウト抖動を防ぐ)。空 / error は別表示。 */}
+        {!error && (isPending || rows.length > 0) && (
           <>
             <Card>
               <CardContent className="overflow-x-auto p-0">
@@ -117,6 +110,7 @@ export default function AdminAudit() {
                     </tr>
                   </thead>
                   <tbody>
+                    {isPending && <TableSkeletonRows cols={5} />}
                     {rows.map((e) => (
                       <Row key={e.id} e={e} />
                     ))}
@@ -125,7 +119,7 @@ export default function AdminAudit() {
               </CardContent>
             </Card>
 
-            {hasNextPage && (
+            {!isPending && hasNextPage && (
               <div className="flex justify-center">
                 <Button type="default" loading={isFetchingNextPage} onClick={() => fetchNextPage()}>
                   もっと読む
@@ -133,6 +127,15 @@ export default function AdminAudit() {
               </div>
             )}
           </>
+        )}
+
+        {/* 読み込み完了かつ 0 件のときだけ空表示(骨架と排他)。 */}
+        {!error && !isPending && rows.length === 0 && (
+          <Card type="dashed">
+            <CardContent className="px-6 py-12 text-center">
+              <p className="text-sm font-medium text-muted-foreground">記録がありません。</p>
+            </CardContent>
+          </Card>
         )}
       </div>
     </PageContainer>

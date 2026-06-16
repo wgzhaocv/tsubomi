@@ -120,7 +120,7 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
           <div className="flex flex-col">
             <span className="text-base font-bold text-foreground">サーバー</span>
             <span className="text-xs font-medium text-muted-foreground">
-              本体(ホスト)の使用状況{connected ? "" : "(接続待ち…)"}
+              本体(ホスト)の使用状況 · {connected ? "約 5 秒ごとに更新" : "接続待ち…"}
             </span>
           </div>
         </div>
@@ -156,7 +156,7 @@ function PlatformCard({ items }: { items: HostMetrics["platform"] }) {
           <div className="flex flex-col">
             <span className="text-base font-bold text-foreground">プラットフォーム自身</span>
             <span className="text-xs font-medium text-muted-foreground">
-              各コンテナの CPU / メモリ(利用者のアプリは含みません)
+              各コンテナの CPU / メモリ(利用者のアプリは含みません)· 約 5 秒ごとに更新
             </span>
           </div>
         </div>

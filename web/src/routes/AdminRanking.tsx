@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
+import { TableSkeletonRows } from "@/components/ui/table-skeleton";
 import { Title } from "@/components/ui/title";
 import {
   type AdminAction,
@@ -64,7 +65,7 @@ function cpuText(row: AdminResourceRow): string {
 
 export default function AdminRanking() {
   const [kind, setKind] = useState("all");
-  const { data: allRows, isPending, error } = useAdminRanking();
+  const { data: allRows, error } = useAdminRanking();
   const action = useAdminAction();
   // 危険操作(停止 / 削除)は owner のみ。viewer は表を見られるが操作列は出さない
   // (表示制御は UX — 後端の actions は owner + session + メール検証を毎回確認)。
@@ -127,6 +128,10 @@ export default function AdminRanking() {
 
         <Divider type="line-brown" />
 
+        <p className="text-xs font-medium text-muted-foreground">
+          使用量は 60 秒ごとに自動更新されます(資源ごとに採取するため間隔は長めです)。
+        </p>
+
         {/* 種別フィルタ(セグメント)。 */}
         <div className="flex flex-wrap gap-2">
           {FILTERS.map((f) => (
@@ -147,21 +152,9 @@ export default function AdminRanking() {
           </p>
         )}
 
-        {isPending && !rows && (
-          <p className="text-sm font-medium text-muted-foreground">読み込み中…</p>
-        )}
-
-        {rows && rows.length === 0 && (
-          <Card type="dashed">
-            <CardContent className="px-6 py-12 text-center">
-              <p className="text-sm font-medium text-muted-foreground">
-                該当する資源がありません。
-              </p>
-            </CardContent>
-          </Card>
-        )}
-
-        {rows && rows.length > 0 && (
+        {/* 読み込み中(rows===undefined)も表頭 + 骨架行を出し、データ到着で tbody だけ
+            差し替える(spinner→表の差し替えで起きるレイアウト抖動を防ぐ)。空 / error は別表示。 */}
+        {!error && (rows === undefined || rows.length > 0) && (
           <Card>
             <CardContent className="overflow-x-auto p-0">
               <table className="w-full border-collapse text-sm">
@@ -176,7 +169,8 @@ export default function AdminRanking() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row) => (
+                  {rows === undefined && <TableSkeletonRows cols={isOwner ? 6 : 5} />}
+                  {rows?.map((row) => (
                     <tr
                       key={row.resource_id}
                       className="border-b border-[rgba(61,52,40,0.06)] last:border-0"
@@ -231,6 +225,17 @@ export default function AdminRanking() {
                   ))}
                 </tbody>
               </table>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* 読み込み完了かつ 0 件のときだけ空表示(骨架と排他)。 */}
+        {!error && rows && rows.length === 0 && (
+          <Card type="dashed">
+            <CardContent className="px-6 py-12 text-center">
+              <p className="text-sm font-medium text-muted-foreground">
+                該当する資源がありません。
+              </p>
             </CardContent>
           </Card>
         )}
