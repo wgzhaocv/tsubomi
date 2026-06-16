@@ -179,6 +179,33 @@ reconcile が引く現行コンテナ名の解決は既存 `docker.rs` の流儀
 画面側でも `me.role !== "owner"` を弾く(IpAllowlist.tsx と同じ — UX だけ、後端が 403 で守る)。
 TanStack Query + 共用 Card/Title(frontend 規約)。
 
+### 3.6 ホスト(サーバ本体)指標の WS 配信(リソース概要に追加)
+
+上の overview は**各ユーザ資源**の集計。これとは別に、**宿主機(香橙派 = ARM64)本体の
+CPU/メモリ/ディスク使用量**を「リソース概要」上部の「サーバー」カードに出す。ユーザ制約:
+**①性能影響なし ②低頻度 ③誰も見ていない時は起動しない ④WebSocket**。
+
+- **共有サンプラ(`crates/server/src/metrics.rs`)**:`AppState` に
+  `metrics_tx: broadcast::Sender<HostMetrics>` + `metrics_running: Arc<tokio::sync::Mutex<bool>>`。
+  WS 接続(`handle_socket`)で **先に `subscribe()`(受信者+1)→ ロック → `!running` なら
+  `running=true` にして採样 task を spawn**。サンプラは 5s 毎に採取(ロック外)→ ロック →
+  `send()` が Err(受信者ゼロ)なら `running=false` で停止。**「subscribe+起動判定」と
+  「send+停止判定」を同ロックで直列化**して無人放置 / 二重起動を排除(= 閲覧者ゼロなら
+  採样は走らない、要件③)。初期受信者は `channel(8)` 直後に drop(閲覧者ゼロ=受信者ゼロ)。
+- **採取(新 crate なし、§10-D)**:CPU=`/proc/stat` の cpu 行差分(idle=idle+iowait)、
+  メモリ=`/proc/meminfo`(MemTotal−MemAvailable)、ディスク=`df -Pk`(`metrics::disk_metrics`、
+  gc の磁盘水位告警と**共有**)。dev(macOS)は /proc 無しで CPU/メモリ None(UI「—」)、
+  prod(Linux コンテナ、host network)は全て実値。初回スナップショットは CPU だけ None
+  (前回サンプル無し)、次 tick から実値。
+- **鉉权**:`GET /api/admin/metrics`(admin routes 配下 = `require_auth` の内側 → WS 升级も
+  AuthCtx を持つ)。handler 冒頭で `require_viewer_web`(owner または共有パスワード viewer・
+  **web session のみ**、Bearer 拒否)。指標は platform レベルで非機密(資源の内容ではない)。
+- **前端**:`web/src/lib/host-metrics.ts` の `useHostMetrics()`(ページ表示中だけ WS 接続・
+  unmount で close = 要件③の前端側)+ `AdminOverview.tsx` の「サーバー」カード(用量バーは
+  `VolumeFileBrowser` の意匠を踏襲、`formatBytes` 再利用)。dev proxy は `vite.config.ts` の
+  `/api` に `ws:true`。**端到端済み**:dev(macOS、disk 実値・cpu/mem—)+ prod(Pi、CPU/メモリ/
+  ディスク全部実値、wss が Cloudflare Tunnel を通過)で確認。
+
 ---
 
 ## 4. メール基盤(Resend)+ 磁盘水位告警(S2)
