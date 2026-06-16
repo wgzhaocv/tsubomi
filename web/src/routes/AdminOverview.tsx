@@ -6,6 +6,7 @@ import { PageMeta } from "@/components/page-meta";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Title } from "@/components/ui/title";
 import {
   type AdminOverviewKind,
@@ -59,13 +60,21 @@ function KindCard({ kind, row }: { kind: string; row: AdminOverviewKind | null }
           </div>
         </div>
         <div className="flex items-end justify-between gap-3">
-          <span className="text-3xl font-extrabold tracking-tight text-foreground">
-            {row ? row.count : "—"}
-            <span className="ml-1 text-sm font-semibold text-muted-foreground">個</span>
-          </span>
-          <span className="font-mono text-lg font-bold text-[#0b9c93]">
-            {row ? formatUsageByKind(kind, row.total_usage_bytes) : "—"}
-          </span>
+          {row ? (
+            <span className="text-3xl font-extrabold tracking-tight text-foreground">
+              {row.count}
+              <span className="ml-1 text-sm font-semibold text-muted-foreground">個</span>
+            </span>
+          ) : (
+            <Skeleton className="h-9 w-14" />
+          )}
+          {row ? (
+            <span className="font-mono text-lg font-bold text-[#0b9c93]">
+              {formatUsageByKind(kind, row.total_usage_bytes)}
+            </span>
+          ) : (
+            <Skeleton className="mb-1 h-6 w-24" />
+          )}
         </div>
       </CardContent>
     </Card>
@@ -84,14 +93,28 @@ function UsageBar({ pct }: { pct: number | null }) {
   );
 }
 
-function MetricRow({ label, pct, detail }: { label: string; pct: number | null; detail: string }) {
+function MetricRow({
+  label,
+  pct,
+  detail,
+  loading,
+}: {
+  label: string;
+  pct: number | null;
+  detail: string;
+  loading: boolean;
+}) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-sm font-bold text-foreground">{label}</span>
-        <span className="font-mono text-sm font-bold text-[#0b9c93]">{detail}</span>
+        {loading ? (
+          <Skeleton className="h-4 w-20" />
+        ) : (
+          <span className="font-mono text-sm font-bold text-[#0b9c93]">{detail}</span>
+        )}
       </div>
-      <UsageBar pct={pct} />
+      {loading ? <Skeleton className="h-2 w-full rounded-full" /> : <UsageBar pct={pct} />}
     </div>
   );
 }
@@ -105,6 +128,9 @@ function formatPair(used: number | null | undefined, total: number | null | unde
 // サーバー本体(ホスト)の使用状況。データは WS(useHostMetrics)で 5s 毎に更新。来る前 /
 // 取得不能(dev の CPU・メモリ)は「—」と 0 幅バー。HTTP の overview とは独立。
 function HostCard({ data, connected }: { data: HostMetrics | null; connected: boolean }) {
+  // スナップショット未到着(WS 接続中 / 初回フレーム待ち)= 読み込み中 → Skeleton。
+  // 到着後に個別の値が null(dev macOS の CPU/メモリ等)なのは「取得不能 = —」で別物。
+  const loading = data == null;
   const cpu = data?.cpu_pct ?? null;
   const memPct =
     data?.mem_used != null && data.mem_total ? (data.mem_used / data.mem_total) * 100 : null;
@@ -125,16 +151,23 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
           </div>
         </div>
         <div className="flex flex-col gap-3.5">
-          <MetricRow label="CPU" pct={cpu} detail={cpu == null ? "—" : `${cpu.toFixed(0)}%`} />
+          <MetricRow
+            label="CPU"
+            pct={cpu}
+            detail={cpu == null ? "—" : `${cpu.toFixed(0)}%`}
+            loading={loading}
+          />
           <MetricRow
             label="メモリ"
             pct={memPct}
             detail={formatPair(data?.mem_used, data?.mem_total)}
+            loading={loading}
           />
           <MetricRow
             label="ディスク"
             pct={diskPct}
             detail={formatPair(data?.disk_used, data?.disk_total)}
+            loading={loading}
           />
         </div>
       </CardContent>
@@ -145,7 +178,9 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
 // プラットフォーム自身(server + infra コンテナ)の使用量を**各コンテナ別**に出す。
 // 加総せず一覧 — どの基礎設施が重いか分かる。用户 app は含めない。dev は server が
 // 容器でないので並ばない(infra のみ)。データは HostCard と同じ WS から(props で受ける)。
-function PlatformCard({ items }: { items: HostMetrics["platform"] }) {
+function PlatformCard({ items, loading }: { items: HostMetrics["platform"]; loading: boolean }) {
+  // 読み込み中(WS 未到着)は Skeleton 行。到着後 0 件のときだけ「情報なし」。
+  const skeletonKeys = ["a", "b", "c", "d", "e"];
   return (
     <Card>
       <CardContent className="flex flex-col gap-4">
@@ -160,9 +195,21 @@ function PlatformCard({ items }: { items: HostMetrics["platform"] }) {
             </span>
           </div>
         </div>
-        {items.length === 0 ? (
+        {loading ? (
+          <dl className="flex flex-col divide-y divide-[rgba(196,184,158,0.3)]">
+            {skeletonKeys.map((k) => (
+              <div key={k} className="flex items-center justify-between gap-3 py-2.5">
+                <Skeleton className="h-4 w-28" />
+                <div className="flex items-center gap-5">
+                  <Skeleton className="h-4 w-12" />
+                  <Skeleton className="h-4 w-16" />
+                </div>
+              </div>
+            ))}
+          </dl>
+        ) : items.length === 0 ? (
           <span className="text-sm font-medium text-muted-foreground">
-            コンテナ情報がありません(取得待ち、または dev では server は対象外)。
+            コンテナ情報がありません(dev では server は対象外)。
           </span>
         ) : (
           <dl className="flex flex-col divide-y divide-[rgba(196,184,158,0.3)]">
@@ -234,11 +281,15 @@ export default function AdminOverview() {
                 <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
                   <Users className="size-5.5" />
                 </div>
-                <div className="flex flex-col">
-                  <span className="text-2xl font-extrabold tracking-tight text-foreground">
-                    {data ? data.user_count : "—"}
-                    <span className="ml-1 text-sm font-semibold text-muted-foreground">名</span>
-                  </span>
+                <div className="flex flex-col gap-1">
+                  {data ? (
+                    <span className="text-2xl font-extrabold tracking-tight text-foreground">
+                      {data.user_count}
+                      <span className="ml-1 text-sm font-semibold text-muted-foreground">名</span>
+                    </span>
+                  ) : (
+                    <Skeleton className="h-7 w-16" />
+                  )}
                   <span className="text-xs font-medium text-muted-foreground">
                     資源を持つ利用者
                   </span>
@@ -259,7 +310,7 @@ export default function AdminOverview() {
         )}
 
         {/* 最下部:プラットフォーム自身(server + infra)のコンテナ別使用量。 */}
-        <PlatformCard items={host.data?.platform ?? []} />
+        <PlatformCard items={host.data?.platform ?? []} loading={host.data == null} />
       </div>
     </PageContainer>
   );
