@@ -85,7 +85,7 @@ export default function Databases() {
         )}
 
         {dbs && dbs.length > 0 && (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
             {dbs.map((db) => (
               <li key={db.id}>
                 <Card

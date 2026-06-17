@@ -86,7 +86,7 @@ export default function Caches() {
         )}
 
         {caches && caches.length > 0 && (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
             {caches.map((cache) => (
               <li key={cache.id}>
                 <Card

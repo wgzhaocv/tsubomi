@@ -86,7 +86,7 @@ export default function Volumes() {
         )}
 
         {volumes && volumes.length > 0 && (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
             {volumes.map((vol) => (
               <li key={vol.id}>
                 <Card

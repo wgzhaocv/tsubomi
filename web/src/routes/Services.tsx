@@ -100,7 +100,7 @@ export default function Services() {
         )}
 
         {services && services.length > 0 && (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
             {services.map((svc: Service) => (
               <li key={svc.id}>
                 <Card
