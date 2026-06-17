@@ -40,9 +40,12 @@ RUN apt-get update \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && apt-get install -y --no-install-recommends postgresql-client-18 iptables \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
+# M6 egress:server は host netns で `iptables` を打ってテナント出站を遮断する(services/egress.rs)。
+# debian trixie の iptables は既定で **nft バックエンド** = host(v1.8.7 nf_tables)と一致するので
+# 同じテーブルを操作できる(legacy だと別テーブルで無効化する)。compose 側で cap_add: NET_ADMIN が要る。
 WORKDIR /app
 COPY --from=rust-builder /build/target/release/tsubomi-server /usr/local/bin/tsubomi-server
 COPY --from=web-builder /web/dist /app/web/dist

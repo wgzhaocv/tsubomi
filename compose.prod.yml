@@ -198,6 +198,11 @@ services:
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
+    # M6 egress:host netns で iptables(nft)を打ち、テナント容器の出站を遮断する(services/egress.rs)。
+    # 既定の cap には NET_ADMIN が無く root でも iptables 不可なので明示追加(docker.sock を既に持つので
+    # 相対的に小さな追加)。host netns は network_mode: host で既に共有済み。
+    cap_add:
+      - NET_ADMIN
     env_file:
       - .env.production
     volumes:

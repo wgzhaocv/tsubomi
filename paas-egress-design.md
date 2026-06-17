@@ -26,6 +26,10 @@
   他 docker 栈(gotify / rag-deploy / infra、172.x 系)。
 - **租户桥は docker 自動割当**:現状 `192.168.16.0/20`(172.x が他栈で混み 192.168/16 に溢れた)。
   → 自動割当は LAN に近く、源 CIDR でのマッチングに使えない。**専属 CIDR を明示割当する**(§3.1)。
+- **server は host-net コンテナ**(`network_mode: host`・root・但し `CapAdd=[]`・非 privileged・イメージに
+  iptables 無し)。host の iptables は **`v1.8.7 (nf_tables)`** = nft バックエンド。→ egress を効かせるには
+  E3 で **(a) compose に `cap_add: NET_ADMIN`、(b) イメージに iptables(trixie 既定 = nft 版で host と一致)**
+  を足す(host netns は network_mode: host で共有済み)。
 
 ## §1 脅威 / 非脅威(放行)
 
