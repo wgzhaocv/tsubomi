@@ -311,6 +311,26 @@ pub async fn garbage_collect(state: &AppState) -> AppResult<()> {
     }
 }
 
+/// 既存アカウントを読んで復号する(無ければ None)。
+async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds>> {
+    let row: Option<(String, Vec<u8>)> =
+        sqlx::query_as("SELECT username, password_enc FROM registry_accounts WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await?;
+    match row {
+        Some((user, password_enc)) => {
+            let pass = state.crypto.decrypt(&password_enc)?;
+            Ok(Some(RegistryCreds {
+                host: state.config.registry_push.clone(),
+                user,
+                pass,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::render;
@@ -347,25 +367,5 @@ mod tests {
         assert!(!doc.contains("routers"));
         assert!(!doc.contains("basicAuth"));
         assert!(!doc.contains("Host("));
-    }
-}
-
-/// 既存アカウントを読んで復号する(無ければ None)。
-async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds>> {
-    let row: Option<(String, Vec<u8>)> =
-        sqlx::query_as("SELECT username, password_enc FROM registry_accounts WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await?;
-    match row {
-        Some((user, password_enc)) => {
-            let pass = state.crypto.decrypt(&password_enc)?;
-            Ok(Some(RegistryCreds {
-                host: state.config.registry_push.clone(),
-                user,
-                pass,
-            }))
-        }
-        None => Ok(None),
     }
 }

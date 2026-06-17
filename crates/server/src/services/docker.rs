@@ -1,11 +1,11 @@
 //! bollard(docker.sock)の薄いラッパ。M3 のコンテナ操作を 1 箇所に集約する:
-//! digest 指定の pull / 起動(tsubomi 管理ラベル付き、edge 網のみ。ルーティングは
+//! digest 指定の pull / 起動(tsubomi 管理ラベル付き、per-service 私網。ルーティングは
 //! file provider = services/route.rs)/ 旧コンテナの停止削除(swap・削除で再利用)。
 //! 後の reconcile(S8)/ lifecycle(S7)もここを通す。
 //!
-//! ネットワークは tsubomi-edge **のみ**(隔離の一線):コンテナは edge 上の traefik /
-//! pgbouncer にしか会えず、infra 内部網(pg-platform / pg-tenant / registry 内部面)には
-//! 物理的に届かない。
+//! ネットワークは **per-service 私網 `tsubomi-svc-<id>` のみ**(M6 隔離の一線。services/network.rs):
+//! コンテナは自分の私網に attach された traefik / pgbouncer / valkey にしか会えず、他テナント
+//! app にも infra 内部網(pg-platform / pg-tenant / registry 内部面)にも物理的に届かない。
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -25,9 +25,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// 平台が付ける管理ラベル(reconcile / 孤児検出 / swap がこれで引く)。
-const LABEL_SERVICE_ID: &str = "tsubomi.service_id";
+/// network.rs も per-service 私網に同じラベル(managed / service_id)を付け GC で引く。
+pub(crate) const LABEL_SERVICE_ID: &str = "tsubomi.service_id";
 const LABEL_GIT_SHA: &str = "tsubomi.git_sha";
-const LABEL_MANAGED: &str = "tsubomi.managed";
+pub(crate) const LABEL_MANAGED: &str = "tsubomi.managed";
 
 /// 起動に必要な service の確定値(run_digest が DB から読んで渡す)。
 pub struct RunSpec {
@@ -75,19 +76,19 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
     Ok(format!("{repo}@{image_digest}"))
 }
 
-/// 新コンテナを create + start(edge 網のみ)。コンテナ名は安定 `tsubomi-<id>`
-/// (file provider の後端 URL を固定で書けるため。swap は旧停止→新起動なので同名衝突しない)。
-/// 起動した container 名を返す。
+/// 新コンテナを create + start(per-service 私網のみ。起動の直前に ensure_service_network で
+/// 私網を用意し infra を attach 済みにする)。コンテナ名は **deploy ごとに一意**(`RunSpec` 参照)
+/// で、start-first swap の新旧が同じ私網に同居しても衝突しない。起動した container 名を返す。
 pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<String> {
-    let cfg = &state.config;
     let name = spec.container_name.clone();
 
     let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let labels = mgmt_labels(spec);
 
     let host_config = HostConfig {
-        // tsubomi-edge のみ:infra 内部網には繋がない(隔離の一線)。
-        network_mode: Some(cfg.edge_network.clone()),
+        // per-service 私網のみ(M6 網隔離):他テナント app には届かず、infra 内部網にも繋がない。
+        // 私網は下の ensure_service_network が起動の直前に用意し、infra を attach 済みにする。
+        network_mode: Some(super::network::svc_network_name(state, spec.service_id)),
         // volume 注入のバインドマウント(`<host_path>:<mount_path>`。S6)。無ければ付けない。
         binds: (!spec.binds.is_empty()).then(|| spec.binds.clone()),
         // --memory 硬上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
@@ -108,6 +109,10 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         host_config: Some(host_config),
         ..Default::default()
     };
+
+    // per-service 私網を冪等に用意し infra を attach する(起動の直前。DNS 解決と traefik
+    // 経路の成立のため、create より前である必要がある)。失敗時は起こさない(壊れた service を作らない)。
+    super::network::ensure_service_network(state, spec.service_id).await?;
 
     let create_opts = CreateContainerOptionsBuilder::default().name(&name).build();
     state

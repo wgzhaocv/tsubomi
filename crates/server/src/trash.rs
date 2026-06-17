@@ -308,6 +308,11 @@ pub(crate) async fn purge_resource(
         // db/volume と同じ規律。管理対象外の活きたコンテナを取り残さない)。
         crate::services::docker::stop_remove(state, id).await?;
         crate::services::route::remove(state, id)?;
+        // 私網は通常 soft_delete で撤去済み。残っていても DELETE 後は生存行を持たない孤児 = reconcile の
+        // 網 GC が回収するので、ここは best-effort(空 bridge の撤去失敗で永久削除を止めない)。
+        if let Err(e) = crate::services::network::remove_service_network(state, id).await {
+            tracing::warn!(error = ?e, %id, "purge: 私網の撤去に失敗(reconcile の網 GC が回収)");
+        }
         // 永久削除なので rollback 対象も消える → registry の repo(全 manifest)も掃除する。
         // manifest を消すと layer blob は無参照になり、日次の garbage_collect が実体を回収する
         // (これをしないと削除済み service の旧イメージが registry に永久に堆積する)。

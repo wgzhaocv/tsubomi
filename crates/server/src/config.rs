@@ -95,8 +95,18 @@ pub struct Config {
     /// build 対象の arch(GitHub Variable `TSUBOMI_PLATFORMS`)。§6.6 のデータ駆動:
     /// 将来 x86_64 host を足したら `linux/arm64,linux/amd64` に変えるだけ。
     pub platforms: String,
-    /// ユーザコンテナを attach する docker ネットワーク名(traefik も参加)。
-    pub edge_network: String,
+    /// per-service 私網の名前接頭辞(`TSUBOMI_SVC_NETWORK_PREFIX`、既定 `tsubomi-svc-`)。
+    /// 各 service は `<prefix><service_id>` の専用 bridge に隔離され、二度と他テナントと
+    /// 同じ網を共有しない(東西向=横移動の遮断。背骨「隔離は仕組みで守る」)。infra(traefik/
+    /// pgbouncer/valkey)はこの私網へ on-demand で attach される。**旧 `tsubomi-edge` 共有網は
+    /// テナントにとって無用化** — compose では infra が居つくだけで Rust からは参照しない。
+    pub svc_network_prefix: String,
+    /// per-service 私網へ attach する infra コンテナ**名**(`connect_network` の対象)。
+    /// 既定は compose の `container_name`。注入文字列の DNS 名(`db_internal_host` 等)とは
+    /// 別フィールド — 別名設定で乖離させないため(片方は connect 対象、片方は DNS 解決名)。
+    pub traefik_container: String,
+    pub pgbouncer_container: String,
+    pub valkey_container: String,
     /// 「**誰が** TLS を終端するか」(`TSUBOMI_TLS`)。true = traefik 自身が websecure + LE
     /// (certResolver `le`)で終端(直 VPS)、route の router を websecure にし apex router も書く。
     /// false(既定)= 上流(CF Tunnel / 逆代理)が終端 → router は web(HTTP)、apex は traefik を
@@ -347,8 +357,15 @@ impl Config {
         }
         let platforms =
             std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
-        let edge_network =
-            std::env::var("TSUBOMI_EDGE_NETWORK").unwrap_or_else(|_| "tsubomi-edge".to_string());
+        // M6 網隔離:per-service 私網の接頭辞 + 私網へ attach する infra コンテナ名。
+        let svc_network_prefix = std::env::var("TSUBOMI_SVC_NETWORK_PREFIX")
+            .unwrap_or_else(|_| "tsubomi-svc-".to_string());
+        let traefik_container = std::env::var("TSUBOMI_TRAEFIK_CONTAINER")
+            .unwrap_or_else(|_| "tsubomi-traefik".to_string());
+        let pgbouncer_container = std::env::var("TSUBOMI_PGBOUNCER_CONTAINER")
+            .unwrap_or_else(|_| "tsubomi-pgbouncer".to_string());
+        let valkey_container = std::env::var("TSUBOMI_VALKEY_CONTAINER")
+            .unwrap_or_else(|_| "tsubomi-valkey".to_string());
         // 本番のみ true。route.rs / registry の traefik 出力を websecure+LE 形へ切り替える。
         let tls = std::env::var("TSUBOMI_TLS")
             .map(|v| v == "true" || v == "1")
@@ -412,7 +429,10 @@ impl Config {
             registry_pull,
             registry_push,
             platforms,
-            edge_network,
+            svc_network_prefix,
+            traefik_container,
+            pgbouncer_container,
+            valkey_container,
             tls,
             traefik_dynamic_dir,
             resend_api_key,

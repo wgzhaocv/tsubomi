@@ -18,7 +18,7 @@
 use crate::databases::audit;
 use crate::error::AppResult;
 use crate::services::deploy::{DeployTrigger, container_name};
-use crate::services::{docker, latest_succeeded_deploy, redeploy, route};
+use crate::services::{docker, latest_succeeded_deploy, network, redeploy, route};
 use crate::state::AppState;
 use serde_json::json;
 use std::collections::HashSet;
@@ -192,6 +192,10 @@ async fn reconcile_pass(state: &AppState) {
     // M5 cache:valkey の per-cache ACL を期望状態へ収束(揮発なので。valkey 単独再起動からの
     // 自己回復をここで担保する — 起動時収束だけでは塞げない穴。§7.3)。best-effort(内部で log)。
     crate::valkey::reconcile_acls(state).await;
+    // M6 網隔離:生存 service の per-service 私網 + infra attach を保証し、コンテナ皆無の孤児私網を
+    // 撤去する。cleanup_orphans は管理**コンテナ**を走査するので、コンテナを持たない孤児私網は
+    // ここでしか拾えない(両者は相補的)。infra 単独再起動からの再 attach もここで自己回復。
+    network::reconcile_networks(state).await;
 }
 
 /// 存在収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service で
@@ -320,16 +324,24 @@ async fn remove_orphan_service(state: &AppState, sid: Uuid) {
     let lock = state.deploy_lock(sid);
     let _guard = lock.lock().await;
     tracing::info!(%sid, "reconcile: 孤児コンテナを掃除(DB に生きた行が無い)");
-    if let Err(e) = docker::stop_remove(state, sid).await {
+    let stopped = docker::stop_remove(state, sid).await;
+    if let Err(e) = &stopped {
         tracing::warn!(error = ?e, %sid, "reconcile: 孤児コンテナ削除に失敗");
     }
     if let Err(e) = route::remove(state, sid) {
         tracing::warn!(error = ?e, %sid, "reconcile: 孤児 route 削除に失敗");
     }
+    // 私網撤去は **コンテナ全削除に成功した時だけ**(endpoint が残ると remove は失敗 + infra を
+    // 先に剥がして走行中の孤児コンテナを孤立させる)。失敗時は網を残し、次パスで stop_remove から再試行。
+    if stopped.is_ok()
+        && let Err(e) = network::remove_service_network(state, sid).await
+    {
+        tracing::warn!(error = ?e, %sid, "reconcile: 孤児私網の撤去に失敗");
+    }
 }
 
-/// service の生きた行(未ソフト削除)が存在するか。
-async fn service_alive(state: &AppState, id: Uuid) -> AppResult<bool> {
+/// service の生きた行(未ソフト削除)が存在するか(network.rs の孤児 GC も fresh 再確認に使う)。
+pub(crate) async fn service_alive(state: &AppState, id: Uuid) -> AppResult<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM resources WHERE id=$1 AND kind='service' AND deleted_at IS NULL)",
     )

@@ -8,6 +8,7 @@
 pub mod deploy;
 pub mod docker;
 pub mod inject;
+pub mod network;
 pub mod reconcile;
 pub mod registry;
 pub mod route;
@@ -320,6 +321,12 @@ pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<()> {
     .await?;
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
+    }
+    // 削除を実際に行った時だけ私網を撤去する(コンテナは stop_containers で除去済み = 順序 OK)。
+    // 競合で rows_affected==0 の側は先行 deleter が撤去済みなので触らない。restore は次 deploy の
+    // ensure_service_network で再生成されるので restore 側は無改修。失敗は reconcile の孤児 GC が回収。
+    if let Err(e) = network::remove_service_network(state, id).await {
+        tracing::warn!(error = ?e, %id, "soft_delete: 私網の撤去に失敗(reconcile が後で回収)");
     }
     Ok(())
 }
