@@ -31,7 +31,7 @@ use sqlx::PgPool;
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
-    CreateVolumeReq, FileEntryDto, ListDirResp, MoveReq, RenameVolumeReq, VolumeDto, VolumeUsageDto,
+    CreateVolumeReq, ListDirResp, MoveReq, RenameVolumeReq, VolumeDto, VolumeUsageDto,
 };
 use uuid::Uuid;
 
@@ -405,54 +405,17 @@ pub async fn list_files(
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
     let path = q.path;
 
-    // resolve(openat2)+ metadata + read_dir はブロッキング syscall。ランタイムスレッドを
-    // 塞がないよう spawn_blocking へ(usage と同じ作法。perf review P2)。巨大ディレクトリは
-    // メモリ / ソートを食うので上限を設け、超過は黙って切らず明示エラーにする。
-    let (rel, entries) = tokio::task::spawn_blocking(
-        move || -> AppResult<(String, Vec<FileEntryDto>)> {
-            let dir = safe_path::resolve_existing(&root, &path)?;
-            if !std::fs::metadata(&dir)?.is_dir() {
-                return Err(AppError::BadRequest(
-                    "指定パスはディレクトリではありません".into(),
-                ));
-            }
-            let mut entries: Vec<FileEntryDto> = Vec::new();
-            for entry in std::fs::read_dir(&dir)? {
-                if entries.len() >= MAX_DIR_ENTRIES {
-                    return Err(AppError::BadRequest(format!(
-                        "ディレクトリのエントリが多すぎます(上限 {MAX_DIR_ENTRIES})。サブディレクトリで絞ってください"
-                    )));
-                }
-                let entry = entry?;
-                let ft = entry.file_type()?;
-                let md = entry.metadata().ok();
-                let is_dir = ft.is_dir();
-                entries.push(FileEntryDto {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    is_dir,
-                    size: if is_dir {
-                        0
-                    } else {
-                        md.as_ref().map(|m| m.len()).unwrap_or(0)
-                    },
-                    modified: md
-                        .as_ref()
-                        .and_then(|m| m.modified().ok())
-                        .map(DateTime::<Utc>::from),
-                });
-            }
-            // ディレクトリ先・名前順。
-            entries.sort_by(|a, b| (!a.is_dir, &a.name).cmp(&(!b.is_dir, &b.name)));
-            // 応答の path は假根からの正規化済み相対(resolve_existing が組んだ dir から導出)。
-            let rel = dir
-                .strip_prefix(&root)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            Ok((rel, entries))
-        },
-    )
-    .await
-    .map_err(|e| AppError::Other(anyhow::anyhow!("ディレクトリ列挙タスクに失敗しました: {e}")))??;
+    // safe_path::read_dir(openat2 で dir fd → fd 相対 statat)はブロッキング syscall。
+    // ランタイムスレッドを塞がないよう spawn_blocking へ(usage と同じ作法。perf review P2)。
+    // 巨大ディレクトリはメモリ / ソートを食うので上限を渡し、超過は黙って切らず明示エラーにする。
+    let (rel, mut entries) =
+        tokio::task::spawn_blocking(move || safe_path::read_dir(&root, &path, MAX_DIR_ENTRIES))
+            .await
+            .map_err(|e| {
+                AppError::Other(anyhow::anyhow!("ディレクトリ列挙タスクに失敗しました: {e}"))
+            })??;
+    // ディレクトリ先・名前順。
+    entries.sort_by(|a, b| (!a.is_dir, &a.name).cmp(&(!b.is_dir, &b.name)));
 
     Ok(Json(ListDirResp { path: rel, entries }))
 }
@@ -465,24 +428,13 @@ pub async fn download(
     Query(q): Query<PathQuery>,
 ) -> AppResult<impl IntoResponse> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let file_path = safe_path::resolve_existing(&root, &q.path)?;
-    let meta = std::fs::metadata(&file_path)?;
-    if meta.is_dir() {
-        return Err(AppError::BadRequest(
-            "ディレクトリはダウンロードできません".into(),
-        ));
-    }
+    // open 自体が安全境界(openat2 NO_SYMLINKS で root 配下の fd を取る)。dir は BadRequest、
+    // 不在は NotFound。返るのは検証済み fd の File なので、以後 path で再解決しない(TOCTOU 無し)。
+    let (file, len, filename) = safe_path::open_for_read(&root, &q.path)?;
     // Content-Length を付けてブラウザがダウンロード進捗(%)を出せるようにする
-    // (無いと chunked になり総量不明=不確定プログレス)。単一書き手 + atomic rename
-    // なので読み取り中にサイズが変わる経路は無い(safe_path の TOCTOU 受容と同じ)。
-    let len = meta.len();
-
-    let filename = file_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "download".into());
-
-    let file = tokio::fs::File::open(&file_path).await?;
+    // (無いと chunked になり総量不明=不確定プログレス)。アップロードは tmp + atomic rename
+    // なので、開いた fd の指す inode はリンク差し替えと無関係に最後まで同一。
+    let file = tokio::fs::File::from_std(file);
     let stream = tokio_util::io::ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
@@ -551,16 +503,13 @@ pub async fn upload(
     body: Body,
 ) -> AppResult<StatusCode> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let dest = safe_path::resolve_for_write(&root, &q.path)?;
+    // safe_path が親を mkdir -p し、同一ディレクトリのユニークな tmp を O_EXCL|O_NOFOLLOW で
+    // 開いて返す(親 fd を抱えた commit/abort 付き)。これで (a) 上限超過/中断時に既存 dest を
+    // 壊さない (b) tmp も dest も symlink を踏まない (c) commit は親 fd 相対の atomic rename。
+    let (std_file, commit) = safe_path::begin_write(&root, &q.path)?;
     let cap = state.config.max_upload_bytes;
 
-    // 同一ディレクトリのユニークな一時ファイルへ書き、完了後に atomic rename で
-    // 置き換える。これで (a) 上限超過/中断時に既存ファイルを壊さない (b) dest が
-    // symlink でも辿らない(rename は dest のエントリを置換するだけ)。
-    let parent = dest.parent().unwrap_or(root.as_path());
-    let tmp = parent.join(format!(".tbm-upload-{}.tmp", Uuid::new_v4()));
-
-    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut file = tokio::fs::File::from_std(std_file);
     let mut written: usize = 0;
     let mut stream = body.into_data_stream();
     loop {
@@ -582,21 +531,18 @@ pub async fn upload(
         .await;
         if let Err(e) = res {
             drop(file);
-            let _ = tokio::fs::remove_file(&tmp).await; // 既存 dest は無傷
+            commit.abort(); // tmp を消す。既存 dest は無傷
             return Err(e);
         }
     }
     if let Err(e) = file.flush().await {
         drop(file);
-        let _ = tokio::fs::remove_file(&tmp).await;
+        commit.abort();
         return Err(e.into());
     }
     drop(file);
 
-    if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e.into());
-    }
+    commit.commit()?; // tmp → dest を親 fd 相対で atomic rename
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -608,24 +554,12 @@ pub async fn delete_entry(
     Query(q): Query<PathQuery>,
 ) -> AppResult<StatusCode> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let target = safe_path::resolve_existing(&root, &q.path)?;
-    // 假根そのものは消させない(volume 削除は DELETE /volumes/:id)。
-    if target == root {
-        return Err(AppError::BadRequest(
-            "ルートは削除できません(ボリュームごと削除してください)".into(),
-        ));
-    }
+    let path = q.path;
+    // 假根そのものの削除拒否は safe_path::remove 内(volume 削除は DELETE /volumes/:id)。
     // 再帰削除はブロッキング & 大きな木で長い → spawn_blocking でランタイムを塞がない(P2)。
-    tokio::task::spawn_blocking(move || -> AppResult<()> {
-        if std::fs::metadata(&target)?.is_dir() {
-            std::fs::remove_dir_all(&target)?;
-        } else {
-            std::fs::remove_file(&target)?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| AppError::Other(anyhow::anyhow!("削除タスクに失敗しました: {e}")))??;
+    tokio::task::spawn_blocking(move || safe_path::remove(&root, &path))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("削除タスクに失敗しました: {e}")))??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -649,13 +583,9 @@ pub async fn move_entry(
     Json(req): Json<MoveReq>,
 ) -> AppResult<StatusCode> {
     let root = fetch_volume_path(&state.db, auth.user_id, id).await?;
-    let from = safe_path::resolve_existing(&root, &req.from)?;
-    let to = safe_path::resolve_for_write(&root, &req.to)?;
-    // 移動先が既にあれば拒否(rename は黙って上書きする — 事故・データ損失を防ぐ)。
-    if std::fs::symlink_metadata(&to).is_ok() {
-        return Err(AppError::Conflict("移動先が既に存在します".into()));
-    }
-    std::fs::rename(&from, &to)?;
+    // from/to とも root 配下の親 fd を取り、fd 相対 renameat(NOREPLACE)で改名する。
+    // 移動先が既にあれば Conflict(上書きしない — 事故・データ損失を防ぐ)。
+    safe_path::rename(&root, &req.from, &req.to)?;
     Ok(StatusCode::NO_CONTENT)
 }
 

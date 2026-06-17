@@ -703,7 +703,10 @@ fn validate_mount_path(path: &str) -> AppResult<()> {
 
 /// `POST /api/services`:service の平台側メタを作る(resources + service_details +
 /// deploy_key 生成 + subdomain 採番)。gh / registry 資格情報 / workflow は後チャンク。
-/// **deploy_key は発行時の 1 回だけ**平文で返す(HMAC の鍵)。
+/// deploy_key(HMAC の鍵原文)は作成時にここで平文返却する。なお所有者は後から
+/// `GET /services/:id/deploy-config`(`tbm deploy --local` の退路)で **再取得できる**(自分の
+/// service のみ)— 平文を平台が持つので可能。**rotate API はまだ無い**:鍵漏洩時はサービスを
+/// 削除して作り直す(per-service deploy_key/registry pass の rotate は後相 §で検討)。
 pub async fn create(
     auth: AuthCtx,
     State(state): State<AppState>,

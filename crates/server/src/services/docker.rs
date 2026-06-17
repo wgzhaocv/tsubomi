@@ -13,7 +13,7 @@ use anyhow::anyhow;
 use tsubomi_shared::ExecResult;
 use bollard::models::{
     ContainerCreateBody, ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum,
-    HostConfig, RestartPolicy, RestartPolicyNameEnum,
+    HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -94,6 +94,24 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         // --memory 硬上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
         memory: Some((spec.memory_mb as i64) * 1024 * 1024),
         cpu_shares: Some(spec.cpu_shares as i64),
+        // 容器加固(背骨「隔離は仕組みで守る」。memory 硬上限の隣に並べる宿主機保護):
+        //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾で宿主機の PID を食い潰させない。
+        //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定 512MB と整合)。
+        pids_limit: Some(512),
+        //  - log_config:json-file をローテート(10MB×3=最大 30MB/コンテナ)。無制限ログで
+        //    宿主機ディスクを埋めさせない(平台のログ取得は引き続き docker logs = json-file)。
+        log_config: Some(HostConfigLogConfig {
+            typ: Some("json-file".to_string()),
+            config: Some(HashMap::from([
+                ("max-size".to_string(), "10m".to_string()),
+                ("max-file".to_string(), "3".to_string()),
+            ])),
+        }),
+        //  - no-new-privileges:setuid/setgid バイナリでの権限昇格を封じる。
+        security_opt: Some(vec!["no-new-privileges=true".to_string()]),
+        //  - cap_drop NET_RAW:生ソケットを奪い、私網内 infra への ARP / パケット偽装を断つ
+        //    (per-service 私網 §M6 と二段構え。正規 app で NET_RAW を要るものはほぼ無い)。
+        cap_drop: Some(vec!["NET_RAW".to_string()]),
         // 第一の保険(reconcile が第二)。
         restart_policy: Some(RestartPolicy {
             name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
