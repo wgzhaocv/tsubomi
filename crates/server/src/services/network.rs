@@ -14,9 +14,15 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
-use bollard::models::{NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest};
+use bollard::models::{
+    Ipam, IpamConfig, NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest,
+};
 use bollard::query_parameters::ListNetworksOptionsBuilder;
+use ipnet::Ipv4Net;
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::docker::{LABEL_MANAGED, LABEL_SERVICE_ID};
@@ -45,29 +51,103 @@ fn is_status(e: &bollard::errors::Error, code: u16) -> bool {
     )
 }
 
-/// service の私網を冪等に用意する:無ければ作成 → infra(traefik/pgbouncer/valkey)を attach。
-/// **順序が肝心** — app コンテナ起動の直前に呼び、DNS 解決 + traefik 経路を成立させてから start する。
-/// 既存網は 409、既接続 infra は 403 で、どちらも冪等に握り潰す(2 回目以降の deploy は全部これ)。
+/// テナント私網の subnet サイズ。`tenant_pool`(/24 以上を起動時検証済み)から この大きさで切り出す。
+const TENANT_SUBNET_PREFIX_LEN: u8 = 24;
+
+/// 網の「採番 → 作成」を直列化するプロセス内ロック。これが無いと、別 service の同時 deploy が同じ
+/// docker 網スナップショットを見て同一の空き /24 を選び、2 つ目の create が subnet 重複で虚假失敗
+/// する(最悪 同一 CIDR を共有して E2 の「全租户網は pool 内・互いに別 subnet」不変条件を壊す)。
+/// 作成は新規 service 時のみで稀なので、直列化のコストは無視できる(reconcile は元々逐次)。
+/// tokio の Mutex::new は const ではないので LazyLock で包む。
+static NET_ALLOC_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// テナント私網に与える (subnet, gateway) を `config.tenant_pool` から採番する。pool 内で、現存する
+/// **全 docker 網**のどれとも重ならない最初の `/24` を返す(gateway はその `/24` の `.1`)。空きが
+/// 無ければ **Err**(黙って docker 自動割当に倒さない — pool 外の subnet は egress が識別できず E2 の
+/// 「全租户網は pool 内」不変条件を壊すため。プール拡張を促す)。
+///
+/// 既存網の subnet を読み直して再利用はしない:呼び出し側は新規作成時にだけ本関数を呼ぶ(reconcile の
+/// 既存網パスでは呼ばない)。
+async fn allocate_subnet(state: &AppState) -> AppResult<(String, String)> {
+    let pool = state.config.tenant_pool; // 起動時に parse + /24 以上を検証済み(Ipv4Net は Copy)
+    // 現存する全 docker 網の subnet を集める(tsubomi 以外の栈とも overlap させない)。
+    let opts = ListNetworksOptionsBuilder::default().build();
+    let networks = state
+        .docker
+        .list_networks(Some(opts))
+        .await
+        .map_err(|e| AppError::Other(anyhow!("網一覧の取得に失敗: {e}")))?;
+    let used: Vec<Ipv4Net> = networks
+        .iter()
+        .filter_map(|n| n.ipam.as_ref())
+        .filter_map(|i| i.config.as_ref())
+        .flatten()
+        .filter_map(|c| c.subnet.as_ref())
+        .filter_map(|s| s.parse::<Ipv4Net>().ok())
+        .collect();
+
+    // pool は起動時検証済みなので subnets() は成功する(防御的に ? で伝播)。
+    let candidates = pool
+        .subnets(TENANT_SUBNET_PREFIX_LEN)
+        .map_err(|e| AppError::Other(anyhow!("tenant_pool {pool} から /24 を切り出せません: {e}")))?;
+    for cand in candidates {
+        if used.iter().all(|u| !nets_overlap(*u, cand)) {
+            let gateway = Ipv4Addr::from(u32::from(cand.network()) + 1);
+            return Ok((cand.to_string(), gateway.to_string()));
+        }
+    }
+    Err(AppError::Other(anyhow!(
+        "テナントプール {pool} に空きの /24 がありません。TSUBOMI_TENANT_POOL を広げてください"
+    )))
+}
+
+/// 2 つの v4 ネットが重なるか(u32 レンジの交差判定)。
+fn nets_overlap(a: Ipv4Net, b: Ipv4Net) -> bool {
+    let (a_lo, a_hi) = (u32::from(a.network()), u32::from(a.broadcast()));
+    let (b_lo, b_hi) = (u32::from(b.network()), u32::from(b.broadcast()));
+    a_lo <= b_hi && b_lo <= a_hi
+}
+
+/// service の私網を冪等に用意する:無ければ pool から /24 を採番して作成 → infra(traefik/pgbouncer/
+/// valkey)を attach。**順序が肝心** — app コンテナ起動の直前に呼び、DNS 解決 + traefik 経路を成立させて
+/// から start する。既存網は inspect で検出して作成を飛ばし(subnet 据え置き = 冪等。旧 pool 外網の移行は
+/// 手動)、競合作成の 409・既接続 infra の 403 は冪等に握り潰す(2 回目以降の deploy は全部この経路)。
 pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -> AppResult<()> {
     let name = svc_network_name(state, service_id);
 
-    // 管理ラベルを付けて作成(GC が `tsubomi.managed=true` で列挙し service_id を読む)。
-    // Docker Engine 29 は同名網を 409 で弾くので、create + 409 無視で冪等(list 事前確認は不要)。
-    // 網名は我々が生成した service_id(UUID)を含むので、409=自分の既存網。無関係な網との
-    // 名前衝突は事実上起き得ない(ので 409 時のラベル検証は省く — 毎 ensure の inspect を避ける)。
-    let mut labels: HashMap<String, String> = HashMap::new();
-    labels.insert(LABEL_MANAGED.to_string(), "true".to_string());
-    labels.insert(LABEL_SERVICE_ID.to_string(), service_id.to_string());
-    let req = NetworkCreateRequest {
-        name: name.clone(),
-        driver: Some("bridge".to_string()),
-        labels: Some(labels),
-        ..Default::default()
-    };
-    match state.docker.create_network(req).await {
-        Ok(_) => {}
-        Err(e) if is_status(&e, 409) => {} // 既存(冪等)
-        Err(e) => return Err(AppError::Other(anyhow!("網 {name} の作成に失敗: {e}"))),
+    // 採番〜作成は直列化する(NET_ALLOC_LOCK)。別 service の同時 deploy が同じ空き /24 を掴む TOCTOU を
+    // 防ぐ。ロック下で存在を再確認 → 無ければ pool から /24 を採番して作る。reconcile が毎 tick 全 service に
+    // 対し呼ぶので、存在時は重い list_networks(採番)を避け、軽い inspect で済ませる(ロックは無競合 = 安価)。
+    {
+        let _guard = NET_ALLOC_LOCK.lock().await;
+        if !network_exists(state, &name).await {
+            // 管理ラベル(GC が `tsubomi.managed=true` で列挙し service_id を読む)。
+            let mut labels: HashMap<String, String> = HashMap::new();
+            labels.insert(LABEL_MANAGED.to_string(), "true".to_string());
+            labels.insert(LABEL_SERVICE_ID.to_string(), service_id.to_string());
+
+            // 租户私網に pool 内の /24 を明示割当し、源 CIDR で識別可能にする(egress の前提・§3.1)。
+            let (subnet, gateway) = allocate_subnet(state).await?;
+            let req = NetworkCreateRequest {
+                name: name.clone(),
+                driver: Some("bridge".to_string()),
+                labels: Some(labels),
+                ipam: Some(Ipam {
+                    config: Some(vec![IpamConfig {
+                        subnet: Some(subnet),
+                        gateway: Some(gateway),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            match state.docker.create_network(req).await {
+                Ok(_) => {}
+                Err(e) if is_status(&e, 409) => {} // ロック前に作られた等の競合(冪等)
+                Err(e) => return Err(AppError::Other(anyhow!("網 {name} の作成に失敗: {e}"))),
+            }
+        }
     }
 
     // infra を attach。失敗は伝播させる(infra 不達のまま app を起こすと注入/route が壊れた
@@ -76,6 +156,16 @@ pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -
         connect(state, &name, container).await?;
     }
     Ok(())
+}
+
+/// 私網が既に在るか(inspect で軽く確認)。エラーは「無い」扱い — 新規作成パスへ倒し、実在していれば
+/// create が 409 で冪等に握り潰す。
+async fn network_exists(state: &AppState, name: &str) -> bool {
+    state
+        .docker
+        .inspect_network(name, None::<bollard::query_parameters::InspectNetworkOptions>)
+        .await
+        .is_ok()
 }
 
 /// infra コンテナを私網へ接続(既接続=403 は冪等に握り潰す)。

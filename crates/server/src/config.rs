@@ -1,5 +1,6 @@
 use anyhow::Context;
 use base64::Engine;
+use ipnet::Ipv4Net;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -101,6 +102,13 @@ pub struct Config {
     /// pgbouncer/valkey)はこの私網へ on-demand で attach される。**旧 `tsubomi-edge` 共有網は
     /// テナントにとって無用化** — compose では infra が居つくだけで Rust からは参照しない。
     pub svc_network_prefix: String,
+    /// テナント私網に明示割当する subnet の親プール(`TSUBOMI_TENANT_POOL`、既定 `10.231.0.0/16`)。
+    /// 各 service 桥は ここから `/24` を取り、租户トラフィックを**源 CIDR で一意識別**できるようにする
+    /// (egress 防火墙の `-s <pool>` マッチの前提。`paas-egress-design.md` §3.1)。**10/8 を選ぶ理由**:
+    /// このホストで LAN(192.168)/ docker 自動(172.17・192.168.16)/ tailnet(100.x)と重ならない。
+    /// docker 任せの自動割当は範囲が読めず LAN に近づくので、明示割当でプールを固定する。
+    /// 起動時に CIDR として parse + `/24` 以上を検証する(domain / master_key と同じく fail-fast)。
+    pub tenant_pool: Ipv4Net,
     /// per-service 私網へ attach する infra コンテナ**名**(`connect_network` の対象)。
     /// 既定は compose の `container_name`。注入文字列の DNS 名(`db_internal_host` 等)とは
     /// 別フィールド — 別名設定で乖離させないため(片方は connect 対象、片方は DNS 解決名)。
@@ -365,6 +373,21 @@ impl Config {
         // M6 網隔離:per-service 私網の接頭辞 + 私網へ attach する infra コンテナ名。
         let svc_network_prefix = std::env::var("TSUBOMI_SVC_NETWORK_PREFIX")
             .unwrap_or_else(|_| "tsubomi-svc-".to_string());
+        // 起動時に parse + 検証(use 時の parse / 黙ったフォールバックを避け、E2 egress が
+        // 「全租户網は pool 内」を不変条件にできるようにする)。/24 を 1 個以上切り出せる広さが要る。
+        let tenant_pool: Ipv4Net = {
+            let raw =
+                std::env::var("TSUBOMI_TENANT_POOL").unwrap_or_else(|_| "10.231.0.0/16".to_string());
+            let net: Ipv4Net = raw.parse().map_err(|e| {
+                anyhow::anyhow!("TSUBOMI_TENANT_POOL を CIDR として解析できません({raw}): {e}")
+            })?;
+            if net.prefix_len() > 24 {
+                anyhow::bail!(
+                    "TSUBOMI_TENANT_POOL は /24 以上の広さが必要です(>= 1 個の /24 を切り出すため): {net}"
+                );
+            }
+            net
+        };
         let traefik_container = std::env::var("TSUBOMI_TRAEFIK_CONTAINER")
             .unwrap_or_else(|_| "tsubomi-traefik".to_string());
         let pgbouncer_container = std::env::var("TSUBOMI_PGBOUNCER_CONTAINER")
@@ -439,6 +462,7 @@ impl Config {
             registry_push,
             platforms,
             svc_network_prefix,
+            tenant_pool,
             traefik_container,
             pgbouncer_container,
             valkey_container,
