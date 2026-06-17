@@ -29,7 +29,22 @@ if ssh "$PI" "test -f ~/tsubomi/releases/dl/tbm-$VERSION-aarch64-apple-darwin.ta
   exit 1
 fi
 
-echo "=== building tbm $VERSION for 4 targets ==="
+# プラットフォーム(tsubomi が動くホスト)のアーキを CLI に焼き込む。どのマシンへデプロイしても
+# よく arm を仮定しない — 明示の TSUBOMI_HOST_ARCH があればそれを、無ければ公開先 $PI の uname -m
+# から検出する。tbm --help / whoami / skill 冒頭がこの値を出す。
+# (option_env! 経由なので、値が変われば cargo が tsubomi-cli を再ビルドする — clean 不要。)
+# 前提:公開先 $PI = tsubomi サーバの実ホスト(ship.sh の $HOST)と同一機。別マシンに分離する/
+# 別アーキへ移すときは TSUBOMI_HOST_ARCH をサーバ実ホストのアーキで明示すること($PI の検出に頼らない)。
+if [ -z "${TSUBOMI_HOST_ARCH:-}" ]; then
+  host_uname="$(ssh "$PI" 'uname -m')"
+  case "$host_uname" in
+    aarch64 | arm64) TSUBOMI_HOST_ARCH=arm64 ;;
+    x86_64 | amd64)  TSUBOMI_HOST_ARCH=amd64 ;;
+    *) echo "error: 公開先ホストのアーキを判別できません: $host_uname(TSUBOMI_HOST_ARCH を明示してください)" >&2; exit 1 ;;
+  esac
+fi
+export TSUBOMI_HOST_ARCH
+echo "=== building tbm $VERSION for 4 targets (プラットフォームアーキ=$TSUBOMI_HOST_ARCH) ==="
 # mac は native、それ以外は zigbuild(zig がリンカ)。
 cargo build --release -p tsubomi-cli                                      # aarch64-apple-darwin
 cargo zigbuild --release -p tsubomi-cli --target aarch64-unknown-linux-gnu

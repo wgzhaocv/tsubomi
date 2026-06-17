@@ -174,6 +174,12 @@ password`、リセットで旧 grant 全失効)。bcrypt は `spawn_blocking`、
   install.sh は rc に PATH マーカーブロックを書き、`tbm uninstall` がそれを目印に
   残留物ゼロで消す。マーカーの正本は tsubomi-shared の `PATH_MARKER_BEGIN/END`
   (install.sh にはインライン展開 — 変えるときは両方揃える)。
+- **プラットフォームのアーキは CLI に焼き込む(arm を仮定しない)**:release-cli.sh が公開先ホストの
+  `uname -m` を検出して `TSUBOMI_HOST_ARCH`(明示で上書き可)に入れ、`crate::platform::host_arch`
+  (`option_env!`)が `tbm --help` / `tbm whoami` / skill 冒頭の `{{HOST_ARCH}}` を埋める。`tbm --help` は
+  オフライン生成なのでコンパイル時に焼くのが要点。どのマシンに tsubomi をデプロイしても、その時の
+  ホストのアーキが入る(将来 x86_64 へ移しても同じ仕組み)。これは CI のマルチアーキ集合
+  `TSUBOMI_PLATFORMS`(buildx の build 対象、§6.6)とは別概念。
 - クロスビルドの注意:Homebrew の rust が PATH 先頭にいるので、ビルドスクリプトは
   `PATH="$HOME/.cargo/bin:$PATH"` を前置して rustup の 1.95 を使う(リンクは zig)。
   CLI の TLS は rustls-no-provider + **ring**(aws-lc は windows-gnu / linux への

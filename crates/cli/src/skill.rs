@@ -17,8 +17,17 @@ use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use sha2::{Digest, Sha256};
 
+use crate::platform;
+
 /// skill 正本(frontmatter 無しの可移植 markdown)。どの agent でも読める素の本文。
+/// 本文中の `{{HOST_ARCH}}` は書き出し時に [`body_rendered`] が実プラットフォームのアーキへ置換する。
 const BODY: &str = include_str!("../skill/tsubomi-deploy.md");
+
+/// `{{HOST_ARCH}}` をこのプラットフォームのアーキ(リリース時に焼き込んだ値)へ置換した本文。
+/// skill 冒頭の「このプラットフォームのアーキテクチャは … です」がこれで埋まる。
+fn body_rendered() -> String {
+    BODY.replace("{{HOST_ARCH}}", platform::host_arch())
+}
 
 /// Claude skill の frontmatter。`description` が skill 発火の判断材料になる。
 const CLAUDE_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi(蕾)プラットフォームに tbm CLI で app をデプロイする手順書。service/database/volume/cache の作成・注入・デプロイ・検証、GitHub 経路と `tbm deploy --local` 退路、gh/docker 不在や GitHub Actions 額度切れ時の誘導を含む。ユーザが「tbm でデプロイ」「tsubomi にデプロイ」等と言ったら必ずこれに従う。\n---\n";
@@ -27,10 +36,14 @@ const CLAUDE_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubom
 const MARKER_BEGIN: &str = "<!-- >>> tbm skill: tsubomi-deploy (managed; do not edit) >>> -->";
 const MARKER_END: &str = "<!-- <<< tbm skill: tsubomi-deploy <<< -->";
 
-/// 版本戳 = 埋め込み本文の sha256 先頭 12 hex。
+/// 版本戳 = 本文 + プラットフォームアーキの sha256 先頭 12 hex。`host_arch()` が変われば
+/// (別アーキへ焼き直し)戳も変わり、self-heal が投影を書き直す。BODY を render せず直接ハッシュ
+/// するので、毎コマンドで走る `ensure_fresh()` に `String` 確保(~10KB の replace)を持ち込まない。
 fn hash() -> String {
     let mut h = Sha256::new();
     h.update(BODY.as_bytes());
+    h.update(b"\0"); // 区切り — 本文とアーキの連結の曖昧さを断つ
+    h.update(platform::host_arch().as_bytes());
     hex::encode(h.finalize())[..12].to_string()
 }
 
@@ -53,9 +66,9 @@ fn codex_path() -> Option<PathBuf> {
     Some(home()?.join(".codex/AGENTS.md"))
 }
 
-/// `tbm skill print` 用:内嵌の本文そのもの。
-pub fn body() -> &'static str {
-    BODY
+/// `tbm skill print` 用:内嵌の本文(プレースホルダ置換済み)。
+pub fn body() -> String {
+    body_rendered()
 }
 
 /// `tbm skill where` 用:書き出し先の一覧。
@@ -70,12 +83,16 @@ pub fn claude_skill_path() -> Option<PathBuf> {
 
 /// Claude 用の完整内容(frontmatter + 戳 + 本文)。
 fn claude_contents() -> String {
-    format!("{CLAUDE_FRONTMATTER}{}\n\n{BODY}", stamp_line())
+    format!("{CLAUDE_FRONTMATTER}{}\n\n{}", stamp_line(), body_rendered())
 }
 
 /// Codex AGENTS.md に挿す管理ブロック(戳込み)。
 fn codex_block() -> String {
-    format!("{MARKER_BEGIN}\n{}\n\n{BODY}\n{MARKER_END}\n", stamp_line())
+    format!(
+        "{MARKER_BEGIN}\n{}\n\n{}\n{MARKER_END}\n",
+        stamp_line(),
+        body_rendered()
+    )
 }
 
 /// 全ターゲットへ書き出す(既存は上書き / 置換)。書けたパスを返す。

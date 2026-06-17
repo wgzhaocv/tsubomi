@@ -1,10 +1,11 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod api;
 mod commands;
 mod config;
 mod oauth;
+mod platform;
 mod skill;
 mod version_check;
 
@@ -109,7 +110,16 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls ring provider");
 
-    let cli = Cli::parse();
+    // --help に「プラットフォーム / 本機のアーキ」を載せるため、after_help を実行時に組んでから
+    // パースする(clap derive の after_help は文字列リテラルしか取れない)。プラットフォームアーキは
+    // リリース時に焼き込んだ値(`platform::host_arch`)— どのマシンにデプロイしてもよく、arm を仮定しない。
+    let cmd = Cli::command().after_help(format!(
+        "プラットフォーム(tsubomi)のアーキテクチャ: {}\n現在のマシンのアーキテクチャ:           {}",
+        platform::host_arch(),
+        platform::machine_arch(),
+    ));
+    let mut matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.exit());
     // auto を一度だけ解決(端末→text / パイプ→json)。以後はこの out を配る。
     let out = cli.output.resolve();
     let json = out.is_json();
