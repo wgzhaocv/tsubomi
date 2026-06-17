@@ -63,6 +63,9 @@ async fn main() -> anyhow::Result<()> {
     // M5 cache:起動時に valkey の per-cache ACL を期望状態へ収束させる(揮発なので。§7.3)。
     // best-effort:valkey が落ちていても起動する(周期収束が次の tick で復活させる)。
     valkey::reconcile_acls(&state).await;
+    // M6 egress:テナント容器の出站を iptables で縛る(宿主 + 私網遮断・公網全 TCP 放行)。
+    // prod Linux+root のみ実効、dev / 非 root は no-op。best-effort(失敗は次 tick で収束)。
+    services::egress::reconcile(&state).await;
     // 本番 TLS:registry の push 入口(basicAuth)と apex router を traefik へ書く
     // (どちらも tls=false の dev では no-op。best-effort)。
     services::registry::sync_traefik(&state).await;

@@ -118,9 +118,13 @@ ipblock と同型「期望状態 → 現実へ収束」:
 - **起動時**(main、root のとき)+ **network reconcile tick(30s)**で `egress::reconcile` を呼ぶ。
 - 毎回 **fresh** に生存 service の subnet を docker network inspect で読む(`valkey::reconcile_acls` /
   `reconcile_networks` と同じ作法 — race 回避)→ 2 チェインを flush → refill。
-- **deploy 経路でも同期**:`ensure_service_network` の直後・容器 start の**前**に `egress::sync_one`(or
-  全体 reconcile)を呼ぶ。新桥の同桥 RETURN が入る前に容器が起きて app→pgbouncer が一瞬 DROP される
-  穴を塞ぐ(背骨「現実は容器起動の瞬間に正しく」)。
+- **deploy 経路でも同期**:`ensure_service_network` の直後・容器 start の**前**に `egress::reconcile` を
+  呼ぶ。新桥の同桥 RETURN が入る前に容器が起きて app→pgbouncer が一瞬 DROP される穴を塞ぐ(背骨「現実は
+  容器起動の瞬間に正しく」)。
+- **直列化(`EGRESS_LOCK`)**:reconcile tick と deploy の `docker::run` から並行に呼ばれ得る。flush→refill が
+  割り込むと「チェイン空の一瞬=遮断が外れる」窓 + jump 二重挿入が起きる。プロセス内 Mutex で直列化する。
+  **try_lock で飛ばさず必ず待つ** — deploy 経路は新 subnet を反映して収束させる義務があるため(skip すると
+  新桥の同桥 RETURN が入らず app→infra が落ちる)。
 - **best-effort + 安全側**:書き込み失敗はログのみ(次 tick / 次 deploy で収束)。ただし FW は
   fail-**closed** が原則 — 入口 jump が立たない限り素通しなので、起動時に入口断言が失敗したら error ログを
   上げる(無言で素通しさせない)。
@@ -137,7 +141,9 @@ dev e2e は素通しのまま(網隔離の検証は元々 prod 前提 — memory
 on-box スクリプト `scripts/egress-check.sh`(prod Linux で実行):使い捨て容器を生存租户桥に attach し、
 
 - ✓ 公網到達:`curl -sS -m5 https://example.com` 成功
-- ✓ 同桥 infra 到達:`tsubomi-pgbouncer:6432` / `tsubomi-valkey:6379` に TCP connect 成功
+- ✓ 同桥 infra 到達:`tsubomi-pgbouncer:6432` / `tsubomi-valkey:6379` に TCP connect 成功。
+  併せて **`getent hosts tsubomi-pgbouncer` が同 /24 の IP を返す**ことを確認(Docker DNS は網スコープ
+  なので同 /24 が返るはず。万一 infra 網の 172.x が返ると `-d 172.16/12 DROP` に巻かれるため要確認)
 - ✗ 宿主到達不可:host:22 / host:5432 / host:6379 / host:6432 へ connect タイムアウト
 - ✗ tailnet 到達不可:`100.106.83.107` へ connect タイムアウト
 - ✗ 横移不可:他テナント subnet の IP へ connect タイムアウト

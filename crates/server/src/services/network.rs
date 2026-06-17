@@ -77,14 +77,7 @@ async fn allocate_subnet(state: &AppState) -> AppResult<(String, String)> {
         .list_networks(Some(opts))
         .await
         .map_err(|e| AppError::Other(anyhow!("網一覧の取得に失敗: {e}")))?;
-    let used: Vec<Ipv4Net> = networks
-        .iter()
-        .filter_map(|n| n.ipam.as_ref())
-        .filter_map(|i| i.config.as_ref())
-        .flatten()
-        .filter_map(|c| c.subnet.as_ref())
-        .filter_map(|s| s.parse::<Ipv4Net>().ok())
-        .collect();
+    let used = extract_subnets(&networks);
 
     // pool は起動時検証済みなので subnets() は成功する(防御的に ? で伝播)。
     let candidates = pool
@@ -106,6 +99,32 @@ fn nets_overlap(a: Ipv4Net, b: Ipv4Net) -> bool {
     let (a_lo, a_hi) = (u32::from(a.network()), u32::from(a.broadcast()));
     let (b_lo, b_hi) = (u32::from(b.network()), u32::from(b.broadcast()));
     a_lo <= b_hi && b_lo <= a_hi
+}
+
+/// docker 網一覧から IPAM の v4 subnet を抜き出す(allocate_subnet / tenant_subnets で共用)。
+fn extract_subnets(networks: &[bollard::models::Network]) -> Vec<Ipv4Net> {
+    networks
+        .iter()
+        .filter_map(|n| n.ipam.as_ref())
+        .filter_map(|i| i.config.as_ref())
+        .flatten()
+        .filter_map(|c| c.subnet.as_ref())
+        .filter_map(|s| s.parse::<Ipv4Net>().ok())
+        .collect()
+}
+
+/// 生存する tsubomi-svc 網(`tsubomi.managed=true`)の subnet 一覧。egress の「同桥東西向は放行」
+/// (同 subnet 宛 RETURN)を組むのに使う。pool 外の旧網も混ざり得るが、RETURN 例外なので無害。
+pub(crate) async fn tenant_subnets(state: &AppState) -> AppResult<Vec<Ipv4Net>> {
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("label".into(), vec![format!("{LABEL_MANAGED}=true")]);
+    let opts = ListNetworksOptionsBuilder::default().filters(&filters).build();
+    let networks = state
+        .docker
+        .list_networks(Some(opts))
+        .await
+        .map_err(|e| AppError::Other(anyhow!("網一覧の取得に失敗: {e}")))?;
+    Ok(extract_subnets(&networks))
 }
 
 /// service の私網を冪等に用意する:無ければ pool から /24 を採番して作成 → infra(traefik/pgbouncer/

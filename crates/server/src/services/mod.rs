@@ -7,6 +7,7 @@
 
 pub mod deploy;
 pub mod docker;
+pub mod egress;
 pub mod inject;
 pub mod network;
 pub mod reconcile;

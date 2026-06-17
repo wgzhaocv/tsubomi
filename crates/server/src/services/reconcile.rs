@@ -19,7 +19,7 @@ use crate::databases::audit;
 use crate::error::AppResult;
 use crate::services::deploy::{DeployTrigger, container_name};
 use crate::services::{
-    docker, latest_succeeded_deploy, latest_succeeded_deploy_id, network, redeploy, route,
+    docker, egress, latest_succeeded_deploy, latest_succeeded_deploy_id, network, redeploy, route,
 };
 use crate::state::AppState;
 use serde_json::json;
@@ -188,6 +188,9 @@ async fn reconcile_pass(state: &AppState) {
     // 撤去する。cleanup_orphans は管理**コンテナ**を走査するので、コンテナを持たない孤児私網は
     // ここでしか拾えない(両者は相補的)。infra 単独再起動からの再 attach もここで自己回復。
     network::reconcile_networks(state).await;
+    // M6 egress:出站フィルタ(宿主 + 私網遮断)を現実へ収束。生存 subnet が変わっても(網の
+    // 増減)毎 tick 追従する。network 収束の**後**に呼ぶ — 同桥 RETURN 例外に最新の subnet を反映。
+    egress::reconcile(state).await;
 }
 
 /// running 収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service を

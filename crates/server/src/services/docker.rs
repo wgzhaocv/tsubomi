@@ -131,6 +131,11 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
     // per-service 私網を冪等に用意し infra を attach する(起動の直前。DNS 解決と traefik
     // 経路の成立のため、create より前である必要がある)。失敗時は起こさない(壊れた service を作らない)。
     super::network::ensure_service_network(state, spec.service_id).await?;
+    // 【デプロイ経路で必須・周期 reconcile とは別役割】新規 deploy は新しい /24 の網を作って即この先で
+    // コンテナを起動する。ここで egress を収束させないと、新 subnet の「同桥 RETURN」が入る前に app が
+    // 起き、app→pgbouncer/valkey が `pool→私網 DROP` に巻かれて次の 30s reconcile まで DB/cache に繋がらない。
+    // reconcile_pass 側の呼び出しは周期リフレッシュで、これとは別物(消すとデプロイ直後に穴が開く)。
+    super::egress::reconcile(state).await;
 
     let create_opts = CreateContainerOptionsBuilder::default().name(&name).build();
     state
