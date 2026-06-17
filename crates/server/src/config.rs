@@ -129,6 +129,11 @@ pub struct Config {
     /// gc の周期(1h)で `df` を見て判定し、platform_config の状態で去重する(§4.2)。
     pub disk_warn_pct: u8,
     pub disk_critical_pct: u8,
+    /// **危険操作の確認コードを log に出すことを明示的に許す**(`TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES`、
+    /// 既定 false)。dev で Resend 未契約のとき owner がコードを使えるようにする退路。**本番では絶対に
+    /// 立てない** — log アクセス権だけで owner の危険操作(他人資源の stop/delete)を完遂できてしまう。
+    /// off のまま mail も未設定なら、危険操作は「配信できない」として fail-fast する(admin/actions.rs)。
+    pub dev_insecure_log_action_codes: bool,
 }
 
 /// master key のラッパ。Config は Debug 派生なので、生鍵が `{:?}` で漏れないように
@@ -396,6 +401,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(90);
+        // 危険操作コードの log 出力許可(dev 退路。本番では立てない — §admin/actions.rs)。
+        let dev_insecure_log_action_codes = std::env::var("TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         Ok(Self {
             bind_addr,
@@ -439,6 +448,7 @@ impl Config {
             mail_from,
             disk_warn_pct,
             disk_critical_pct,
+            dev_insecure_log_action_codes,
         })
     }
 }

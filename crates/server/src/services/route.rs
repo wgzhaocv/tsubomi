@@ -132,6 +132,31 @@ pub fn remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
     }
 }
 
+/// `svc-<id>.yml` の backend URL から容器名を取り出す(`- url: "http://<name>:<port>"` → `<name>`)。
+/// ファイル無し / 解析不可なら None。reconcile の route drift 収束が「route が実際に走っている容器を
+/// 指しているか」を確かめるのに使う(`write` の逆操作)。平台生成のフォーマットだけを前提に素朴に解析する。
+pub(crate) fn backend_container(state: &AppState, service_id: Uuid) -> Option<String> {
+    let content = std::fs::read_to_string(route_path(state, service_id)).ok()?;
+    parse_backend_container(&content)
+}
+
+/// `- url: "http://<name>:<port>"` 行から `<name>` を取り出す純粋関数(`write` の loadBalancer
+/// server URL の逆)。`write` の出力フォーマットと密結合なので、両者がズレたら下のテストが落ちる。
+fn parse_backend_container(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let Some(rest) = line.trim().strip_prefix("- url:") else {
+            continue;
+        };
+        let url = rest.trim().trim_matches('"');
+        let after = url.strip_prefix("http://").unwrap_or(url);
+        let name = after.split(':').next().unwrap_or("");
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
 /// dynamic dir 内の `svc-<uuid>.yml` ファイルから service_id を列挙する(reconcile の
 /// 孤児 route 掃除用)。best-effort:dir が読めなければ空、命名規則に合わないファイルは無視。
 pub(crate) fn list_service_ids(state: &AppState) -> Vec<Uuid> {
@@ -153,8 +178,21 @@ fn parse_route_filename(name: &str) -> Option<Uuid> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_route_filename;
+    use super::{parse_backend_container, parse_route_filename};
     use uuid::Uuid;
+
+    #[test]
+    fn extracts_backend_container_name() {
+        // `write` が出力する形(loadBalancer の server URL 行)から容器名を取り出す。
+        let doc = "http:\n  services:\n    svc-x:\n      loadBalancer:\n        servers:\n          - url: \"http://tsubomi-abc123-deadbeef:8080\"\n";
+        assert_eq!(
+            parse_backend_container(doc).as_deref(),
+            Some("tsubomi-abc123-deadbeef")
+        );
+        // url 行が無い(ipallow.yml 等)→ None。
+        assert_eq!(parse_backend_container("http:\n  middlewares: {}\n"), None);
+        assert_eq!(parse_backend_container(""), None);
+    }
 
     #[test]
     fn parses_only_service_route_files() {

@@ -157,16 +157,36 @@ fn mgmt_labels(spec: &RunSpec) -> HashMap<String, String> {
     m
 }
 
-/// reconcile 用の緩い存在判定:running / restarting のコンテナが 1 つでもあれば true。
-/// 厳格な `is_live`(restart_count==0 を要求)とは**別物** — reconcile であれを使うと
-/// クラッシュループ中(restarting)のコンテナを「不在」と誤判し毎パス作り直してしまう。
-/// restarting は docker の restart policy が面倒を見ているので「存在」とみなし手出ししない。
-pub(crate) async fn is_present(state: &AppState, service_id: Uuid) -> AppResult<bool> {
+/// reconcile 用スナップショット:**1 回の list_by_service** で `(存在するか, 走行容器名の集合)` を返す。
+/// 存在収束(消えた容器の復活)と route ドリフト収束(route が正しい容器を指すか)が、これ 1 回で両方
+/// 賄える(以前は是非判定と容器名取得で 2 回 docker を叩いていた)。
+///  - **存在** = running / restarting が 1 つでも。厳格な `is_live`(restart_count==0 を要求)とは別物 —
+///    クラッシュループ中(restarting)を「不在」と誤判すると毎パス作り直してしまう。restarting は
+///    docker の restart policy が面倒を見るので「存在」とみなし手出ししない。
+///  - **走行容器名** = RUNNING な全コンテナ名(先頭 `/` 除去 = route backend の docker DNS 名)。
+///    start-first swap の旧片付け(`remove_others`、best-effort)が失敗すると新旧が併存し得るので、
+///    呼び出し側は「どれが正か」を **deploy 履歴**(直近成功 deploy の容器名)で決める。ここは候補の列挙だけ
+///    (任意の 1 つを「正」と決めない — それが route を旧版へ巻き戻す事故の元だった)。restarting のみは空。
+pub(crate) async fn presence(
+    state: &AppState,
+    service_id: Uuid,
+) -> AppResult<(bool, Vec<String>)> {
     use ContainerSummaryStateEnum::{RESTARTING, RUNNING};
-    Ok(list_by_service(state, service_id)
-        .await?
-        .iter()
-        .any(|c| matches!(c.state, Some(RUNNING | RESTARTING))))
+    let mut present = false;
+    let mut running_names = Vec::new();
+    for c in list_by_service(state, service_id).await? {
+        match c.state {
+            Some(RUNNING) => {
+                present = true;
+                if let Some(name) = c.names.and_then(|ns| ns.into_iter().next()) {
+                    running_names.push(name.trim_start_matches('/').to_string());
+                }
+            }
+            Some(RESTARTING) => present = true,
+            _ => {}
+        }
+    }
+    Ok((present, running_names))
 }
 
 /// 全ての管理コンテナ(`tsubomi.managed=true`)を `(コンテナ id, service_id ラベルの parse 結果)`
@@ -272,6 +292,9 @@ pub async fn remove_one(state: &AppState, name: &str) {
     let _ = force_remove(state, name).await;
 }
 
+/// `logs` の出力バイト上限(行数 tail に加えた第二の安全弁。概算 1 MiB)。超えたら打ち切る。
+const LOGS_OUTPUT_CAP: usize = 1024 * 1024;
+
 /// 指定 service の(現行)コンテナの直近ログを text で返す(stdout+stderr、tail 行)。
 /// コンテナが無い(stopped / 未デプロイ)→ 空文字。stream を行ごとに集約する(follow はしない)。
 /// 注:`logs_by_name` とループが似るが **意図的に分離**する — こちらは API エンドポイント
@@ -296,11 +319,25 @@ pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> Ap
         .build();
     let mut stream = state.docker.logs(&name, Some(opts));
     let mut out = String::new();
+    let mut truncated = false;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(line) => out.push_str(&line.to_string()),
+            Ok(line) => {
+                let s = line.to_string();
+                // 行数 tail に加えた**バイト上限**(第二の安全弁):少数の超長行で server の
+                // メモリ / 応答 JSON を膨らませない(exec_capture の EXEC_OUTPUT_CAP と同趣旨)。
+                // 上限を跨ぐ行は丸ごと落として打ち切る(char 境界を気にせず安全)。
+                if out.len() + s.len() > LOGS_OUTPUT_CAP {
+                    truncated = true;
+                    break;
+                }
+                out.push_str(&s);
+            }
             Err(e) => return Err(AppError::Other(anyhow!("ログ取得に失敗: {e}"))),
         }
+    }
+    if truncated {
+        out.push_str("\n…(ログが大きいため切り詰めました。tail で行数を絞ってください)\n");
     }
     Ok(out)
 }

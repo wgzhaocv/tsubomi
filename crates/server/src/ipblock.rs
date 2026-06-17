@@ -211,19 +211,41 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
 
     let dir = &state.config.traefik_dynamic_dir;
     tokio::fs::create_dir_all(dir).await?;
+    let db_tcp = dir.join("db-tcp.yml");
+    // 公開 DB を開くべきか。公開 DB は **fail-closed**:許可リストが空なら入口を書かない
+    // (空=全開で DB を公網に晒す事故を防ぐ。HTTP service は公網 app が本意なので空=fail-open のままだが、
+    // DB は別ポリシー)。off / 空 = 閉じる。
+    let open_db = state.config.db_public_enabled && !cidrs.is_empty();
 
-    // 一時ファイルへ書いて atomic rename(traefik が中途半端な内容を読まない)。
+    // 【順序が安全境界】公開 DB を**閉じる**べき状態(off / 許可リスト空)なら、HTTP 書き込みの成否に
+    // **依存せず先に** db-tcp.yml を消す。HTTP を先に書いてその失敗で早期 return すると、古い fail-open
+    // の db-tcp.yml(0.0.0.0/0)が消し残り DB を晒し続ける穴があった(codex 指摘)。閉じるを先頭に置く。
+    if !open_db {
+        if state.config.db_public_enabled {
+            tracing::warn!(
+                "公開 DB が有効だが IP 許可リストが空 — fail-closed で TCP 入口を書きません(DB を公網に晒さない)。会社 CIDR を 1 件以上登録してください"
+            );
+        }
+        match tokio::fs::remove_file(&db_tcp).await {
+            Ok(()) => {
+                tracing::info!("db-tcp.yml を削除(公開 DB 無効、または許可リスト空で fail-closed)")
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    // HTTP の IP 許可リスト(常時)。一時ファイルへ書いて atomic rename(traefik が中途半端を読まない)。
     let target = dir.join("ipallow.yml");
     let tmp = dir.join(".ipallow.yml.tmp");
     tokio::fs::write(&tmp, render_yaml(&cidrs)).await?;
     tokio::fs::rename(&tmp, &target).await?;
     tracing::info!(count = cidrs.len(), "IP 許可リストを traefik へ同期した");
 
-    // 公開 DB(VPS)では Postgres も Traefik の TCP 入口(postgres)経由にし、**同じ許可リスト**を
-    // TCP の ipAllowList として流用する(HTTP は pgbouncer 直結を通らないので別途 tcp: で被せる)。
-    // 無効な部署(CF Tunnel 等)では db-tcp.yml を置かない(在れば消す = off に倒した時に確実に閉じる)。
-    let db_tcp = dir.join("db-tcp.yml");
-    if state.config.db_public_enabled {
+    // 公開 DB を**開く**場合だけ最後に TCP 入口を書く(Postgres も Traefik の TCP 入口経由にし同じ
+    // 許可リストを流用。HTTP は pgbouncer 直結を通らないので別途 tcp: で被せる)。HTTP 書き込みが失敗して
+    // 早期 return しても、その時は DB 入口を書かない = fail-closed 側に倒れる(安全)。
+    if open_db {
         let backend = format!(
             "{}:{}",
             state.config.db_internal_host, state.config.db_internal_port
@@ -235,12 +257,6 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
             count = cidrs.len(),
             "公開 DB(TCP)の IP 許可リストを traefik へ同期した"
         );
-    } else {
-        match tokio::fs::remove_file(&db_tcp).await {
-            Ok(()) => tracing::info!("公開 DB が無効なので db-tcp.yml を削除した"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
     }
     Ok(())
 }
@@ -278,7 +294,8 @@ fn render_yaml(cidrs: &[String]) -> String {
 }
 
 /// 公開 DB(Postgres)用の traefik **TCP** 動的設定(YAML)。HTTP と同じ会社 IP 許可リストを
-/// TCP の ipAllowList として流用する。空リスト = fail-open(HTTP と同じ約束)。
+/// TCP の ipAllowList として流用する。**呼び出し側(sync)は許可リストが空なら本関数を呼ばない**
+/// = 公開 DB は fail-closed(DB を空リストで 0.0.0.0/0 に晒さない。HTTP service の空=fail-open とは別)。
 /// pgbouncer が client TLS を終端するので Traefik は **素の TCP passthrough**(`HostSNI(*)`・TLS 無し)=
 /// client の `sslmode=require` は pgbouncer と端到端で TLS を張る。`backend` = 内部 pgbouncer の
 /// `host:port`(db_internal_host:db_internal_port。値は平台生成なのでそのまま埋めて安全)。
@@ -293,7 +310,7 @@ fn render_db_tcp_yaml(cidrs: &[String], backend: &str) -> String {
     s.push_str(
         "# Postgres を Traefik の TCP 入口(postgres)経由にし、HTTP と同じ許可リストを流用する。\n",
     );
-    s.push_str("# 空リスト = 全 IP 許可(fail-open)。1 件以上 = その CIDR だけ許可。\n");
+    s.push_str("# 公開 DB は fail-closed:空許可リストでは sync がこのファイルを書かない(1 件以上の CIDR だけ許可)。\n");
     s.push_str("tcp:\n");
     s.push_str("  routers:\n");
     s.push_str("    tsubomi-postgres:\n");

@@ -18,7 +18,9 @@
 use crate::databases::audit;
 use crate::error::AppResult;
 use crate::services::deploy::{DeployTrigger, container_name};
-use crate::services::{docker, latest_succeeded_deploy, network, redeploy, route};
+use crate::services::{
+    docker, latest_succeeded_deploy, latest_succeeded_deploy_id, network, redeploy, route,
+};
 use crate::state::AppState;
 use serde_json::json;
 use std::collections::HashSet;
@@ -56,7 +58,7 @@ pub fn spawn(state: AppState) {
 ///   - phase が既に 'deploying' でない(stop / 別経路が処理済み)→ 触らない。
 ///   - desired='running'(= 成功版あり)→ route が指す旧コンテナだけ残し、孤児の新コンテナを掃除して
 ///     phase='running' に戻す。旧版は走ったままなのでダウンタイム無し。旧も消えていれば次の
-///     converge_existence が直近成功 digest で復活させる(phase='running' が条件)。
+///     converge_running が直近成功 digest で復活させる(phase='running' が条件)。
 ///   - それ以外(desired='stopped' = ユーザの stop / 初回未起動、または成功版なし)→ 全コンテナと
 ///     route を掃除し phase を stopped / failed に落とす(**止めたい意図を絶対に覆さない**)。
 async fn recover_interrupted(state: &AppState) {
@@ -119,20 +121,10 @@ async fn recover_interrupted(state: &AppState) {
         .await;
 
         // route が指す旧コンテナ = 直近成功 deploy のコンテナ(start-first の命名規約)。
-        let succeeded_id: Option<Uuid> = match sqlx::query_as::<_, (Uuid,)>(
-            "SELECT id FROM deploys WHERE service_id=$1 AND status='succeeded'
-              ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await
-        {
-            Ok(row) => row.map(|(x,)| x),
-            Err(e) => {
-                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの直近成功 deploy 取得に失敗");
-                None
-            }
-        };
+        let succeeded_id = latest_succeeded_deploy_id(state, id).await.unwrap_or_else(|e| {
+            tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの直近成功 deploy 取得に失敗");
+            None
+        });
 
         if desired == "running"
             && let Some(sdid) = succeeded_id
@@ -184,10 +176,10 @@ async fn recover_interrupted(state: &AppState) {
     }
 }
 
-/// 1 パス:存在収束 → 孤児掃除。どちらも内部でエラーを log に握り潰し、片方の失敗で
+/// 1 パス:running 収束 → 孤児掃除。どちらも内部でエラーを log に握り潰し、片方の失敗で
 /// もう片方を止めない(背景処理なのでパス自体は決して落とさない)。
 async fn reconcile_pass(state: &AppState) {
-    converge_existence(state).await;
+    converge_running(state).await;
     cleanup_orphans(state).await;
     // M5 cache:valkey の per-cache ACL を期望状態へ収束(揮発なので。valkey 単独再起動からの
     // 自己回復をここで担保する — 起動時収束だけでは塞げない穴。§7.3)。best-effort(内部で log)。
@@ -198,15 +190,22 @@ async fn reconcile_pass(state: &AppState) {
     network::reconcile_networks(state).await;
 }
 
-/// 存在収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service で
-/// コンテナが消えていれば、直近成功 deploy の digest で起こし直す。
+/// running 収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service を
+/// **1 service あたり 1 回の docker 問い合わせ**(`docker::presence`)で点検し、(a) コンテナが消えて
+/// いれば直近成功 deploy の digest で起こし直し(route も書き直される)、(b) 走っているのに route
+/// (`svc-<id>.yml`)の backend が走行容器と食い違っていれば route を書き直す。後者は deploy 末尾の
+/// `route::write` 失敗(ro dir / disk full / rename 失敗)で、DB は succeeded・新版稼働なのに公開 URL が
+/// 旧容器を指したまま漂流する穴の収束(§6.4 は「route 失敗を致命にしない」= 旧版で着地させるが、収束役が
+/// 居なかった)。
 ///
 /// 対象を `phase=running` に絞るのが **churn の安全弁** — failed / deploying / created / stopped は
 /// 触らない(壊れたイメージを毎パス再起動し続ける暴走を作らない)。復活に失敗すれば run_digest が
-/// phase=failed にし、次パスからは対象外になる(= 自己沈静化)。
-async fn converge_existence(state: &AppState) {
-    let candidates: Vec<(Uuid,)> = match sqlx::query_as(
-        "SELECT s.resource_id
+/// phase=failed にし、次パスからは対象外になる(= 自己沈静化)。route 書き直しは deploy_lock +
+/// 取得後の再確認で進行中 deploy と競合しない(取得待ちの間に deploy が容器を入れ替え route も直せば、
+/// 再確認で一致 → 何もしない。start-first の一瞬の新旧共存中も lock 待ちで定常状態を見るので誤修正しない)。
+async fn converge_running(state: &AppState) {
+    let candidates: Vec<(Uuid, String, i32)> = match sqlx::query_as(
+        "SELECT s.resource_id, s.subdomain, s.container_port
            FROM service_details s
            JOIN resources r ON r.id = s.resource_id
           WHERE r.kind = 'service' AND r.deleted_at IS NULL
@@ -223,49 +222,115 @@ async fn converge_existence(state: &AppState) {
         }
     };
 
-    let mut restored = 0usize;
-    for (id,) in candidates {
-        match docker::is_present(state, id).await {
-            Ok(true) => continue, // 走っている(restarting 含む)→ 何もしない
-            Ok(false) => {}
+    let (mut restored, mut rerouted) = (0usize, 0usize);
+    for (id, subdomain, port) in candidates {
+        let (present, running) = match docker::presence(state, id).await {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = ?e, %id, "reconcile: 存在確認に失敗");
                 continue;
             }
-        }
-        // コンテナが消えているのに DB は running → 純粋なドリフト。直近成功 digest で復活させる。
-        let latest = match latest_succeeded_deploy(state, id).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = ?e, %id, "reconcile: 直近 deploy 取得に失敗");
-                continue;
-            }
         };
-        // 成功 deploy が無い(理屈上は phase=running と矛盾)→ 触らない。
-        let Some((digest, git_sha)) = latest else {
+
+        // (1) コンテナが消えているのに DB は running → 直近成功 digest で復活させる(route も書き直される)。
+        if !present {
+            let latest = match latest_succeeded_deploy(state, id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = ?e, %id, "reconcile: 直近 deploy 取得に失敗");
+                    continue;
+                }
+            };
+            // 成功 deploy が無い(理屈上は phase=running と矛盾)→ 触らない。
+            let Some((digest, git_sha)) = latest else {
+                continue;
+            };
+            tracing::info!(%id, "reconcile: コンテナ消失を検知 — 復活させる");
+            audit(
+                &state.db,
+                None,
+                "service.reconcile",
+                id,
+                json!({ "reason": "container_missing" }),
+            )
+            .await;
+            // ロックは持たずに redeploy(run_digest が内部で deploy_lock を取る — 二重取得回避)。
+            // Reconcile 契機:run_digest がロック取得後に「まだ走るべきか」を再確認し、その間に stop が
+            // 割り込んでいたら蘇らせない(stop レース防止)。
+            if let Err(e) = redeploy(state, id, &digest, &git_sha, DeployTrigger::Reconcile).await {
+                tracing::warn!(error = ?e, %id, "reconcile: 復活に失敗(phase=failed。次パスでは対象外)");
+            } else {
+                restored += 1;
+            }
+            continue;
+        }
+
+        // (2) 走っている → route ドリフト点検。route が指すべきは **直近成功 deploy の容器**(start-first
+        //     の命名規約で一意)であって「走っている任意の容器」ではない — 旧片付け(remove_others、
+        //     best-effort)失敗で新旧併存した時に route を旧版へ巻き戻さないため(serving stale 事故の回避)。
+        //     その容器が実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
+        let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
-        tracing::info!(%id, "reconcile: コンテナ消失を検知 — 復活させる");
-        audit(
-            &state.db,
-            None,
-            "service.reconcile",
-            id,
-            json!({ "reason": "container_missing" }),
-        )
-        .await;
-        // ロックは持たずに redeploy を呼ぶ(run_digest が内部で deploy_lock を取る — 二重取得回避)。
-        // Reconcile 契機:run_digest がロック取得後に「まだ走るべきか」を再確認し、その間に stop が
-        // 割り込んでいたら蘇らせない(stop レース防止)。
-        if let Err(e) = redeploy(state, id, &digest, &git_sha, DeployTrigger::Reconcile).await {
-            tracing::warn!(error = ?e, %id, "reconcile: 復活に失敗(phase=failed。次パスでは対象外)");
-        } else {
-            restored += 1;
+        if route::backend_container(state, id).as_deref() == Some(expected.as_str()) {
+            continue; // route は正しい容器を指している(定常状態の大多数)
+        }
+        // ドリフト確定(route 無し / 別容器を指す)。deploy_lock を取り進行中の deploy と競合しない。
+        let lock = state.deploy_lock(id);
+        let _guard = lock.lock().await;
+        // 取得待ちの間に deploy が容器 / route を入れ替えた可能性 → 取得後に fresh 再確認(正容器も再取得)。
+        let (_, running) = match docker::presence(state, id).await {
+            Ok(v) => v,
+            _ => continue,
+        };
+        let Some(expected) = expected_running_container(state, id, &running).await else {
+            continue;
+        };
+        if route::backend_container(state, id).as_deref() == Some(expected.as_str()) {
+            continue;
+        }
+        match route::write(state, id, &subdomain, &expected, port) {
+            Ok(()) => {
+                rerouted += 1;
+                audit(
+                    &state.db,
+                    None,
+                    "service.reconcile",
+                    id,
+                    json!({ "reason": "route_drift", "backend": expected }),
+                )
+                .await;
+                tracing::info!(%id, backend = %expected, "reconcile: route drift を修正(backend を直近成功 deploy の容器へ)");
+            }
+            Err(e) => tracing::warn!(error = ?e, %id, "reconcile: route drift の修正に失敗"),
         }
     }
     if restored > 0 {
-        tracing::info!(restored, "reconcile: 存在収束 完了");
+        tracing::info!(restored, "reconcile: コンテナ復活 完了");
     }
+    if rerouted > 0 {
+        tracing::info!(rerouted, "reconcile: route drift 収束 完了");
+    }
+}
+
+/// route が指すべき容器名 = **直近成功 deploy の容器**(`container_name`)。それが今 `running_names` に
+/// 居る(= 実際に走っている)時だけ Some。走っていない(mid-deploy / クラッシュ)や成功 deploy 無しは
+/// None(route を直さず存在収束 / 次パスに委ねる)。新旧併存時に「正しい新版」を一意に選ぶ唯一の判断点。
+async fn expected_running_container(
+    state: &AppState,
+    id: Uuid,
+    running_names: &[String],
+) -> Option<String> {
+    let deploy_id = match latest_succeeded_deploy_id(state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = ?e, %id, "reconcile: route drift の直近成功 deploy 取得に失敗");
+            return None;
+        }
+    };
+    let expected = container_name(id, deploy_id);
+    running_names.contains(&expected).then_some(expected)
 }
 
 /// 孤児掃除:

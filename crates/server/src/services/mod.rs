@@ -239,6 +239,23 @@ pub(crate) async fn latest_succeeded_deploy(
     .await?)
 }
 
+/// 直近に成功した deploy の **id**。route が指すべき容器名は `deploy::container_name(service_id, この id)`
+/// で一意に決まる(start-first の命名規約)。reconcile の route ドリフト収束 / 中断デプロイ復旧が、
+/// 「走っている任意の容器」ではなく**この容器**を正とするための真源(新旧併存時に route を旧へ巻き戻さない)。
+pub(crate) async fn latest_succeeded_deploy_id(
+    state: &AppState,
+    service_id: Uuid,
+) -> AppResult<Option<Uuid>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM deploys
+          WHERE service_id = $1 AND status = 'succeeded'
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(&state.db)
+    .await?)
+}
+
 /// 指定 digest を新しい deploy として起こす(start / rollback / reconcile が共有)。deploys 行を
 /// received で作り、run_digest を **await**(run_digest 内で deploy_lock + start-first swap + 状態記録)。
 pub(crate) async fn redeploy(

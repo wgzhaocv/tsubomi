@@ -61,13 +61,18 @@ pub async fn deploy(
     let body: HookBody = serde_json::from_slice(&raw)
         .map_err(|_| AppError::BadRequest("hook body が不正な JSON です".into()))?;
 
-    // 2. deploy_key を引いて HMAC を定数時間比較。鍵が無い(= service 不在)も 401 に
-    //    収束させ、署名の前に service の存在を漏らさない。
-    let key_enc: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT deploy_key_enc FROM service_details WHERE resource_id = $1")
-            .bind(body.service_id)
-            .fetch_optional(&state.db)
-            .await?;
+    // 2. deploy_key を引いて HMAC を定数時間比較。鍵が無い(= service 不在 **または削除済み**)も
+    //    401 に収束させ、署名の前に存在/状態を漏らさない。**deleted_at IS NULL を認証前に課す**ので、
+    //    ソフト削除された service への漏洩鍵 / 旧 GitHub Action からの hook はここで弾かれ、nonce や
+    //    deploys 行を書かない(run_digest 段まで進めて DB を汚さない)。
+    let key_enc: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT s.deploy_key_enc FROM service_details s
+           JOIN resources r ON r.id = s.resource_id
+          WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
+    )
+    .bind(body.service_id)
+    .fetch_optional(&state.db)
+    .await?;
     let key_enc = key_enc.ok_or(AppError::Unauthorized)?;
     let deploy_key = state.crypto.decrypt(&key_enc)?;
 
@@ -99,6 +104,20 @@ pub async fn deploy(
     {
         return Err(AppError::BadRequest(
             "git_sha は 1〜64 文字の英数字 . _ - / のみにしてください".into(),
+        ));
+    }
+    // nonce は一意キーとして deploy_nonces に保存される。任意長 / 任意文字を許すと巨大 nonce で
+    // DB を膨らませられるので長さ + 文字種を縛る(クライアントは hex16=32桁 か b64url16=22桁。
+    // どちらも [A-Za-z0-9_-] に収まる)。HMAC 済みなので注入はしないが、保存物として健全化する。
+    if body.nonce.len() < 16
+        || body.nonce.len() > 128
+        || !body
+            .nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(AppError::BadRequest(
+            "nonce は 16〜128 文字の英数字 - _ のみにしてください".into(),
         ));
     }
 

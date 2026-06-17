@@ -120,6 +120,15 @@ async fn issue_code(
     action: &str,
     kind: &str,
 ) -> AppResult<()> {
+    // 配信路が無いままコードを発行しない。mail 未設定 かつ dev の log 配信も許可されていなければ、
+    // コードを生成・保存・log せず fail-fast(本番漏配で「コードが log に出て log アクセス権=危険操作完遂」
+    // になる穴を塞ぐ)。dev は TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES=true で log 配信を明示許可する。
+    if state.config.resend_api_key.is_none() && !state.config.dev_insecure_log_action_codes {
+        return Err(AppError::Other(anyhow!(
+            "確認コードを配信できません:メール基盤(RESEND_API_KEY / TSUBOMI_MAIL_FROM)が未設定です。設定してください(dev で log 配信したい場合のみ TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES=true)"
+        )));
+    }
+
     let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
     sqlx::query(
         "DELETE FROM admin_action_codes WHERE actor_id = $1 AND resource_id = $2 AND action = $3",
@@ -141,10 +150,11 @@ async fn issue_code(
     .execute(&state.db)
     .await?;
 
-    // dev / Resend 未契約ではメールが飛ばない(mail は subject だけ log し本文は出さない)。
-    // owner がコードを使えるよう、その時だけコードを log に出す(本番は email 経由で log に出さない)。
-    if state.config.resend_api_key.is_none() {
-        tracing::warn!(%code, action, %id, "[dev] owner 確認コード(RESEND 未設定のため log 表示)");
+    // dev 退路:mail 未設定 **かつ** TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES=true のときだけ、owner が
+    // コードを使えるよう log に出す(上の fail-fast を通っている = この組み合わせは dev の明示許可のみ)。
+    // 本番(mail 設定済み)はここを通らず、コードが log に出ることは無い。
+    if state.config.resend_api_key.is_none() && state.config.dev_insecure_log_action_codes {
+        tracing::warn!(%code, action, %id, "[dev] owner 確認コード(TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES=true のため log 表示)");
     }
 
     let to = owner_email(state, actor).await;
