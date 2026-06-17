@@ -13,7 +13,7 @@ import { Footer } from "@/components/ui/footer";
 export default function NoService() {
   return (
     <main className="relative flex min-h-dvh flex-col items-center justify-center overflow-hidden p-6">
-      <PageMeta title="アプリがありません" />
+      <PageMeta title="アプリがないみたい" />
 
       <Card className="w-full max-w-sm">
         <CardContent className="flex flex-col items-center gap-5 py-2 text-center">
@@ -36,11 +36,12 @@ export default function NoService() {
 
           <div className="flex flex-col gap-1.5">
             <h2 className="text-lg font-bold text-card-foreground">
-              このアドレスにアプリはありません
+              ここにはまだ アプリがないみたい
             </h2>
             <p className="text-sm leading-relaxed text-card-foreground/80">
-              この子ドメインにはまだ何もデプロイされていません(あるいは停止 / 削除
-              されました)。つぼみのトップから、自分の web アプリを作って公開できます。
+              この子ドメインには まだ何もデプロイされていないようです(停止または
+              削除されたのかもしれません)。つぼみのトップから、自分の web アプリを
+              作って公開しましょう。
             </p>
           </div>
 
