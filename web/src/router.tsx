@@ -20,6 +20,7 @@ import DatabaseTables from "@/routes/DatabaseTables";
 import Forbidden from "@/routes/Forbidden";
 import IpAllowlist from "@/routes/IpAllowlist";
 import Login from "@/routes/Login";
+import NoService from "@/routes/NoService";
 import NotFound from "@/routes/NotFound";
 import OauthAuthorize from "@/routes/OauthAuthorize";
 import OauthCodeCallback from "@/routes/OauthCodeCallback";
@@ -47,6 +48,10 @@ export const router = createBrowserRouter([
   // 社内ドメイン外で弾かれたときの専用画面(守衛の外)。
   // サーバの Google callback がドメイン検証に失敗するとここへリダイレクトする。
   { path: "/forbidden", element: <Forbidden /> },
+
+  // service の無い子域に来たときの着地点(守衛の外・ログイン不要)。
+  // traefik の catch-all router(route.rs::write_catchall)が apex の /noservice へ 302 する。
+  { path: "/noservice", element: <NoService /> },
 
   // 管理画面の外殻(ログイン守衛 + サイドメニュー)。
   // index = はじめに(CLI 案内)、子 = 各リソース一覧(RESOURCES 設定から生成)。

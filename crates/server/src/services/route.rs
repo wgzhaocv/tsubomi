@@ -123,6 +123,75 @@ pub fn write_apex(state: &AppState) -> AppResult<()> {
     write_atomic(&state.config.traefik_dynamic_dir.join("apex.yml"), &doc)
 }
 
+/// 本番で「service の無い子域」を `/noservice` ページへ寄せる catch-all router を traefik に書く。
+///
+/// 仕組み:**最低優先度**(`priority: 1`)の `HostRegexp` で `<sub>.<domain>` 全体を受ける。
+/// service の `Host(...)` router は優先度=ルール長で常にこれより上なので、**service があれば
+/// 必ず service が勝ち全部 service に渡る**(service 自身の 404 もそのまま)。どの service router
+/// にも当たらない子域(未デプロイ / 停止 / 削除済み = `remove` で `svc-<id>.yml` が消えた状態)
+/// だけがここへ落ち、redirectRegex で `/noservice` へ **302**(後で同じ子域に service が来たら
+/// 復活するので 301 にしない)。apex(`Host(<domain>)`)は正規表現が要求する「子域のドット」が
+/// 無いので当たらない = リダイレクトループしない。registry 等の専用 router も優先度で上にいる。
+///
+/// dev(domain=localhost)は書かない(`*.localhost` 直アクセス。apex と同じ扱い)。起動時に 1 回。
+///
+/// TLS の扱い(両モード対応):CF tunnel(tls=false)= web entrypoint(HTTP)。直 VPS(tls=true)=
+/// websecure + 空 `tls: {}`。**certResolver は付けない**:HostRegexp からは具体ドメインを導けず
+/// LE は走らせられないし、ランダム子域の総当たりで LE レート制限を踏むのも防ぐ。直 VPS で死んだ
+/// 子域も正しい証明書で出したいなら `*.<domain>` の DNS-01 ワイルドカード証明書を別途張る(無ければ
+/// traefik 既定証明書 = ブラウザ警告。これは catch-all 以前から未ルート子域で同じ挙動)。
+pub fn write_catchall(state: &AppState) -> AppResult<()> {
+    let domain = &state.config.domain;
+    if domain == "localhost" {
+        return Ok(()); // dev は対象外
+    }
+    let doc = build_catchall_doc(domain, state.config.tls, state.config.bind_addr.port());
+    write_atomic(&state.config.traefik_dynamic_dir.join("catchall.yml"), &doc)
+}
+
+/// catchall.yml の中身を組み立てる純粋関数(`write_catchall` の本体。テスト可能なように分離)。
+fn build_catchall_doc(domain: &str, tls: bool, port: u16) -> String {
+    // HostRegexp(Go 正規表現)用に domain のドットをエスケープ。`^.+\.<domain>$` =
+    // 「1 ラベル以上 + ドット + ルートドメイン」⇒ 子域だけにマッチ(apex の裸ドメインは外れる)。
+    // YAML 二重引用符の中なので backslash は `\\` で 1 個。最終的に traefik は `\.` を受け取る。
+    let escaped = domain.replace('.', "\\\\.");
+
+    let mut doc = String::new();
+    doc.push_str("# 平台が自動生成(services/route.rs::write_catchall)。手で編集しない。\n");
+    doc.push_str("http:\n");
+    doc.push_str("  routers:\n");
+    doc.push_str("    tsubomi-catchall:\n");
+    doc.push_str(&format!("      rule: \"HostRegexp(`^.+\\\\.{escaped}$`)\"\n"));
+    doc.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(tls)));
+    // ★ 最低優先度。service の Host router(優先度=ルール長)に必ず負け、未ルート子域だけ拾う。
+    doc.push_str("      priority: 1\n");
+    doc.push_str("      service: \"tsubomi-catchall\"\n");
+    doc.push_str("      middlewares: [\"tsubomi-noservice@file\"]\n");
+    if tls {
+        // certResolver なしで TLS router 化(既定 / ワイルドカード証明書で出す)。理由は doc 参照。
+        doc.push_str("      tls: {}\n");
+    }
+    doc.push_str("  middlewares:\n");
+    doc.push_str("    tsubomi-noservice:\n");
+    doc.push_str("      redirectRegex:\n");
+    doc.push_str("        regex: \".*\"\n"); // URL 全体にマッチ → 固定先へ
+    // 公開 scheme は常に https:呼び出し元 `write_catchall` が domain=localhost(唯一の http
+    // = dev)を弾いて以降だけここへ来るため(`Config::service_url` の scheme 規則と同じ前提)。
+    doc.push_str(&format!(
+        "        replacement: \"https://{domain}/noservice\"\n"
+    ));
+    doc.push_str("        permanent: false\n"); // 302(後で service が来たら復活)
+    doc.push_str("  services:\n");
+    doc.push_str("    tsubomi-catchall:\n");
+    doc.push_str("      loadBalancer:\n");
+    doc.push_str("        servers:\n");
+    // redirect middleware で短絡するので実到達しない(router に service は必須なので形式上 server を指す)。
+    doc.push_str(&format!(
+        "          - url: \"http://host.docker.internal:{port}\"\n"
+    ));
+    doc
+}
+
 /// service の stop / 削除時にルートファイルを消す(無ければ無視)。
 pub fn remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
     match std::fs::remove_file(route_path(state, service_id)) {
@@ -178,8 +247,34 @@ fn parse_route_filename(name: &str) -> Option<Uuid> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_backend_container, parse_route_filename};
+    use super::{build_catchall_doc, parse_backend_container, parse_route_filename};
     use uuid::Uuid;
+
+    #[test]
+    fn catchall_never_shadows_services_and_excludes_apex() {
+        let doc = build_catchall_doc("tsubomi-app.com", false, 9090);
+        // ★ 最低優先度:service の Host router(優先度=ルール長)に必ず負ける = service があれば素通し。
+        assert!(doc.contains("priority: 1"));
+        // `^.+\.` プレフィクスが「子域のドット」を必須にする → apex(裸ドメイン)は当たらない。
+        // YAML 二重引用符内なので backslash は 2 個(traefik が受け取るのは `\.`)。
+        assert!(doc.contains("rule: \"HostRegexp(`^.+\\\\.tsubomi-app\\\\.com$`)\""));
+        // 302(permanent: false)で apex の /noservice へ。
+        assert!(doc.contains("replacement: \"https://tsubomi-app.com/noservice\""));
+        assert!(doc.contains("permanent: false"));
+    }
+
+    #[test]
+    fn catchall_tls_branch_has_no_cert_resolver() {
+        // CF tunnel(tls=false)= web entrypoint・tls ブロック無し。
+        let http = build_catchall_doc("tsubomi-app.com", false, 9090);
+        assert!(http.contains("entryPoints: [\"web\"]"));
+        assert!(!http.contains("tls:"));
+        // 直 VPS(tls=true)= websecure + 空 tls(certResolver は付けない:LE 総当たり回避)。
+        let tls = build_catchall_doc("tsubomi-app.com", true, 9090);
+        assert!(tls.contains("entryPoints: [\"websecure\"]"));
+        assert!(tls.contains("tls: {}"));
+        assert!(!tls.contains("certResolver"));
+    }
 
     #[test]
     fn extracts_backend_container_name() {

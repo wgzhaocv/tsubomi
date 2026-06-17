@@ -69,6 +69,11 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = services::route::write_apex(&state) {
         tracing::error!(error = ?e, "apex route の書き出しに失敗(本番のみ)");
     }
+    // service の無い子域(未デプロイ / 停止 / 削除済み)を /noservice へ寄せる catch-all
+    // (dev=localhost では no-op。最低優先度なので service があれば必ず service が勝つ。best-effort)。
+    if let Err(e) = services::route::write_catchall(&state) {
+        tracing::error!(error = ?e, "catchall route の書き出しに失敗(本番のみ)");
+    }
     let app = routes::build_router(state);
     axum::serve(listener, app).await?;
     Ok(())
