@@ -229,37 +229,31 @@ REM a temp file via WriteAllText = UTF-8 no-BOM (a ">" redirect on Win PowerShel
 REM is UTF-16+BOM and corrupts set /p); set /p then reads it. The tag looks like
 REM "v2.54.0.windows.1": the download URL uses the FULL tag, but the asset name drops
 REM ".windows" -> "MinGit-2.54.0-64-bit.zip". Do not collapse the two (404).
+REM Percent-expansion ONLY (no delayed !...!) -- see the note in :install_gh for why
+REM the delayed form failed on a real machine.
 set "GIT_OK="
 set "GIT_ROOT=%LOCALAPPDATA%\tbm\git"
-set "GIT_TMP=%TEMP%\tbm-git-%RANDOM%%RANDOM%"
-mkdir "!GIT_TMP!" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('!GIT_TMP!\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest').tag_name)" >nul 2>&1
+set "GIT_DIR=%TEMP%\tbm-git-install"
+rmdir /s /q "%GIT_DIR%" >nul 2>&1
+mkdir "%GIT_DIR%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('%GIT_DIR%\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest').tag_name)" >nul 2>&1
 set "GIT_TAG="
-if exist "!GIT_TMP!\tag.txt" set /p GIT_TAG=<"!GIT_TMP!\tag.txt"
-if not defined GIT_TAG (
-    rmdir /s /q "!GIT_TMP!" >nul 2>&1
-    exit /b 0
-)
-set "GIT_TAGNOV=!GIT_TAG:~1!"
-for /f "tokens=1,2,3 delims=." %%a in ("!GIT_TAGNOV!") do set "GIT_VER=%%a.%%b.%%c"
-if not defined GIT_VER (
-    rmdir /s /q "!GIT_TMP!" >nul 2>&1
-    exit /b 0
-)
-curl -fsSL "https://github.com/git-for-windows/git/releases/download/!GIT_TAG!/MinGit-!GIT_VER!-64-bit.zip" -o "!GIT_TMP!\mingit.zip" >nul 2>&1
-if errorlevel 1 (
-    rmdir /s /q "!GIT_TMP!" >nul 2>&1
-    exit /b 0
-)
-if exist "!GIT_ROOT!" rmdir /s /q "!GIT_ROOT!" >nul 2>&1
-mkdir "!GIT_ROOT!" >nul 2>&1
-tar -xf "!GIT_TMP!\mingit.zip" -C "!GIT_ROOT!" >nul 2>&1
-set "_TAR_ERR=!errorlevel!"
-rmdir /s /q "!GIT_TMP!" >nul 2>&1
-if not "!_TAR_ERR!"=="0" exit /b 0
-if not exist "!GIT_ROOT!\cmd\git.exe" exit /b 0
-call :add_user_path "!GIT_ROOT!\cmd"
+if exist "%GIT_DIR%\tag.txt" set /p GIT_TAG=<"%GIT_DIR%\tag.txt"
+if not defined GIT_TAG goto :install_mingit_done
+set "GIT_TAGNOV=%GIT_TAG:~1%"
+for /f "tokens=1,2,3 delims=." %%a in ("%GIT_TAGNOV%") do set "GIT_VER=%%a.%%b.%%c"
+if not defined GIT_VER goto :install_mingit_done
+curl -fsSL "https://github.com/git-for-windows/git/releases/download/%GIT_TAG%/MinGit-%GIT_VER%-64-bit.zip" -o "%GIT_DIR%\mingit.zip" >nul 2>&1
+if errorlevel 1 goto :install_mingit_done
+if exist "%GIT_ROOT%" rmdir /s /q "%GIT_ROOT%" >nul 2>&1
+mkdir "%GIT_ROOT%" >nul 2>&1
+tar -xf "%GIT_DIR%\mingit.zip" -C "%GIT_ROOT%" >nul 2>&1
+if errorlevel 1 goto :install_mingit_done
+if not exist "%GIT_ROOT%\cmd\git.exe" goto :install_mingit_done
+call :add_user_path "%GIT_ROOT%\cmd"
 set "GIT_OK=1"
+:install_mingit_done
+rmdir /s /q "%GIT_DIR%" >nul 2>&1
 exit /b 0
 
 :install_gh
@@ -270,43 +264,30 @@ REM the for set, so that previously failed with "powershell not found"). PowerSh
 REM writes the tag to a temp file via WriteAllText = UTF-8 no-BOM (a ">" redirect on
 REM Win PowerShell 5.1 is UTF-16+BOM and corrupts set /p); set /p then reads it.
 REM curl + tar then fetch and unpack the asset -- the same tools that installed tbm.
+REM IMPORTANT: percent-expansion ONLY (no delayed !...!). A manual run proved the
+REM percent form works end-to-end here; the delayed form did not. The reason: a
+REM redirect target like  set /p VAR=<"!DIR!\tag.txt"  does NOT expand !DIR! (the
+REM redirect filename is resolved before delayed expansion), so the read failed and
+REM the tag came back empty. Percent expands at parse time, before the redirect. A
+REM fixed temp dir is fine (the installer is single-run).
 set "GH_OK="
-set "GH_TMP=%TEMP%\tbm-gh-%RANDOM%%RANDOM%"
-mkdir "!GH_TMP!" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('!GH_TMP!\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest').tag_name)" >nul 2>&1
+set "GH_DIR=%TEMP%\tbm-gh-install"
+rmdir /s /q "%GH_DIR%" >nul 2>&1
+mkdir "%GH_DIR%" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('%GH_DIR%\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest').tag_name)" >nul 2>&1
 set "GH_TAG="
-if exist "!GH_TMP!\tag.txt" set /p GH_TAG=<"!GH_TMP!\tag.txt"
-if not defined GH_TAG (
-    rmdir /s /q "!GH_TMP!" >nul 2>&1
-    exit /b 0
-)
-set "GH_VER=!GH_TAG:~1!"
-if not defined GH_VER (
-    rmdir /s /q "!GH_TMP!" >nul 2>&1
-    exit /b 0
-)
-curl -fsSL "https://github.com/cli/cli/releases/download/!GH_TAG!/gh_!GH_VER!_windows_amd64.zip" -o "!GH_TMP!\gh.zip" >nul 2>&1
-if errorlevel 1 (
-    rmdir /s /q "!GH_TMP!" >nul 2>&1
-    exit /b 0
-)
-tar -xf "!GH_TMP!\gh.zip" -C "!GH_TMP!" >nul 2>&1
-if errorlevel 1 (
-    rmdir /s /q "!GH_TMP!" >nul 2>&1
-    exit /b 0
-)
-set "GH_FOUND="
-for /r "!GH_TMP!" %%F in (gh.exe) do if not defined GH_FOUND set "GH_FOUND=%%F"
-if not defined GH_FOUND (
-    rmdir /s /q "!GH_TMP!" >nul 2>&1
-    exit /b 0
-)
+if exist "%GH_DIR%\tag.txt" set /p GH_TAG=<"%GH_DIR%\tag.txt"
+if not defined GH_TAG goto :install_gh_done
+set "GH_VER=%GH_TAG:~1%"
+curl -fsSL "https://github.com/cli/cli/releases/download/%GH_TAG%/gh_%GH_VER%_windows_amd64.zip" -o "%GH_DIR%\gh.zip" >nul 2>&1
+if errorlevel 1 goto :install_gh_done
+tar -xf "%GH_DIR%\gh.zip" -C "%GH_DIR%" >nul 2>&1
+if errorlevel 1 goto :install_gh_done
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
-move /y "!GH_FOUND!" "%INSTALL_DIR%\gh.exe" >nul 2>&1
-set "_MV_ERR=!errorlevel!"
-rmdir /s /q "!GH_TMP!" >nul 2>&1
-if not "!_MV_ERR!"=="0" exit /b 0
-set "GH_OK=1"
+for /r "%GH_DIR%" %%F in (gh.exe) do @copy /y "%%F" "%INSTALL_DIR%\gh.exe" >nul 2>&1
+if exist "%INSTALL_DIR%\gh.exe" set "GH_OK=1"
+:install_gh_done
+rmdir /s /q "%GH_DIR%" >nul 2>&1
 exit /b 0
 
 :install_claude
