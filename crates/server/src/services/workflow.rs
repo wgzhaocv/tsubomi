@@ -11,13 +11,17 @@
 
 /// `tsubomi-deploy.yml` の中身。CLI / web がそのままファイルに書く。
 pub const TEMPLATE: &str = r##"name: tsubomi deploy
-on: { push: { branches: [main] } }
+on:
+  push: { branches: [main] }
+  # シークレット修正後などに手動で再デプロイできるよう(空コミット不要)。
+  workflow_dispatch: {}
 jobs:
   deploy:
     # 既定は amd64 ランナー + QEMU。arm64 を原生で速くしたいなら ubuntu-24.04-arm に。
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -35,8 +39,19 @@ jobs:
               --push -t "$IMAGE" --metadata-file meta.json .
             DIGEST=$(jq -r '."containerimage.digest"' meta.json)
           else
-            npx -y @railway/nixpacks build . --name "$IMAGE" \
-              --platform "${{ vars.TSUBOMI_PLATFORMS }}" --push
+            # Dockerfile が無ければ nixpacks。npm 配布は無い(npx 経由は 404)ので公式インストーラで
+            # CLI を入れる。nixpacks は単一 build で多 arch を作れない(公式仕様)ため、
+            # arch 毎に build → push し docker manifest で 1 つの IMAGE に集約する(単一 arch なら 1 回)。
+            curl -fsSL https://nixpacks.com/install.sh | bash
+            REFS=""
+            for P in $(echo "${{ vars.TSUBOMI_PLATFORMS }}" | tr ',' ' '); do
+              ARCH_IMAGE="$IMAGE-${P//\//-}"
+              nixpacks build . --name "$ARCH_IMAGE" --platform "$P"
+              docker push "$ARCH_IMAGE"
+              REFS="$REFS $ARCH_IMAGE"
+            done
+            docker manifest create "$IMAGE" $REFS
+            docker manifest push "$IMAGE"
             DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
@@ -117,11 +132,27 @@ mod tests {
             "secrets.TSUBOMI_REGISTRY_PASS",
             "x-tsubomi-signature",
             "image_digest",
+            // 手動再デプロイ(空コミット不要)。
+            "workflow_dispatch",
         ] {
             assert!(
                 TEMPLATE.contains(needle),
                 "workflow テンプレに {needle} が無い"
             );
         }
+    }
+
+    /// 壊れた nixpacks 配方(存在しない npm パッケージ)が復活しないことを固定する。
+    /// nixpacks は公式インストーラで入れ、`--push` flag は持たない(per-arch + manifest 集約)。
+    #[test]
+    fn template_uses_official_nixpacks_installer() {
+        assert!(
+            !TEMPLATE.contains("@railway/nixpacks"),
+            "存在しない npm パッケージ @railway/nixpacks を使っている(404)"
+        );
+        assert!(
+            TEMPLATE.contains("https://nixpacks.com/install.sh"),
+            "nixpacks の公式インストーラを使っていない"
+        );
     }
 }

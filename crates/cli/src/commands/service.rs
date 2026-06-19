@@ -20,6 +20,12 @@ pub enum ServiceCmd {
     Create {
         /// 表示名(例:myapp)。GitHub repo 名には subdomain を使う
         name: String,
+        /// GitHub 連携(repo / secret / variable + workflow ファイル)も `gh` で自動的に組み立てる。
+        /// JSON 出力時でも実行するので、setup_commands の shell を手で叩く必要がない
+        /// (Windows / mac / Linux いずれの shell でも動き、secret は stdin 渡しで argv に出さない)。
+        /// `gh` が無い / 未ログインなら setup_commands を返すだけ(手動 fallback)。
+        #[arg(long)]
+        github: bool,
     },
     /// サービス一覧
     List,
@@ -197,13 +203,20 @@ pub async fn run(
                 println!("ロールバックしました(running)。");
             }
         }
-        ServiceCmd::Create { name } => {
+        ServiceCmd::Create { name, github } => {
             let resp = api::service_create(&c, &server_url, &token, &name).await?;
             if json {
-                // AI 向け:gh は実行せず DTO をそのまま返す(AI が setup_commands を実行)。
-                // resp は service(flatten)+ deploy_key + registry + hook_url + platforms
-                // + workflow_yaml + setup_commands を含む。秘密はこの応答にしか出ない。
-                print_json(&resp)?;
+                if github {
+                    // AI 経路でも GitHub 連携を Rust 側で組み立てる(setup_commands の bash 文字列を
+                    // AI が実行しなくてよい = OS 非依存。secret は stdin 渡しで argv に出さない)。
+                    // 結果は機械可読な JSON(秘密は出さない。gh 不在なら setup_commands を返す)。
+                    print_json(&orchestrate_json(&resp)?)?;
+                } else {
+                    // 既定:gh は実行せず DTO をそのまま返す(AI が setup_commands を実行)。
+                    // resp は service(flatten)+ deploy_key + registry + hook_url + platforms
+                    // + workflow_yaml + setup_commands を含む。秘密はこの応答にしか出ない。
+                    print_json(&resp)?;
+                }
             } else {
                 orchestrate(&resp)?;
             }
@@ -332,6 +345,62 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
         "完了。`git add -A && git commit -m deploy && git push -u tsubomi main` で自動デプロイが走ります。"
     );
     Ok(())
+}
+
+/// JSON 出力 + `--github` 時の GitHub 連携。orchestrate() と同じ gh 手順を踏むが、進捗は
+/// stderr、**結果は機械可読な JSON** で返す(stdout に秘密は出さない)。
+/// gh が無い / 未ログインなら手動 fallback として setup_commands を JSON に載せて返す。
+fn orchestrate_json(resp: &CreateServiceResp) -> Result<serde_json::Value> {
+    let svc = &resp.service;
+    // workflow ファイルは gh の有無に関係なく置く(git push で CI が回る)。
+    write_workflow_file(&resp.workflow_yaml)?;
+
+    if !gh_ok() {
+        // 作成自体は成功。GitHub 連携だけ未完なので setup_commands を返して AI に委ねる。
+        return Ok(json!({
+            "service": svc,
+            "github": {
+                "configured": false,
+                "reason": "gh が見つからない / 未ログイン(`gh auth login` 後に再実行、または setup_commands を実行)",
+                "workflow_path": WORKFLOW_PATH,
+                "setup_commands": resp.setup_commands,
+            }
+        }));
+    }
+
+    // repo(冪等)→ secrets(stdin 渡し)→ variables。orchestrate() と同じ順序・同じ守り。
+    let owner = gh_capture(&["api", "user", "-q", ".login"])?;
+    let repo = format!("{owner}/{}", svc.subdomain);
+    if !gh_silent(&["repo", "view", &repo]) {
+        run_gh(&[
+            "repo",
+            "create",
+            &repo,
+            "--private",
+            "--source=.",
+            "--remote=tsubomi",
+        ])?;
+    }
+    gh_secret(&repo, "TSUBOMI_DEPLOY_KEY", &resp.deploy_key)?;
+    gh_secret(&repo, "TSUBOMI_REGISTRY_USER", &resp.registry.user)?;
+    gh_secret(&repo, "TSUBOMI_REGISTRY_PASS", &resp.registry.pass)?;
+    gh_variable(&repo, "TSUBOMI_SERVICE_ID", &svc.id.to_string())?;
+    gh_variable(&repo, "TSUBOMI_REGISTRY", &resp.registry.host)?;
+    gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
+    gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
+
+    // secret / variable 名は workflow テンプレが参照する固定の契約(= 平台が単一真源)。
+    // ここで列挙し直すと 4 箇所目の重複 = drift の元、かつ AI はこの一覧で分岐しない。
+    // AI が実際に使うのは「設定できたか(configured)/ どの repo か / 次の一手」だけ。
+    Ok(json!({
+        "service": svc,
+        "github": {
+            "configured": true,
+            "repo": repo,
+            "workflow_path": WORKFLOW_PATH,
+            "next": "git add -A && git commit -m deploy && git push -u tsubomi main で自動デプロイ",
+        }
+    }))
 }
 
 /// workflow ファイルを書く(既存は上書きしない — ユーザの編集を尊重)。

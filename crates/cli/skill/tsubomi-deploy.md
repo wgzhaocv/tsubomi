@@ -35,6 +35,8 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
     - 例外:静的サイト(Next.js の `output: 'export'` 等、サーバを持たないビルド)は nixpacks が
       `start` を見つけられない。その時**だけ**、`next.config` を読んで判明したモードに合う最小の
       Dockerfile か start コマンドを足す(配方は Vercel 等の公式 example に従う)。
+  - **バージョンを明示指定しないなら最新の安定版を使う。** 自分で Dockerfile や start を足す場面では、
+    `node:20` のような旧版固定に落とさず現行の安定版(LTS など)を選ぶ。古い既定にしない。
   - **アプリは service の `container_port` で listen する**(既定 **8080**)。`tbm service create` の
     出力や `tbm service status` の `container_port` を見て、アプリの listen ポートを一致させる。
     **ここがズレると 502。**
@@ -87,10 +89,15 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 
 ### 既定:GitHub 経路(`gh` を使う。CI が build/push)
 
-`tbm service create` の出力 `setup_commands`(`gh repo create` / `gh secret set` / `gh variable set`)を
-順に実行し、`workflow_yaml` の内容を `.github/workflows/tsubomi-deploy.yml` に置いて
-`git add/commit/push` → GitHub Actions が自動でビルド & デプロイ。
+**`tbm service create <名前> --github` を使う。** `--github` を付けると、平台が `gh` 経由で
+repo 作成・secret / variable 設定・`.github/workflows/tsubomi-deploy.yml` の書き出しまで自動で行う
+(秘密は stdin 渡しで `ps` に出ない。**Windows / mac / Linux どの shell でも動く** — `setup_commands` の
+bash を自分で組み立て・実行する必要はない)。あとは `git add/commit/push` → GitHub Actions が
+自動でビルド & デプロイ。出力 JSON の `github.configured` が true なら設定済み。
 
+- `--github` 無しで JSON を受けた場合は `setup_commands`(`gh repo create` / `gh secret set` /
+  `gh variable set`。**POSIX shell 前提**)が返る。bash / zsh で順に実行してもよいが、Windows では
+  上の `--github` を使う(PowerShell では `printf` / `$(…)` が動かない)。
 - **`gh` が入っていない** → インストールを案内する:
   - mac:`brew install gh`
   - Debian/Ubuntu:`sudo apt install gh`(または公式 apt repo)
