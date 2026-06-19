@@ -103,7 +103,7 @@ bash を自分で組み立て・実行する必要はない)。あとは `git ad
   - Debian/Ubuntu:`sudo apt install gh`(または公式 apt repo)
   - Windows:`winget install GitHub.cli` か `scoop install gh`
 
-  ログインは**対話的**でAIは代行できない。ユーザに次を打ってもらう:`! gh auth login`。
+  ログインは**対話的**でAIは代行できない。ユーザに次を打ってもらう:`! gh auth login --web --git-protocol https --clipboard`。
 - **`gh` の Actions 額度が切れた / billing・quota エラーで CI が回らない**(私有 repo の無料枠超過など)
   → 下の **`tbm deploy --local` 退路**に切り替える。
 
@@ -150,5 +150,5 @@ GitHub 額度切れ時の主たる代替でもある。要 Docker。
 | `code: validation` | 入力不正 | メッセージに従う |
 | 注入が効かない | デプロイ前に注入していない / rotate 後に再デプロイしていない | 注入を確認 → 再デプロイ |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ |
-| `gh` が無い | 未インストール | OS 別に案内 → `! gh auth login` |
+| `gh` が無い | 未インストール | OS 別に案内 → `! gh auth login --web --git-protocol https --clipboard` |
 | `docker info` 失敗 | Docker 未導入/未起動 | Docker Desktop を案内 |

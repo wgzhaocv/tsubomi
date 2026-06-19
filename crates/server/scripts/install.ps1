@@ -8,6 +8,10 @@
 # `tbm uninstall` が PATH エントリと %LOCALAPPDATA%\tbm 配下を丸ごと取り除く。
 # __SERVER_URL__ は配信時にサーバが実ドメインへ置換する。
 $ErrorActionPreference = "Stop"
+# native コマンドの非零終了は「エラー」ではなく想定内(gh / claude の auth status や
+# 子インストーラの戻り値で判定する)。PS 7.4+ は既定でこれを Stop のとき例外化するので
+# 明示的に切る(Windows PowerShell 5.1 では未知変数の代入 = 無害)。
+$PSNativeCommandUseErrorActionPreference = $false
 
 $Server = if ($env:TSUBOMI_SERVER_URL) { $env:TSUBOMI_SERVER_URL } else { "__SERVER_URL__" }
 $InstallRoot = Join-Path $env:LOCALAPPDATA "tbm"
@@ -97,6 +101,48 @@ function Install-Gh {
     }
 }
 
+# claude(Claude Code)を公式インストーラで導入する。子プロセスの powershell で走らせて
+# 隔離する(リモートスクリプトの exit / $ErrorActionPreference がこのスクリプトを巻き
+# 込まないように)。インストール先は %USERPROFILE%\.local\bin\claude.exe。
+function Install-ClaudeCode {
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"
+        if ($LASTEXITCODE -ne 0) { return $false }
+        return (Test-Path (Join-Path $env:USERPROFILE ".local\bin\claude.exe"))
+    } catch {
+        return $false
+    }
+}
+
+# Claude Code のユーザ設定(%USERPROFILE%\.claude\settings.json)に 2 つの既定を入れる:
+#   permissions.defaultMode = "auto"(プロンプトをほぼ出さない auto モード。
+#     ※ auto は Opus 4.6+ / Sonnet 4.6 かつ「ユーザ級」設定でのみ有効。条件を
+#     満たさないと claude が静かに既定モードへ戻る — それは仕様)
+#   tui = "fullscreen"(ちらつかない全画面描画)
+# 既存の設定は壊さない(この 2 キーだけ上書き)。PS 5.1 でも動くよう PSCustomObject +
+# Add-Member -Force でマージし、BOM 無し UTF-8 で書き戻す。
+function Set-ClaudeSettings {
+    $dir = Join-Path $env:USERPROFILE ".claude"
+    $file = Join-Path $dir "settings.json"
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $cfg = $null
+    if (Test-Path $file) {
+        try { $cfg = Get-Content -Raw -Path $file | ConvertFrom-Json } catch { $cfg = $null }
+    }
+    if (($null -eq $cfg) -or ($cfg -isnot [pscustomobject])) { $cfg = [PSCustomObject]@{} }
+    if (($null -eq $cfg.permissions) -or ($cfg.permissions -isnot [pscustomobject])) {
+        $cfg | Add-Member -NotePropertyName permissions -NotePropertyValue ([PSCustomObject]@{}) -Force
+    }
+    # 既存が bypassPermissions(より強い)なら降格しない。それ以外は auto に。
+    if ($cfg.permissions.defaultMode -ne "bypassPermissions") {
+        $cfg.permissions | Add-Member -NotePropertyName defaultMode -NotePropertyValue "auto" -Force
+    }
+    # tui は常に fullscreen。
+    $cfg | Add-Member -NotePropertyName tui -NotePropertyValue "fullscreen" -Force
+    [System.IO.File]::WriteAllText($file, ($cfg | ConvertTo-Json -Depth 20))
+    Write-Host "Claude Code の設定を更新しました(auto モード + fullscreen)"
+}
+
 $info = Invoke-RestMethod "$Server/api/cli/version/$Target"
 if (-not $info.version -or -not $info.url -or -not $info.sha256) {
     Write-Error "$Server から不完全な manifest を受け取りました"
@@ -156,13 +202,46 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     }
 }
 if (Get-Command gh -ErrorAction SilentlyContinue) {
-    # 既にある → 触らない
+    # 既にある → 触らない。未ログインなら一手だけ案内。
+    gh auth status 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "gh は未ログインです。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
+    }
 } else {
     Write-Host "gh(GitHub CLI)が見つかりません。インストールしています…"
     if (Install-Gh) {
-        Write-Host "gh をインストールしました。GitHub と連携するには次を実行してください: gh auth login"
+        Write-Host "gh をインストールしました。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
     } else {
         Write-Warning "gh の自動インストールに失敗しました。手動で導入してください: https://github.com/cli/cli/releases"
+    }
+}
+
+# claude(Claude Code = この PaaS を AI で操作する CLI)。無ければ公式インストーラで導入
+# (管理者権限不要・%USERPROFILE%\.local\bin に入る)。Windows では claude が PATH を
+# 自動追加しないことがあるので、その bin をユーザ PATH に足す(現セッションにも反映)。
+$claudeBin = Join-Path $env:USERPROFILE ".local\bin"
+$claudeOk = $false
+if (Get-Command claude -ErrorAction SilentlyContinue) {
+    $claudeOk = $true  # 既にある → インストールはスキップ
+} else {
+    Write-Host "claude(Claude Code)が見つかりません。インストールしています…"
+    if (Install-ClaudeCode) {
+        $claudeOk = $true
+        Add-UserPath $claudeBin
+    } else {
+        Write-Warning "claude の自動インストールに失敗しました。手動で: irm https://claude.ai/install.ps1 | iex"
+    }
+}
+if ($claudeOk) {
+    Set-ClaudeSettings
+    # ログイン確認。今のセッションの PATH にまだ無いかもしれないので絶対パスも試す。
+    $claudeExe = (Get-Command claude -ErrorAction SilentlyContinue).Source
+    if (-not $claudeExe) { $claudeExe = Join-Path $claudeBin "claude.exe" }
+    if (Test-Path $claudeExe) {
+        & $claudeExe auth status 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Claude Code は未ログインです。ログインするには: claude auth login"
+        }
     }
 }
 

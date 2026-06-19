@@ -157,6 +157,69 @@ install_gh() {
   return 1
 }
 
+# Claude Code のユーザ設定(~/.claude/settings.json)に 2 つの既定を入れる:
+#   permissions.defaultMode = "auto"(プロンプトをほぼ出さない auto モード。
+#     ※ auto は Opus 4.6+ / Sonnet 4.6 かつ「ユーザ級」設定でのみ有効。条件を
+#     満たさないと claude が静かに既定モードへ戻る — それは仕様)
+#   tui = "fullscreen"(ちらつかない全画面描画)
+# 既存の設定は壊さない(この 2 キーだけ上書き)。jq か python3 があればマージ、
+# どちらも無ければ「不在なら新規作成・在れば手動案内」に倒す。
+configure_claude_settings() {
+  cdir="$HOME/.claude"
+  cfile="$cdir/settings.json"
+  mkdir -p "$cdir"
+  if [ ! -f "$cfile" ]; then
+    cat > "$cfile" <<'JSON'
+{
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "tui": "fullscreen"
+}
+JSON
+    echo "Claude Code の設定を作成しました(auto モード + fullscreen)"
+    return 0
+  fi
+  # 既存が bypassPermissions(より強い)なら降格しない。それ以外は auto に。tui は常に fullscreen。
+  if command -v jq >/dev/null 2>&1; then
+    tmpf="$(mktemp)"
+    if jq 'if type != "object" then {} else . end | if (.permissions | type) != "object" then .permissions = {} else . end | if .permissions.defaultMode != "bypassPermissions" then .permissions.defaultMode = "auto" else . end | .tui = "fullscreen"' "$cfile" > "$tmpf" 2>/dev/null; then
+      mv "$tmpf" "$cfile"
+      echo "Claude Code の設定を更新しました(auto モード + fullscreen)"
+    else
+      rm -f "$tmpf"
+      echo "ℹ Claude Code 設定の自動更新に失敗。~/.claude/settings.json に permissions.defaultMode=\"auto\" と tui=\"fullscreen\" を手動で足してください" >&2
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    if python3 - "$cfile" <<'PY' 2>/dev/null
+import json, sys
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception:
+    d = {}
+if not isinstance(d, dict):
+    d = {}
+perm = d.get("permissions")
+if not isinstance(perm, dict):
+    perm = {}
+if perm.get("defaultMode") != "bypassPermissions":
+    perm["defaultMode"] = "auto"
+d["permissions"] = perm
+d["tui"] = "fullscreen"
+with open(p, "w") as f:
+    json.dump(d, f, indent=2, ensure_ascii=False)
+PY
+    then
+      echo "Claude Code の設定を更新しました(auto モード + fullscreen)"
+    else
+      echo "ℹ Claude Code 設定の自動更新に失敗。手動で足してください" >&2
+    fi
+  else
+    echo "ℹ Claude Code 設定の自動更新には jq か python3 が要ります。~/.claude/settings.json に permissions.defaultMode=\"auto\" と tui=\"fullscreen\" を手動で足してください" >&2
+  fi
+}
+
 echo ""
 if ! command -v git >/dev/null 2>&1; then
   case "$(uname -s)" in
@@ -165,13 +228,40 @@ if ! command -v git >/dev/null 2>&1; then
   esac
 fi
 if command -v gh >/dev/null 2>&1; then
-  : # 既にある → 触らない
+  # 既にある → 触らない。ただし未ログインなら一手だけ案内する。
+  gh auth status >/dev/null 2>&1 || \
+    echo "gh は未ログインです。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
 else
   echo "gh(GitHub CLI)が見つかりません。インストールしています…"
   if install_gh; then
-    echo "gh をインストールしました。GitHub と連携するには次を実行してください: gh auth login"
+    echo "gh をインストールしました。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
   else
     echo "⚠ gh の自動インストールに失敗しました。手動で導入してください: https://github.com/cli/cli/releases" >&2
+  fi
+fi
+
+# claude(Claude Code = この PaaS を AI で操作する CLI)。無ければ公式インストーラ
+# で導入する(管理者権限不要・~/.local/bin に入り PATH も claude 自身が rc に書く)。
+CLAUDE_OK=""
+if command -v claude >/dev/null 2>&1; then
+  CLAUDE_OK=1  # 既にある → インストールはスキップ
+else
+  echo "claude(Claude Code)が見つかりません。インストールしています…"
+  if curl -fsSL https://claude.ai/install.sh -o "$TMP/claude-install.sh" && bash "$TMP/claude-install.sh"; then
+    CLAUDE_OK=1
+  else
+    echo "⚠ claude の自動インストールに失敗しました。手動で: curl -fsSL https://claude.ai/install.sh | bash" >&2
+  fi
+fi
+if [ -n "$CLAUDE_OK" ]; then
+  configure_claude_settings
+  # ログイン確認。今のシェルの PATH にはまだ claude が無いかもしれない(install が
+  # rc に書いた PATH は次シェルから)ので、絶対パス ~/.local/bin/claude も試す。
+  CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
+  [ -n "$CLAUDE_BIN" ] || CLAUDE_BIN="$HOME/.local/bin/claude"
+  if [ -x "$CLAUDE_BIN" ]; then
+    "$CLAUDE_BIN" auth status >/dev/null 2>&1 || \
+      echo "Claude Code は未ログインです。ログインするには: claude auth login"
   fi
 fi
 
