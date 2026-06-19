@@ -29,7 +29,8 @@ jobs:
           username: ${{ secrets.TSUBOMI_REGISTRY_USER }}
           password: ${{ secrets.TSUBOMI_REGISTRY_PASS }}
       # build:Dockerfile があればそれ、無ければ nixpacks。--platform は平台が公布する
-      # arch だけ(既定 linux/arm64)。GHA 層キャッシュで再 build は数十秒。
+      # arch(既定 linux/arm64)。Dockerfile 経路は GHA 層キャッシュで再 build 数十秒
+      # (nixpacks 経路はキャッシュ無しで毎回フル build)。
       - id: build
         run: |
           IMAGE=${{ vars.TSUBOMI_REGISTRY }}/${{ vars.TSUBOMI_SERVICE_ID }}:${{ github.sha }}
@@ -54,6 +55,8 @@ jobs:
             docker manifest push "$IMAGE"
             DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
           fi
+          # digest が空なら hook は必ず 400 になる。原因が分かるよう CI 側で先に止める。
+          [ -n "$DIGEST" ] || { echo "image digest を取得できませんでした" >&2; exit 1; }
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
       - name: notify tsubomi
         run: |

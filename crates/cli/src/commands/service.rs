@@ -316,11 +316,28 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
         return Ok(());
     }
 
-    // 3. repo(冪等)。owner はログインユーザ、repo 名は subdomain(GitHub/DNS 安全な ascii)。
+    // 3. repo(冪等)→ secrets(stdin)→ variables + `tsubomi` remote。json 経路と同じ手順を共有。
+    configure_github(resp)?;
+
+    eprintln!(
+        "完了。`git add -A && git commit -m deploy && git push -u tsubomi main` で自動デプロイが走ります。"
+    );
+    Ok(())
+}
+
+/// gh で repo(冪等)→ secrets(値は argv に載せず stdin で渡す = `ps` で見えない)→ variables を
+/// 設定し、ローカルの `tsubomi` remote も確実にする。設定した repo (`owner/sub`) を返す。
+/// text / json 両経路の単一実装(秘密名は workflow テンプレが参照する固定の契約 = 平台が単一真源)。
+fn configure_github(resp: &CreateServiceResp) -> Result<String> {
+    let svc = &resp.service;
+    // owner はログインユーザ、repo 名は subdomain(GitHub/DNS 安全な ascii)。
     let owner = gh_capture(&["api", "user", "-q", ".login"])?;
     let repo = format!("{owner}/{}", svc.subdomain);
     if gh_silent(&["repo", "view", &repo]) {
         eprintln!("repo {repo} は既にあります(再利用)");
+        // 既存 repo なら create をスキップするので、`git push -u tsubomi main` が通るよう
+        // ローカル remote を補う(create 時は --remote=tsubomi で張られる)。
+        ensure_tsubomi_remote(&repo);
     } else {
         run_gh(&[
             "repo",
@@ -331,8 +348,6 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
             "--remote=tsubomi",
         ])?;
     }
-
-    // 4. secrets(値は argv に載せず stdin で渡す = `ps` で見えない)+ variables。
     gh_secret(&repo, "TSUBOMI_DEPLOY_KEY", &resp.deploy_key)?;
     gh_secret(&repo, "TSUBOMI_REGISTRY_USER", &resp.registry.user)?;
     gh_secret(&repo, "TSUBOMI_REGISTRY_PASS", &resp.registry.pass)?;
@@ -340,74 +355,97 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
     gh_variable(&repo, "TSUBOMI_REGISTRY", &resp.registry.host)?;
     gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
     gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
-
-    eprintln!(
-        "完了。`git add -A && git commit -m deploy && git push -u tsubomi main` で自動デプロイが走ります。"
-    );
-    Ok(())
+    Ok(repo)
 }
 
-/// JSON 出力 + `--github` 時の GitHub 連携。orchestrate() と同じ gh 手順を踏むが、進捗は
-/// stderr、**結果は機械可読な JSON** で返す(stdout に秘密は出さない)。
-/// gh が無い / 未ログインなら手動 fallback として setup_commands を JSON に載せて返す。
+/// ローカルに `tsubomi` remote が無ければ HTTPS で張る(既存なら触らない)。
+/// gh の HTTPS 資格ヘルパで push が通る。失敗は致命でないので無視(push 時に気付ける)。
+fn ensure_tsubomi_remote(repo: &str) {
+    let exists = Command::new("git")
+        .args(["remote", "get-url", "tsubomi"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if exists {
+        return;
+    }
+    let url = format!("https://github.com/{repo}.git");
+    eprintln!("$ git remote add tsubomi {url}");
+    let _ = Command::new("git")
+        .args(["remote", "add", "tsubomi", &url])
+        .status();
+}
+
+/// JSON 出力 + `--github` 時の GitHub 連携。configure_github() を呼び、進捗は stderr・
+/// **結果は機械可読な JSON** で返す。
+///
+/// 秘密の扱い:成功時(`configured: true`)は stdout に秘密を出さない。**gh が無い / 途中で
+/// 失敗した場合だけ** fallback として `setup_commands`(deploy_key / registry pass を含む)を返す
+/// — これは非 `--github`(setup_commands を必ず返す)と同じ露出ティアで、受容済み。
+///
+/// なぜ失敗を Err にせず fallback の JSON にするか:service は既にサーバ側で作成済みなので、
+/// ここでハード失敗すると AI は秘密(create 応答にしか出ない)を失い、再 `create` が 409 conflict
+/// になって詰む。手順(秘密込み)を返せば、手動完遂 / 別 OS での再開ができる。
 fn orchestrate_json(resp: &CreateServiceResp) -> Result<serde_json::Value> {
     let svc = &resp.service;
     // workflow ファイルは gh の有無に関係なく置く(git push で CI が回る)。
     write_workflow_file(&resp.workflow_yaml)?;
 
-    if !gh_ok() {
-        // 作成自体は成功。GitHub 連携だけ未完なので setup_commands を返して AI に委ねる。
-        return Ok(json!({
+    // gh 不在 / 途中失敗の共通 fallback(setup_commands で手動完遂・再開できるようにする)。
+    let fallback = |reason: String| {
+        json!({
             "service": svc,
             "github": {
                 "configured": false,
-                "reason": "gh が見つからない / 未ログイン(`gh auth login` 後に再実行、または setup_commands を実行)",
+                "reason": reason,
                 "workflow_path": WORKFLOW_PATH,
                 "setup_commands": resp.setup_commands,
             }
-        }));
+        })
+    };
+
+    if !gh_ok() {
+        return Ok(fallback(
+            "gh が見つからない / 未ログイン(`gh auth login` 後に再実行、または setup_commands を実行)"
+                .to_string(),
+        ));
     }
 
-    // repo(冪等)→ secrets(stdin 渡し)→ variables。orchestrate() と同じ順序・同じ守り。
-    let owner = gh_capture(&["api", "user", "-q", ".login"])?;
-    let repo = format!("{owner}/{}", svc.subdomain);
-    if !gh_silent(&["repo", "view", &repo]) {
-        run_gh(&[
-            "repo",
-            "create",
-            &repo,
-            "--private",
-            "--source=.",
-            "--remote=tsubomi",
-        ])?;
+    // 設定済みなら AI が使うのは「設定できたか / どの repo か / 次の一手」だけ(秘密名一覧は
+    // 載せない = テンプレ契約の重複と drift を避ける)。途中失敗は fallback に倒す(上記の理由)。
+    match configure_github(resp) {
+        Ok(repo) => Ok(json!({
+            "service": svc,
+            "github": {
+                "configured": true,
+                "repo": repo,
+                "workflow_path": WORKFLOW_PATH,
+                "next": "git add -A && git commit -m deploy && git push -u tsubomi main で自動デプロイ",
+            }
+        })),
+        Err(e) => Ok(fallback(format!(
+            "gh での設定が途中で失敗しました(service は作成済み)。setup_commands を実行して完遂してください: {e}"
+        ))),
     }
-    gh_secret(&repo, "TSUBOMI_DEPLOY_KEY", &resp.deploy_key)?;
-    gh_secret(&repo, "TSUBOMI_REGISTRY_USER", &resp.registry.user)?;
-    gh_secret(&repo, "TSUBOMI_REGISTRY_PASS", &resp.registry.pass)?;
-    gh_variable(&repo, "TSUBOMI_SERVICE_ID", &svc.id.to_string())?;
-    gh_variable(&repo, "TSUBOMI_REGISTRY", &resp.registry.host)?;
-    gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
-    gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
-
-    // secret / variable 名は workflow テンプレが参照する固定の契約(= 平台が単一真源)。
-    // ここで列挙し直すと 4 箇所目の重複 = drift の元、かつ AI はこの一覧で分岐しない。
-    // AI が実際に使うのは「設定できたか(configured)/ どの repo か / 次の一手」だけ。
-    Ok(json!({
-        "service": svc,
-        "github": {
-            "configured": true,
-            "repo": repo,
-            "workflow_path": WORKFLOW_PATH,
-            "next": "git add -A && git commit -m deploy && git push -u tsubomi main で自動デプロイ",
-        }
-    }))
 }
 
-/// workflow ファイルを書く(既存は上書きしない — ユーザの編集を尊重)。
+/// workflow ファイルを書く(既存は基本上書きしない — ユーザの編集を尊重)。
+/// 例外:旧版の壊れた配方(存在しない npm パッケージ `@railway/nixpacks` を呼び CI が必ず失敗する)が
+/// 残っている場合だけは修正版で上書きする。これは平台の生成物でユーザ編集ではなく、放置すると
+/// `--github` が成功しても CI が同じ原因で失敗し続ける(= 今回の修正が届かない)。
 fn write_workflow_file(yaml: &str) -> Result<()> {
     let path = std::path::Path::new(WORKFLOW_PATH);
     if path.exists() {
-        eprintln!("{WORKFLOW_PATH} は既にあります(上書きしません)");
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        if existing.contains("@railway/nixpacks") {
+            std::fs::write(path, yaml)
+                .with_context(|| format!("{WORKFLOW_PATH} を更新できません"))?;
+            eprintln!("{WORKFLOW_PATH} の旧版(壊れた nixpacks 配方)を修正版に更新しました");
+        } else {
+            eprintln!("{WORKFLOW_PATH} は既にあります(上書きしません)");
+        }
         return Ok(());
     }
     if let Some(dir) = path.parent() {
