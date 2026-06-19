@@ -43,8 +43,10 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 
 ## 2. リソースを作る(必要なものだけ)
 
-- service:`tbm service create <名前>`(名前が subdomain になる。registry 情報や GitHub 連携用の
-  `setup_commands` も返る。**平台は GitHub に触れない** — gh を使うのはあなた)。
+- service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 経路(既定)で出すなら、この
+  作成時に `--github` を付ける**(repo/secret/variable と workflow 設定までこの 1 回で済む。§4 参照)。
+  `--github` は**作成時のみ有効**(付け忘れた既存 service には効かず、再 create は重名 409)。GitHub 経路なら
+  最初から付ける。registry 情報や `setup_commands` も返る。**平台は GitHub に触れない** — gh を使うのはあなた。
 - database:`tbm db create <名前>`
 - volume:`tbm volume create <名前>`(ファイル永続が要るなら)
 - cache:`tbm cache create <名前>`(valkey が要るなら)
@@ -73,8 +75,9 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
   const u = new URL(process.env.DATABASE_URL); u.searchParams.delete("sslmode");
   const pool = new pg.Pool({ connectionString: u.toString(), ssl: { rejectUnauthorized: false } });
   ```
-  併せて ioredis は **必ず `redis.on("error", …)` を付ける**(未listenの error イベントは
-  "Unhandled error event" でプロセスごと落ちる = 起動直後 exit の典型)。
+- **cache を使う Node アプリ(ioredis)**:**必ず `redis.on("error", …)` を付ける**(未listen の error
+  イベントは "Unhandled error event" でプロセスごと落ちる = 起動直後 exit の典型。DB の TLS とは別件だが
+  同じ「起動直後 exit」症状になる)。
 - **Rust(`postgres` / `tokio-postgres`)**:`NoTls` では `sslmode=require` に繋がらない。TLS
   コネクタを渡す(検証なし = `require` の意味に合わせる):
   ```rust
@@ -89,15 +92,17 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 
 ### 既定:GitHub 経路(`gh` を使う。CI が build/push)
 
-**`tbm service create <名前> --github` を使う。** `--github` を付けると、平台が `gh` 経由で
-repo 作成・secret / variable 設定・`.github/workflows/tsubomi-deploy.yml` の書き出しまで自動で行う
-(秘密は stdin 渡しで `ps` に出ない。**Windows / mac / Linux どの shell でも動く** — `setup_commands` の
-bash を自分で組み立て・実行する必要はない)。あとは `git add/commit/push` → GitHub Actions が
-自動でビルド & デプロイ。出力 JSON の `github.configured` が true なら設定済み。
+service を **§2 で `--github` 付きで作成済み**なら GitHub 連携は完了している:平台が `gh` 経由で
+repo 作成・secret / variable 設定・`.github/workflows/tsubomi-deploy.yml` の書き出しまで実施済み
+(秘密は stdin 渡しで `ps` に出ない。**Windows / mac / Linux どの shell でも動く**。create 出力 JSON の
+`github.configured` が true なら完了)。あとは `git add/commit/push` → GitHub Actions が自動でビルド &
+デプロイ。
 
-- `--github` 無しで JSON を受けた場合は `setup_commands`(`gh repo create` / `gh secret set` /
-  `gh variable set`。**POSIX shell 前提**)が返る。bash / zsh で順に実行してもよいが、Windows では
-  上の `--github` を使う(PowerShell では `printf` / `$(…)` が動かない)。
+- **まだ `--github` を付けていない場合**:`--github` は作成時のみ有効なので、最初の `tbm service create
+  <名前> --github` で付けるのが要点(既存 service への再 create は重名 409)。create 応答(JSON)には
+  `setup_commands`(`gh repo create` / `gh secret set` / `gh variable set`。**POSIX shell 前提**)も
+  返るので、bash / zsh なら手で順に実行してもよい。ただし Windows(PowerShell)では `printf` / `$(…)` が
+  動かないため、最初から `--github` で作るのが確実。
 - **`gh` が入っていない** → インストールを案内する:
   - mac:`brew install gh`
   - Debian/Ubuntu:`sudo apt install gh`(または公式 apt repo)
