@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
 import { Link } from "react-router";
 
 import { ClaudeSession, type SessionLine } from "@/components/claude-session";
@@ -12,7 +12,6 @@ import { Title } from "@/components/ui/title";
 import { Typewriter } from "@/components/ui/typewriter";
 import { useMeQuery } from "@/lib/auth";
 import { RESOURCES } from "@/lib/resources";
-import { cn } from "@/lib/utils";
 
 // はじめに(管理画面の入口)。コマンド 1 本から公開 URL まで、利用者を **1 本の線**で
 // 上から下へ導く。Claude Code とのやり取りは端末風パネルで打字機デモ(視口に入ると再生)。
@@ -81,76 +80,6 @@ function BrowserMock() {
   );
 }
 
-// 文中の強調:操作語(右クリック等)は前景色で太く、メニュー名(「新しいフォルダー」等)は
-// ミントで太く。読み手の目を要所に運ぶ。
-function Em({ children }: { children: ReactNode }) {
-  return <strong className="font-bold text-foreground">{children}</strong>;
-}
-function MenuLabel({ children }: { children: ReactNode }) {
-  return <strong className="font-bold text-[#11a89b]">{children}</strong>;
-}
-
-// 第 1 ステップと同じ見た目の切り替えピル。
-function Pill({
-  on,
-  onClick,
-  children,
-}: {
-  on: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={on}
-      className={cn(
-        "rounded-full px-3 py-1 text-xs font-bold outline-none transition-colors focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2",
-        on ? "bg-[#0CC0B5] text-[#FFF9E3]" : "bg-card text-foreground/65 hover:bg-card/70",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-// 第 3 ステップ:第 1 ステップと同じく「右クリックで(GUI)」と「コマンドで(CLI)」を選べる。
-function FolderStep() {
-  const [mode, setMode] = useState<"gui" | "cli">("gui");
-  return (
-    <>
-      <div className="flex flex-wrap gap-1.5">
-        <Pill on={mode === "gui"} onClick={() => setMode("gui")}>
-          右クリックで
-        </Pill>
-        <Pill on={mode === "cli"} onClick={() => setMode("cli")}>
-          コマンドで
-        </Pill>
-      </div>
-      {mode === "gui" ? (
-        <>
-          <p className="text-sm leading-relaxed font-medium text-foreground/75">
-            デスクトップなどで<Em>右クリック</Em> →「<MenuLabel>新しいフォルダー</MenuLabel>」。その
-            フォルダの中で<Em>右クリック</Em> →「<MenuLabel>ターミナルで開く</MenuLabel>」(Windows
-            は 「<MenuLabel>PowerShell で開く</MenuLabel>」)。開いた窓で <Em>Claude Code</Em>{" "}
-            を起動します。
-          </p>
-          <CodeBlock code="claude" showCopy />
-        </>
-      ) : (
-        <>
-          <p className="text-sm leading-relaxed font-medium text-foreground/75">
-            ターミナルに次を貼り付けます。フォルダを<Em>作って</Em>その中へ<Em>入り</Em>、
-            <Em>Claude Code</Em> を起動します。
-          </p>
-          <CodeBlock code={"mkdir my-app && cd my-app\nclaude"} showCopy />
-        </>
-      )}
-    </>
-  );
-}
-
 export default function Welcome() {
   const { data: me } = useMeQuery();
   const greetingName = me?.name ?? me?.email ?? "ようこそ";
@@ -190,8 +119,12 @@ export default function Welcome() {
             <CodeBlock code="tbm login" showCopy />
           </Step>
 
-          <Step n={3} title="フォルダを作って Claude Code を起動">
-            <FolderStep />
+          <Step n={3} title="Claude Code を起動">
+            <p className="text-sm font-medium text-foreground/75">
+              自分のプロジェクトのフォルダ、あるいはどこでも好きなフォルダでターミナルを開いて、
+              Claude Code を起動します。
+            </p>
+            <CodeBlock code="claude" showCopy />
           </Step>
 
           <Step n={4} title="あとは Claude Code に頼むだけ">
