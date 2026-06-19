@@ -222,18 +222,20 @@ REM ---- subroutines (reached only via "call"; the main flow exits above) ----
 :install_mingit
 REM git (MinGit) -> %LOCALAPPDATA%\tbm\git, add its \cmd to PATH. MinGit is a plain
 REM zip (not a self-extracting exe) so no admin is needed. The latest version tag
-REM comes from the GitHub API via PowerShell (robust JSON parse), captured from its
-REM stdout with for /f -- NOT a ">" redirect, which on Windows PowerShell 5.1 writes
-REM UTF-16+BOM and would corrupt a "set /p" read. One call stays under the rate limit.
-REM The tag looks like "v2.54.0.windows.1": the download URL uses the FULL tag, but
-REM the asset name drops ".windows" -> "MinGit-2.54.0-64-bit.zip". Do not collapse
-REM the two (404).
+REM comes from the GitHub API. Call PowerShell DIRECTLY (NOT inside a for /f backtick
+REM -- the parens/quotes in the PowerShell command make cmd mis-parse the for set, so
+REM that previously failed with "powershell not found"). PowerShell writes the tag to
+REM a temp file via WriteAllText = UTF-8 no-BOM (a ">" redirect on Win PowerShell 5.1
+REM is UTF-16+BOM and corrupts set /p); set /p then reads it. The tag looks like
+REM "v2.54.0.windows.1": the download URL uses the FULL tag, but the asset name drops
+REM ".windows" -> "MinGit-2.54.0-64-bit.zip". Do not collapse the two (404).
 set "GIT_OK="
 set "GIT_ROOT=%LOCALAPPDATA%\tbm\git"
 set "GIT_TMP=%TEMP%\tbm-git-%RANDOM%%RANDOM%"
 mkdir "!GIT_TMP!" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('!GIT_TMP!\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest').tag_name)" >nul 2>&1
 set "GIT_TAG="
-for /f "usebackq delims=" %%T in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest').tag_name" 2^>nul`) do if not defined GIT_TAG set "GIT_TAG=%%T"
+if exist "!GIT_TMP!\tag.txt" set /p GIT_TAG=<"!GIT_TMP!\tag.txt"
 if not defined GIT_TAG (
     rmdir /s /q "!GIT_TMP!" >nul 2>&1
     exit /b 0
@@ -262,15 +264,18 @@ exit /b 0
 
 :install_gh
 REM gh -> same bin dir as tbm. Official GitHub release zip = no admin. The latest
-REM version tag comes from the GitHub API via PowerShell (robust JSON parse), captured
-REM from its stdout with for /f -- NOT a ">" redirect, which on Windows PowerShell 5.1
-REM writes UTF-16+BOM and would corrupt a "set /p" read. curl + tar then fetch and
-REM unpack the asset -- the same tools that installed tbm above.
+REM version tag comes from the GitHub API. Call PowerShell DIRECTLY (NOT inside a
+REM for /f backtick -- the parens/quotes in the PowerShell command make cmd mis-parse
+REM the for set, so that previously failed with "powershell not found"). PowerShell
+REM writes the tag to a temp file via WriteAllText = UTF-8 no-BOM (a ">" redirect on
+REM Win PowerShell 5.1 is UTF-16+BOM and corrupts set /p); set /p then reads it.
+REM curl + tar then fetch and unpack the asset -- the same tools that installed tbm.
 set "GH_OK="
 set "GH_TMP=%TEMP%\tbm-gh-%RANDOM%%RANDOM%"
 mkdir "!GH_TMP!" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('!GH_TMP!\tag.txt', (Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest').tag_name)" >nul 2>&1
 set "GH_TAG="
-for /f "usebackq delims=" %%T in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "(Invoke-RestMethod 'https://api.github.com/repos/cli/cli/releases/latest').tag_name" 2^>nul`) do if not defined GH_TAG set "GH_TAG=%%T"
+if exist "!GH_TMP!\tag.txt" set /p GH_TAG=<"!GH_TMP!\tag.txt"
 if not defined GH_TAG (
     rmdir /s /q "!GH_TMP!" >nul 2>&1
     exit /b 0
