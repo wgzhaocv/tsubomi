@@ -31,6 +31,8 @@ RUN cargo build --release --bin tsubomi-server
 # メジャー版**でないと動かない(古い pg_dump は新しいサーバを dump 不可)。
 # postgres:18 を丸ごと背負う(≈469MB)より小さく(≈180MB)、能力は同一
 # (pg_dump/psql 18 + libpq + ca-certificates)。arm64/amd64 両対応。
+# rsync は volumes の日次バックアップ(gc.rs の rsync スナップショット)に要る — 不在だと
+# spawn が `No such file or directory` で失敗し volumes だけバックアップされない。
 FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -40,7 +42,7 @@ RUN apt-get update \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt trixie-pgdg main" \
          > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends postgresql-client-18 iptables \
+    && apt-get install -y --no-install-recommends postgresql-client-18 iptables rsync \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
 # M6 egress:server は host netns で `iptables` を打ってテナント出站を遮断する(services/egress.rs)。
