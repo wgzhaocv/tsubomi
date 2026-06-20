@@ -1,0 +1,18 @@
+# 平台手書きの**静的** dynamic 設定(server は書かない/消さない — route.rs の掃除は svc-*.yml だけ対象)。
+# 役割:CF Tunnel 配下で cloudflared が直接 peer(docker 網)になり Traefik が実 client IP を見失う問題を、
+# `Cf-Connecting-Ip` を `X-Forwarded-For` / `X-Real-Ip` へ写すプラグインで埋める
+# (kubitodev/traefik-cloudflared-source-ip。リポジトリに vendor:traefik-plugins/src/...)。
+# compose の `--entrypoints.web.http.middlewares=cloudflared-source-ip@file` で web 入口に全体適用 =
+# 各 service ルータの ipallow より**先**に走り、ipallow の ipStrategy が書き換え後の XFF から実 client を取る。
+# 配置先:Pi の traefik dynamic dir(既定 /srv/tsubomi/traefik-dynamic)。
+# excludednets = 内部/プロキシ網(XFF からこれらを飛ばす。XFF 不在なら CF-Connecting-Ip に回退)。
+http:
+  middlewares:
+    cloudflared-source-ip:
+      plugin:
+        cloudflared-source-ip:
+          excludednets:
+            - "127.0.0.0/8"
+            - "10.0.0.0/8"
+            - "172.16.0.0/12"
+            - "192.168.0.0/16"

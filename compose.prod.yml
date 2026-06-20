@@ -181,12 +181,19 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
+      # CF Tunnel 越しの実 client IP を Cf-Connecting-Ip → X-Forwarded-For に写すローカルプラグイン
+      # (リポジトリに vendor:traefik-plugins/src/...)。web 入口に全体適用し、各 service の ipallow
+      # より先に走らせる(ipallow の ipStrategy が書き換え後の XFF から実 client を取る)。
+      - --experimental.localPlugins.cloudflared-source-ip.moduleName=github.com/kubitodev/traefik-cloudflared-source-ip
+      - --entrypoints.web.http.middlewares=cloudflared-source-ip@file
     ports:
       - "${TRAEFIK_BIND_ADDR:-127.0.0.1}:80:80"
     volumes:
       # 平台が書き出すホストパスを read-only でマウント(docker.sock は不要)。
       # TSUBOMI_TRAEFIK_DYNAMIC_DIR(server の env)と一致させること。
       - ${TSUBOMI_TRAEFIK_DYNAMIC_DIR:-/srv/tsubomi/traefik-dynamic}:/etc/traefik/dynamic:ro
+      # ローカルプラグイン源(vendor)を /plugins-local へ。Traefik は src/<moduleName>/ を探す。
+      - ${TSUBOMI_TRAEFIK_PLUGINS_DIR:-/srv/tsubomi/traefik-plugins}:/plugins-local:ro
     # apex router(直VPS時)の後端 host.docker.internal を host ゲートウェイへ(server は host ネット)。
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -194,7 +201,7 @@ services:
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
-    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v26}
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v27}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
