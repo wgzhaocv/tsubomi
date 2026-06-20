@@ -274,6 +274,20 @@ fn fail_open_ranges(cidrs: &[String]) -> Vec<&str> {
     }
 }
 
+/// ipAllowList が実 client IP を `X-Forwarded-For` から選ぶ際に**飛ばす**内部/プロキシ網
+/// (cloudflared・docker・loopback 等)。これらを除いた残りが実 client。CF Tunnel 配下では
+/// CF の Transform Rule が XFF を `ip.src` で**上書き**(偽装不可)するので、ここに残るのは
+/// 実 client(公網)1 個になる。internal app は XFF を持たないが、ipStrategy を付けるのは
+/// 許可リスト非空時のみ(下記)なので影響しない。
+const TRUSTED_PROXY_NETS: &[&str] = &[
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1/128",
+    "fc00::/7",
+];
+
 /// traefik 動的設定(YAML)を組み立てる。空リスト = fail-open(全 IP 許可)。
 /// CIDR は normalize_cidr を通った値だけなので安全(それでも引用符で包む)。
 fn render_yaml(cidrs: &[String]) -> String {
@@ -291,6 +305,18 @@ fn render_yaml(cidrs: &[String]) -> String {
     s.push_str("        sourceRange:\n");
     for c in ranges {
         s.push_str(&format!("          - \"{c}\"\n"));
+    }
+    // 許可リストが**非空のときだけ** ipStrategy を付ける。CF Tunnel 配下では cloudflared が直接の
+    // peer(loopback/docker)なので、既定(remote addr 判定)だと全員その内部 IP に見えて白名単が効かない。
+    // XFF(CF が ip.src で上書き)から内部ホップを除いて実 client を選ぶ。**空(fail-open)では付けない**
+    // — XFF が内部 IP だけ/不在のとき excludedIPs が空を返し 403 になる罠(traefik#10561)を避け、
+    // fail-open(全許可・無条件マッチ)の不変条件を守るため。
+    if !cidrs.is_empty() {
+        s.push_str("        ipStrategy:\n");
+        s.push_str("          excludedIPs:\n");
+        for net in TRUSTED_PROXY_NETS {
+            s.push_str(&format!("            - \"{net}\"\n"));
+        }
     }
     s
 }
@@ -364,13 +390,19 @@ mod tests {
         assert!(yaml.contains("0.0.0.0/0"));
         assert!(yaml.contains("::/0"));
         assert!(yaml.contains(TRAEFIK_MIDDLEWARE));
+        // fail-open では ipStrategy を付けない(XFF 不在で空 IP→403 の罠を避ける)。
+        assert!(!yaml.contains("ipStrategy"));
     }
 
     #[test]
     fn nonempty_list_only_lists_given_ranges() {
-        let yaml = render_yaml(&["10.0.0.0/8".to_string()]);
-        assert!(yaml.contains("10.0.0.0/8"));
+        let yaml = render_yaml(&["203.0.113.0/24".to_string()]);
+        assert!(yaml.contains("203.0.113.0/24"));
         assert!(!yaml.contains("0.0.0.0/0"));
+        // 非空時は ipStrategy.excludedIPs で XFF から実 client を選ぶ(内部ホップ除外)。
+        assert!(yaml.contains("ipStrategy"));
+        assert!(yaml.contains("excludedIPs"));
+        assert!(yaml.contains("127.0.0.0/8"));
     }
 
     #[test]
