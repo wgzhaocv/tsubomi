@@ -53,7 +53,7 @@ pub async fn resolve(
                     let cfg = &state.config;
                     let url = format!(
                         "postgres://{role}:{pass}@{}:{}/{dbname}?sslmode={}",
-                        cfg.db_internal_host, cfg.db_internal_port, cfg.db_sslmode
+                        cfg.db_internal_host, cfg.db_internal_port, cfg.db_internal_sslmode
                     );
                     env.push((env_var, url));
                 }

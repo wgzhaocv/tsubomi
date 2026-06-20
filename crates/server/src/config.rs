@@ -44,9 +44,15 @@ pub struct Config {
     /// human が手にする外部接続文字列のホスト。dev=127.0.0.1 / prod=db.<域名>。
     pub db_public_host: String,
     pub db_public_port: u16,
-    /// 接続文字列の sslmode。dev=disable(pgbouncer に TLS なし)、prod は env で調整。
-    /// 外部(human)も内部(注入する app)も同じ pgbouncer なので sslmode を共有する。
-    pub db_sslmode: String,
+    /// **内部**(service へ注入する app role)接続文字列の sslmode。dev=disable、prod=require。
+    /// 内部は `db_internal_host`(=`tsubomi-pgbouncer`)へ docker DNS で繋ぐので、pgbouncer 証明書の
+    /// SAN(`db.<域名>`)とホスト名が一致しない → verify-full は使えず **require 据え置き**。
+    pub db_internal_sslmode: String,
+    /// **外部**(human が手にする公開)接続文字列の sslmode。既定は内部に追従(未設定時)、
+    /// 公網 VPS 中継 + 公開 LE 証明書の部署では `verify-full` にする(`TSUBOMI_DB_SSLMODE_EXTERNAL`)。
+    /// 外部は `db_public_host`(=`db.<域名>`)経由なので証明書 SAN と一致し verify-full が成立する。
+    /// verify-ca/verify-full のときは `build_url` が `sslrootcert=system` を付与する(下記参照)。
+    pub db_public_sslmode: String,
     /// 外部(human)接続文字列を提供するか(`TSUBOMI_DB_PUBLIC_ENABLED`、既定 false)。
     /// **off**(CF Tunnel など公網 TCP 入口を持たない部署):web は接続文字列カードを出さず、
     /// `/url`・`/rotate` も後端で拒否する(届かない LAN IP を見せて誤誘導するのを断つ)。
@@ -295,8 +301,12 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6432);
-        let db_sslmode =
+        let db_internal_sslmode =
             std::env::var("TSUBOMI_DB_SSLMODE").unwrap_or_else(|_| "disable".to_string());
+        // 外部は未設定なら内部に追従(従来は両者共有だったので後方互換)。公開 DB を verify-full で
+        // 出す部署だけ `TSUBOMI_DB_SSLMODE_EXTERNAL=verify-full` を足す。dev は内部=disable を継ぐ。
+        let db_public_sslmode = std::env::var("TSUBOMI_DB_SSLMODE_EXTERNAL")
+            .unwrap_or_else(|_| db_internal_sslmode.clone());
         // 外部接続文字列の提供可否。既定 false(公網 TCP 入口を持たない CF 部署で誤って
         // 届かない接続文字列を見せないため)。公網 IP の VPS / ローカル dev で明示的に true にする。
         let db_public_enabled = std::env::var("TSUBOMI_DB_PUBLIC_ENABLED")
@@ -445,7 +455,8 @@ impl Config {
             tenant_admin_url,
             db_public_host,
             db_public_port,
-            db_sslmode,
+            db_internal_sslmode,
+            db_public_sslmode,
             db_public_enabled,
             db_internal_host,
             db_internal_port,

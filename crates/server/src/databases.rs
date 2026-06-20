@@ -136,10 +136,17 @@ async fn fetch_human(db: &PgPool, user_id: Uuid, id: Uuid) -> AppResult<(String,
 
 fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> String {
     let cfg = &state.config;
-    format!(
+    let mut url = format!(
         "postgres://{role}:{password}@{}:{}/{dbname}?sslmode={}",
-        cfg.db_public_host, cfg.db_public_port, cfg.db_sslmode
-    )
+        cfg.db_public_host, cfg.db_public_port, cfg.db_public_sslmode
+    );
+    // verify-ca / verify-full は CA 検証を要求する = クライアントに root 証明書が要る。公開 LE
+    // 証明書は OS 信頼ストアに在るので `sslrootcert=system`(libpq 16+)を付け、受け取った人が
+    // そのままコピペで verify-full 接続できるようにする(裸の verify-full は root.crt 不在で失敗)。
+    if matches!(cfg.db_public_sslmode.as_str(), "verify-ca" | "verify-full") {
+        url.push_str("&sslrootcert=system");
+    }
+    url
 }
 
 /// 外部接続文字列機能(human role の公開接続)が有効か。無効な部署(CF Tunnel など公網
