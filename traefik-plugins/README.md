@@ -24,19 +24,25 @@ volumes:
 
 middleware の定義は `traefik-dynamic/cloudflare-realip.yml`(静的 dynamic 設定。`excludednets`=内部網)。
 
-## Pi への配置(ship.sh は配らない = 一回限りの手動 setup)
+## Pi への配置(`just ship` が自動配布)
 
-`/srv/tsubomi` は root 所有なので docker 経由で置く:
+`scripts/ship.sh` が compose と一緒に、この `traefik-plugins/` と `traefik-dynamic/cloudflare-realip.yml`
+を `/srv/tsubomi/{traefik-plugins,traefik-dynamic}` へ **docker 経由**で配る(`/srv/tsubomi` は root 所有 +
+zwg は sudo 無しのため)。冪等で fresh host も自動セットアップ。既定パスは compose の
+`TSUBOMI_TRAEFIK_PLUGINS_DIR` / `TSUBOMI_TRAEFIK_DYNAMIC_DIR`。
+
+`just ship` を使わない経路(DockerHub pull で更新する VPS 等)では手動で同じ配置を:
 
 ```sh
 # リポジトリの traefik-plugins/ と traefik-dynamic/cloudflare-realip.yml を Pi の home へ scp した後:
-docker run --rm -v /srv/tsubomi:/dest -v $HOME/tsubomi-deploy:/src:ro alpine sh -c '
-  mkdir -p /dest/traefik-plugins &&
-  cp -r /src/staging-traefik-plugins/. /dest/traefik-plugins/ &&
+docker run --rm -v /srv/tsubomi:/dest -v $HOME/staging:/src:ro alpine sh -c '
+  mkdir -p /dest/traefik-plugins /dest/traefik-dynamic &&
+  cp -r /src/traefik-plugins/. /dest/traefik-plugins/ &&
   cp /src/cloudflare-realip.yml /dest/traefik-dynamic/cloudflare-realip.yml'
-# 既定パス:プラグイン=/srv/tsubomi/traefik-plugins、dynamic=/srv/tsubomi/traefik-dynamic
-# (compose の TSUBOMI_TRAEFIK_PLUGINS_DIR / TSUBOMI_TRAEFIK_DYNAMIC_DIR)
 ```
+
+注:プラグイン配線(localPlugins / entrypoint middleware)の反映には traefik の再作成が要る
+(`up -d traefik`)。ship は no-recreate なので既存 traefik は作り直さない。
 
 ## 信頼前提
 
