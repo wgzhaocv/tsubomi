@@ -88,6 +88,19 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 迷ったら **起動時ではなくリクエスト時に DB へ繋ぐ**と、失敗が「起動直後 exit」ではなく
 レスポンスのエラーに出て切り分けやすい。
 
+### 3.2 訪問者の実 IP はヘッダで来る(使うかは任意)
+
+app は HTTP リクエストヘッダで**訪問者の実 client IP** を受け取れる(プラットフォームが提供する。
+使う/使わないは app 次第):
+
+- `CF-Connecting-IP` — 正準。Cloudflare が必ず付ける(単一の実 IP)。
+- `X-Forwarded-For` / `X-Real-Ip` — プラットフォームの Traefik が `CF-Connecting-IP` から埋める。
+  標準ライブラリ(多くは XFF を読む)もそのまま実 IP を得る。
+
+**可信**:入口は Cloudflare Tunnel のみ・直アクセス不可なので、クライアントはこれらを偽造して届かせられない
+(CF が edge で上書きする)。`req.socket.remoteAddr` 等の**生の接続元はプロキシ(内部 IP)**になるので、
+実 IP が要るなら上のヘッダを読むこと(`process.env` の注入値ではない — 実行時のリクエストヘッダ)。
+
 ## 4. デプロイ — 経路を選ぶ
 
 ### 既定:GitHub 経路(`gh` を使う。CI が build/push)

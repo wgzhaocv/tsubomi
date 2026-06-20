@@ -45,6 +45,23 @@ docker save "$IMAGE" | ssh "$HOST" 'docker load'
 echo "▶ ${HOST} へ compose.prod.yml を配布..."
 scp -q compose.prod.yml "$HOST:${DIR}/compose.prod.yml"
 
+# Traefik ローカルプラグイン(vendor:traefik-plugins/)+ 静的 dynamic 設定(cloudflared 実 IP
+# middleware)を配布。CF Tunnel 越しに実 client IP を Cf-Connecting-Ip → X-Forwarded-For へ写し、
+# 会社 IP 許可リストを実 IP で効かせる(traefik-plugins/README.md)。源は静的(per-deploy で変わらない)
+# が冪等なので毎回配り、fresh host も自動セットアップする。/srv/tsubomi は root 所有なので docker 経由
+# で置く(zwg は sudo 無し)。配置先既定:プラグイン=/srv/tsubomi/traefik-plugins、middleware 定義=
+# /srv/tsubomi/traefik-dynamic(compose の TSUBOMI_TRAEFIK_PLUGINS_DIR / TSUBOMI_TRAEFIK_DYNAMIC_DIR)。
+# 注:既存 traefik の再作成は ship では行わない(no-recreate)= プラグイン配線の反映は別途 `up -d traefik`。
+echo "▶ ${HOST} へ Traefik プラグイン + dynamic 設定を配布..."
+ssh "$HOST" "rm -rf ${DIR}/.ship-traefik && mkdir -p ${DIR}/.ship-traefik"
+scp -rq traefik-plugins "$HOST:${DIR}/.ship-traefik/traefik-plugins"
+scp -q traefik-dynamic/cloudflare-realip.yml "$HOST:${DIR}/.ship-traefik/cloudflare-realip.yml"
+ssh "$HOST" "docker run --rm -v /srv/tsubomi:/dest -v \$HOME/${DIR}/.ship-traefik:/src:ro alpine sh -c '
+  mkdir -p /dest/traefik-plugins /dest/traefik-dynamic &&
+  cp -r /src/traefik-plugins/. /dest/traefik-plugins/ &&
+  cp /src/cloudflare-realip.yml /dest/traefik-dynamic/cloudflare-realip.yml' \
+  && rm -rf ${DIR}/.ship-traefik"
+
 echo "▶ ${HOST} で起動(${DIR}/compose.prod.yml)..."
 # **平台更新はユーザ app への影響を最小化する** — ship は「server だけ」を入れ替える:
 #   1) up -d --no-recreate:足りないものだけ起こす(初回デプロイで infra 一式を立ち上げる)。
