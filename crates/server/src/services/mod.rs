@@ -357,7 +357,15 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
     stop_service(&state, id).await?;
-    audit(&state.db, Some(auth.user_id), "service.stop", id, json!({})).await;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.stop",
+        id,
+        json!({}),
+        auth.client_ip.as_deref(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -424,6 +432,7 @@ pub async fn exec(
         "service.exec",
         id,
         json!({ "cmd": req.cmd }),
+        auth.client_ip.as_deref(),
     )
     .await;
     let result = docker::exec_capture(&state, &name, req.cmd).await?;
@@ -460,6 +469,7 @@ pub async fn terminal(
         "service.terminal.open",
         id,
         json!({}),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(ws.on_upgrade(move |socket| docker::handle_terminal(socket, state, name)))
@@ -479,6 +489,7 @@ pub async fn delete_service(
         "service.delete",
         id,
         json!({}),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
@@ -602,6 +613,7 @@ pub async fn create_injection(
         "service.inject",
         id,
         json!({ "resource_id": req.resource_id, "env_var": env_var }),
+        auth.client_ip.as_deref(),
     )
     .await;
 
@@ -801,6 +813,7 @@ pub async fn create(
         "service.create",
         dto.id,
         json!({ "display_name": display_name, "subdomain": dto.subdomain }),
+        auth.client_ip.as_deref(),
     )
     .await;
 

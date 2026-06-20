@@ -144,6 +144,7 @@ pub async fn create(
         "ip_allowlist.add",
         id,
         json!({ "cidr": cidr, "note": note }),
+        auth.client_ip.as_deref(),
     )
     .await;
 
@@ -183,6 +184,7 @@ pub async fn delete(
         "ip_allowlist.remove",
         id,
         json!({ "cidr": cidr }),
+        auth.client_ip.as_deref(),
     )
     .await;
 

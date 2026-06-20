@@ -151,7 +151,15 @@ pub async fn restore(
         let _ = std::fs::remove_file(dump_path(&trash_meta, &state.config.trash_dir, id));
     }
 
-    audit(&state.db, Some(auth.user_id), action, id, detail).await;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        action,
+        id,
+        detail,
+        auth.client_ip.as_deref(),
+    )
+    .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -261,6 +269,7 @@ pub async fn purge(
         "trash.purge",
         id,
         json!({ "kind": kind }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)

@@ -352,6 +352,7 @@ async fn run_digest_inner(
         "service.deploy",
         service_id,
         json!({ "git_sha": git_sha, "image_digest": image_digest }),
+        None,
     )
     .await;
     Ok(())

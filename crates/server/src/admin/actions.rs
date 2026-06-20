@@ -75,6 +75,7 @@ async fn handle(
                 id,
                 target_user,
                 json!({ "action": action, "kind": kind }),
+                auth.client_ip.as_deref(),
             )
             .await;
             tracing::warn!(%id, kind, action, %target_user, "owner 代理操作を実行(最後の砦)");

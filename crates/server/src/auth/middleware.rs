@@ -31,6 +31,17 @@ pub async fn require_auth(
     mut req: Request,
     next: Next,
 ) -> AppResult<Response> {
+    // 実 client IP。CF Tunnel が必ず付ける `CF-Connecting-IP` を読む。両経路(Bearer / cookie)
+    // とも監査に残すので最初に一度だけ。dev/直アクセスは None。
+    // **信頼前提**:server は loopback(`127.0.0.1:9090`)のみ listen し入口は cloudflared だけ =
+    // クライアントはこのヘッダを偽装して届かせられない。`TSUBOMI_BIND_ADDR` を `0.0.0.0` に開けると
+    // 直接接続で偽装可能になる(その構成では前段の信頼境界が別途要る)。
+    let client_ip = req
+        .headers()
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
     if let Some(value) = req.headers().get(AUTHORIZATION) {
         let header = value.to_str().map_err(|_| AppError::Unauthorized)?;
         let plaintext = tokens::parse_bearer(header).ok_or(AppError::Unauthorized)?;
@@ -50,6 +61,7 @@ pub async fn require_auth(
             },
             // viewer は web/session 専用 — Bearer 経路では grant を持たない。
             is_viewer: false,
+            client_ip,
         });
         return Ok(next.run(req).await);
     }
@@ -81,6 +93,7 @@ pub async fn require_auth(
         role,
         source: AuthSource::Session,
         is_viewer,
+        client_ip,
     });
 
     Ok(next.run(req).await)

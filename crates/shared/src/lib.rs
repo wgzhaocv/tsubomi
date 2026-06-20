@@ -607,6 +607,8 @@ pub struct AuditEntryDto {
     pub target_resource: Option<Uuid>,
     /// 付帯情報(非機密の jsonb)。
     pub detail: Option<serde_json::Value>,
+    /// 操作元の client IP(`CF-Connecting-IP`)。background / dev / 旧行は null。
+    pub client_ip: Option<String>,
 }
 
 // ============ ガバナンス:共有パスワード viewer(M4 S5、web 専用)============

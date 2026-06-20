@@ -146,6 +146,7 @@ async fn recover_interrupted(state: &AppState) {
                 "service.reconcile",
                 id,
                 json!({ "reason": "interrupted_deploy", "action": "kept_running" }),
+                None,
             )
             .await;
             tracing::info!(%id, "reconcile: 中断デプロイ — 旧版を維持し孤児新コンテナを掃除");
@@ -255,6 +256,7 @@ async fn converge_running(state: &AppState) {
                 "service.reconcile",
                 id,
                 json!({ "reason": "container_missing" }),
+                None,
             )
             .await;
             // ロックは持たずに redeploy(run_digest が内部で deploy_lock を取る — 二重取得回避)。
@@ -301,6 +303,7 @@ async fn converge_running(state: &AppState) {
                     "service.reconcile",
                     id,
                     json!({ "reason": "route_drift", "backend": expected }),
+                    None,
                 )
                 .await;
                 tracing::info!(%id, backend = %expected, "reconcile: route drift を修正(backend を直近成功 deploy の容器へ)");

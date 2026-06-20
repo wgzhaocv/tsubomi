@@ -73,14 +73,16 @@ pub(crate) async fn audit(
     action: &str,
     target: Uuid,
     detail: serde_json::Value,
+    client_ip: Option<&str>,
 ) {
     let r = sqlx::query(
-        "INSERT INTO audit_log (actor_id, action, target_resource, detail) VALUES ($1,$2,$3,$4)",
+        "INSERT INTO audit_log (actor_id, action, target_resource, detail, client_ip) VALUES ($1,$2,$3,$4,$5)",
     )
     .bind(actor)
     .bind(action)
     .bind(target)
     .bind(detail)
+    .bind(client_ip)
     .execute(db)
     .await;
     if let Err(e) = r {
@@ -98,16 +100,18 @@ pub(crate) async fn audit_with_target(
     target_resource: Uuid,
     target_user: Uuid,
     detail: serde_json::Value,
+    client_ip: Option<&str>,
 ) {
     let r = sqlx::query(
-        "INSERT INTO audit_log (actor_id, action, target_resource, target_user, detail)
-         VALUES ($1,$2,$3,$4,$5)",
+        "INSERT INTO audit_log (actor_id, action, target_resource, target_user, detail, client_ip)
+         VALUES ($1,$2,$3,$4,$5,$6)",
     )
     .bind(actor)
     .bind(action)
     .bind(target_resource)
     .bind(target_user)
     .bind(detail)
+    .bind(client_ip)
     .execute(db)
     .await;
     if let Err(e) = r {
@@ -251,6 +255,7 @@ pub async fn create(
         "db.create",
         dto.id,
         json!({ "display_name": display_name, "pg_dbname": names.dbname }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok((StatusCode::CREATED, Json(dto)))
@@ -384,6 +389,7 @@ pub async fn rename(
         "db.rename",
         id,
         json!({ "display_name": display_name }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(Json(db_row_to_dto(row)))
@@ -453,7 +459,15 @@ pub async fn rotate(
         .await?;
     tx.commit().await?;
 
-    audit(&state.db, Some(auth.user_id), "db.rotate", id, json!({})).await;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.rotate",
+        id,
+        json!({}),
+        auth.client_ip.as_deref(),
+    )
+    .await;
     Ok(crate::respond::no_store(ConnectionUrlResp {
         url: build_url(&state, &role, &new_pw, &dbname),
     }))
@@ -586,6 +600,7 @@ pub async fn delete(
         "db.delete",
         id,
         json!({ "pg_dbname": dbname }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)

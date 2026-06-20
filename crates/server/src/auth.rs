@@ -47,6 +47,9 @@ pub struct AuthCtx {
     /// `admin::require_viewer_web` の入力。viewer は web/session 専用なので
     /// Bearer 経路では常に false。(design v2 §7「見るは共有密码」)
     pub is_viewer: bool,
+    /// このリクエストの実 client IP(`CF-Connecting-IP` ヘッダ。CF Tunnel が必ず付け、入口は
+    /// tunnel のみ = 偽装不可で可信)。監査に残す。ヘッダ不在(dev / 直アクセス)は None。
+    pub client_ip: Option<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -34,6 +34,7 @@ type Row = (
     Option<String>,
     Option<Uuid>,
     Option<serde_json::Value>,
+    Option<String>,
 );
 
 /// `GET /api/admin/audit?cursor=&limit=&action=`:監査ログ(新しい順)。owner(web)のみ。
@@ -50,7 +51,7 @@ pub async fn list(
         "SELECT a.id, a.created_at, a.action,
                 COALESCE(actor.name, actor.email),
                 COALESCE(tu.name, tu.email),
-                a.target_resource, a.detail
+                a.target_resource, a.detail, a.client_ip
            FROM audit_log a
            LEFT JOIN users actor ON actor.id = a.actor_id
            LEFT JOIN users tu    ON tu.id    = a.target_user
@@ -68,7 +69,16 @@ pub async fn list(
     let items = rows
         .into_iter()
         .map(
-            |(id, created_at, action, actor_name, target_user_name, target_resource, detail)| {
+            |(
+                id,
+                created_at,
+                action,
+                actor_name,
+                target_user_name,
+                target_resource,
+                detail,
+                client_ip,
+            )| {
                 AuditEntryDto {
                     id,
                     created_at,
@@ -77,6 +87,7 @@ pub async fn list(
                     target_user_name,
                     target_resource,
                     detail,
+                    client_ip,
                 }
             },
         )

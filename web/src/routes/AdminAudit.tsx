@@ -25,9 +25,9 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "disk.", label: "ディスク警告" },
 ];
 
-// ヘッダと各行で共有するグリッド列(時刻 / アクション / 操作者 / 対象ユーザ / 詳細)。
+// ヘッダと各行で共有するグリッド列(時刻 / アクション / 操作者 / 対象ユーザ / IP / 詳細)。
 const COLS =
-  "grid grid-cols-[150px_minmax(140px,1fr)_130px_130px_minmax(180px,2fr)] items-center gap-4 px-4";
+  "grid grid-cols-[150px_minmax(140px,1fr)_120px_120px_120px_minmax(160px,2fr)] items-center gap-4 px-4";
 // 仮想化のための一定行高(px)。詳細を 1 行省略にして高さを揃える。
 const ROW_HEIGHT = 52;
 
@@ -113,6 +113,7 @@ export default function AdminAudit() {
                 <div>アクション</div>
                 <div>操作者</div>
                 <div>対象ユーザ</div>
+                <div>IP</div>
                 <div>詳細</div>
               </div>
 
@@ -130,6 +131,7 @@ export default function AdminAudit() {
                         <Skeleton className="h-4 w-24" />
                         <Skeleton className="h-4 w-20" />
                         <Skeleton className="h-4 w-20" />
+                        <Skeleton className="h-4 w-24" />
                         <Skeleton className="h-4 w-full" />
                       </div>
                     ))}
@@ -166,6 +168,12 @@ export default function AdminAudit() {
                           </div>
                           <div className="truncate font-medium text-foreground">
                             {e.target_user_name ?? <span className="text-muted-foreground">—</span>}
+                          </div>
+                          <div
+                            className="truncate font-mono text-xs text-muted-foreground"
+                            title={e.client_ip ?? undefined}
+                          >
+                            {e.client_ip ?? <span className="text-muted-foreground">—</span>}
                           </div>
                           <div
                             className="truncate font-mono text-xs text-muted-foreground"

@@ -133,6 +133,8 @@ export type AuditEntry = {
   target_user_name: string | null;
   target_resource: string | null;
   detail: unknown;
+  /** 操作元の client IP(CF-Connecting-IP)。background / dev / 旧行は null。 */
+  client_ip: string | null;
 };
 
 const AUDIT_PAGE = 50;

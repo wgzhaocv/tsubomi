@@ -139,6 +139,7 @@ async fn check_disk(state: &AppState) {
                     "disk.alert",
                     Uuid::nil(),
                     json!({ "used_pct": pct, "level": level }),
+                    None,
                 )
                 .await;
                 tracing::warn!(pct, level, "ディスク水位警告 — owner に通知");
@@ -235,6 +236,7 @@ async fn sweep_trash(state: &AppState) {
                     "trash.purge.auto",
                     id,
                     json!({ "kind": kind }),
+                    None,
                 )
                 .await;
             }

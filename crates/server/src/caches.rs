@@ -114,6 +114,7 @@ pub async fn create(
         "cache.create",
         dto.id,
         json!({ "display_name": display_name, "namespace": name }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok((StatusCode::CREATED, Json(dto)))
@@ -272,6 +273,7 @@ pub async fn rename(
         "cache.rename",
         id,
         json!({ "display_name": display_name }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(Json(row_to_dto(row)))
@@ -319,7 +321,15 @@ pub async fn rotate(
     // 2. valkey に新パスを適用(失敗しても周期収束が DB から前向きに貼り直す)。
     valkey::set_user(&state.valkey, &acl_user, &namespace, &new_pw).await?;
 
-    audit(&state.db, Some(auth.user_id), "cache.rotate", id, json!({})).await;
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "cache.rotate",
+        id,
+        json!({}),
+        auth.client_ip.as_deref(),
+    )
+    .await;
     Ok(crate::respond::no_store(ConnectionUrlResp {
         url: build_url(&state, &acl_user, &new_pw),
     }))
@@ -349,6 +359,7 @@ pub async fn delete(
         "cache.delete",
         id,
         json!({ "namespace": namespace }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)

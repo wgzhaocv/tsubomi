@@ -142,6 +142,7 @@ pub async fn create(
         "volume.create",
         dto.id,
         json!({ "display_name": display_name, "host_path": host_path.to_string_lossy() }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok((StatusCode::CREATED, Json(dto)))
@@ -328,6 +329,7 @@ pub async fn rename(
         "volume.rename",
         id,
         json!({ "display_name": display_name }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(Json(vol_row_to_dto(row)))
@@ -348,6 +350,7 @@ pub async fn delete(
         "volume.delete",
         id,
         json!({ "host_path": host_path }),
+        auth.client_ip.as_deref(),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)

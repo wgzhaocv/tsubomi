@@ -133,7 +133,7 @@ pub async fn add(
     .await?;
     tx.commit().await?;
 
-    audit_owner(&state, auth.user_id, "owner.add", &email).await;
+    audit_owner(&state, auth.user_id, "owner.add", &email, auth.client_ip.as_deref()).await;
     tracing::info!(actor = %auth.user_id, %email, "owner を追加");
     list_json(&state, auth.user_id).await
 }
@@ -174,7 +174,7 @@ pub async fn remove(
         .await?;
     tx.commit().await?;
 
-    audit_owner(&state, auth.user_id, "owner.remove", &email).await;
+    audit_owner(&state, auth.user_id, "owner.remove", &email, auth.client_ip.as_deref()).await;
     // 通知は commit 後(メールは巻き戻せない)。best-effort。
     let subject = "[tsubomi] 管理者権限が解除されました";
     let text = "あなたの tsubomi の管理者権限が解除されました。\n\
@@ -249,7 +249,7 @@ async fn write_roster(tx: &mut sqlx::PgConnection, list: &[String]) -> AppResult
 }
 
 /// owner.add / owner.remove の監査。対象 email に users 行があれば target_user を埋める。
-async fn audit_owner(state: &AppState, actor: Uuid, action: &str, email: &str) {
+async fn audit_owner(state: &AppState, actor: Uuid, action: &str, email: &str, client_ip: Option<&str>) {
     let target = sqlx::query_scalar::<_, Uuid>("SELECT id FROM users WHERE lower(email) = $1")
         .bind(email)
         .fetch_optional(&state.db)
@@ -258,8 +258,10 @@ async fn audit_owner(state: &AppState, actor: Uuid, action: &str, email: &str) {
         .flatten();
     let detail = json!({ "email": email });
     match target {
-        Some(uid) => audit_with_target(&state.db, actor, action, Uuid::nil(), uid, detail).await,
-        None => audit(&state.db, Some(actor), action, Uuid::nil(), detail).await,
+        Some(uid) => {
+            audit_with_target(&state.db, actor, action, Uuid::nil(), uid, detail, client_ip).await
+        }
+        None => audit(&state.db, Some(actor), action, Uuid::nil(), detail, client_ip).await,
     }
 }
 
