@@ -11,6 +11,15 @@ export type Database = {
   anon_seq: number;
   created_at: string;
   rotated_at: string | null;
+  conn_limit: number;
+};
+
+// 接続枠の上限 + 実時の使用量(/capacity)。「接続が満杯に近いか」の可視化用。
+export type DatabaseCapacity = {
+  conn_limit: number;
+  human_connections: number;
+  app_connections: number;
+  pool_mode: string;
 };
 
 // 1 文ぶんの結果。SELECT 系は columns/rows、それ以外は columns 空 + rows_affected。
@@ -99,6 +108,21 @@ export function useRenameDatabase(id: string) {
       return (await res.json()) as Database;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: dbKeys.all }),
+  });
+}
+
+// 接続枠の上限 + 実時の使用量。詳細を開いている間は定期的に取り直して X/N を更新する。
+export function useDatabaseCapacity(id: string) {
+  return useQuery({
+    queryKey: [...dbKeys.detail(id), "capacity"],
+    queryFn: async (): Promise<DatabaseCapacity> => {
+      const res = await fetch(`/api/databases/${id}/capacity`);
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as DatabaseCapacity;
+    },
+    // 詳細を開いている間だけ定期更新(TanStack 既定で失焦時は止まる)。実時用量は
+    // 秒単位の精度は要らないので 30s に(共有 ARM ホストの pg_stat_activity 負荷を抑える)。
+    refetchInterval: 30000,
   });
 }
 

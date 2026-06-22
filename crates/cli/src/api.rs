@@ -3,7 +3,8 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tsubomi_shared::{
     CacheDetailDto, CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq,
-    CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseDto,
+    CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseCapacityDto,
+    DatabaseDto,
     DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto,
     VolumeDto,
@@ -152,6 +153,22 @@ pub async fn db_url(
     .await?;
     let r: ConnectionUrlResp = resp.json().await.context("failed to parse url response")?;
     Ok(r.url)
+}
+
+pub async fn db_capacity(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<DatabaseCapacityDto> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/databases/{id}/capacity"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse capacity response")
 }
 
 pub async fn db_rotate(

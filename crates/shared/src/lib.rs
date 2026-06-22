@@ -149,6 +149,29 @@ pub struct DatabaseDto {
     /// human role の最後の rotate 時刻。これより前にコピーした文字列は失効済み。
     #[serde(default)]
     pub rotated_at: Option<DateTime<Utc>>,
+    /// この DB の 1 ロールあたりの最大接続数(human role の CONNECTION LIMIT)。
+    /// この欄が無い旧サーバ応答との後方互換のため既定値を持つ。旧サーバ時代の DB は
+    /// 旧上限 20 なので、フォールバックは 20(新規 DB の既定 100 とは別概念)。
+    #[serde(default = "default_conn_limit")]
+    pub conn_limit: i32,
+}
+
+fn default_conn_limit() -> i32 {
+    20
+}
+
+/// `GET /api/databases/:id/capacity` のレスポンス。接続枠の上限 + 実時の使用量。
+/// 「合法接続で枠を食い潰さないか」をユーザ/AI が判断するための可視化(web 詳細 / `tbm db info`)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseCapacityDto {
+    /// 1 ロールあたりの接続上限(CONNECTION LIMIT)。
+    pub conn_limit: i32,
+    /// human role(公開接続文字列)が今握っている接続数。
+    pub human_connections: i32,
+    /// app role(service 注入)が今握っている接続数。
+    pub app_connections: i32,
+    /// pgbouncer のプール方式(説明用)。例: "transaction"。
+    pub pool_mode: String,
 }
 
 /// `POST /api/databases` のリクエストボディ。

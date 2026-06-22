@@ -20,7 +20,8 @@ use futures_util::StreamExt;
 use serde_json::json;
 use sqlx::{Column, Connection, Executor, PgPool, Row, SqlSafeStr};
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, DatabaseDto, QueryReq, QueryResp, QueryResultSet,
+    ConnectionUrlResp, CreateDatabaseReq, DatabaseCapacityDto, DatabaseDto, QueryReq, QueryResp,
+    QueryResultSet,
     RenameDatabaseReq, ResourceDto,
 };
 use uuid::Uuid;
@@ -28,9 +29,20 @@ use uuid::Uuid;
 const MAX_NAME_LEN: usize = 64;
 /// web SQL が返す最大行数(超過は truncated=true で切り詰め)。
 const MAX_QUERY_ROWS: usize = 1000;
+/// 1 ロールあたりの既定接続上限。DB 列 `database_roles.conn_limit` と Postgres 役割の
+/// CONNECTION LIMIT の単一真源(本轮は固定。owner 調整は後相)。利用者は少数想定なので
+/// 偶の重利用を縛らない様あえて高め(噪声邻居は pgbouncer の max_user_connections + idle 超時で抑える)。
+const DEFAULT_CONN_LIMIT: i32 = 100;
 
-/// `list` / `get_one` の行(id, display_name, anon_seq, created_at, rotated_at)。
-type DbRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>);
+/// `list` / `get_one` の行(id, display_name, anon_seq, created_at, rotated_at, conn_limit)。
+type DbRow = (
+    Uuid,
+    String,
+    i32,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    i32,
+);
 /// `list_resources` の行(+ kind, deleted_at)。
 type ResourceRow = (
     Uuid,
@@ -43,13 +55,16 @@ type ResourceRow = (
 
 /// DbRow → DatabaseDto(list と get_one が共有)。DatabaseDto も DbRow も外部型なので
 /// From は孤児規則で書けず、自由関数にする。
-fn db_row_to_dto((id, display_name, anon_seq, created_at, rotated_at): DbRow) -> DatabaseDto {
+fn db_row_to_dto(
+    (id, display_name, anon_seq, created_at, rotated_at, conn_limit): DbRow,
+) -> DatabaseDto {
     DatabaseDto {
         id,
         display_name,
         anon_seq,
         created_at,
         rotated_at,
+        conn_limit,
     }
 }
 
@@ -58,6 +73,7 @@ pub fn routes() -> Router<AppState> {
         .route("/resources", get(list_resources))
         .route("/databases", get(list).post(create))
         .route("/databases/{id}", get(get_one).patch(rename).delete(delete))
+        .route("/databases/{id}/capacity", get(capacity))
         .route("/databases/{id}/url", get(url))
         .route("/databases/{id}/rotate", post(rotate))
         .route("/databases/{id}/query", post(query))
@@ -220,6 +236,7 @@ pub async fn create(
         &names,
         &app_pw,
         &human_pw,
+        DEFAULT_CONN_LIMIT,
     )
     .await
     {
@@ -312,13 +329,14 @@ async fn insert_rows(
         ("human", &names.human, human_enc),
     ] {
         sqlx::query(
-            "INSERT INTO database_roles (resource_id, role_kind, pg_role, password_enc)
-                  VALUES ($1, $2, $3, $4)",
+            "INSERT INTO database_roles (resource_id, role_kind, pg_role, password_enc, conn_limit)
+                  VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(id)
         .bind(kind)
         .bind(role)
         .bind(enc)
+        .bind(DEFAULT_CONN_LIMIT)
         .execute(&mut *tx)
         .await?;
     }
@@ -330,6 +348,7 @@ async fn insert_rows(
         anon_seq,
         created_at,
         rotated_at: None,
+        conn_limit: DEFAULT_CONN_LIMIT,
     })
 }
 
@@ -339,9 +358,11 @@ pub async fn list(
     State(state): State<AppState>,
 ) -> AppResult<Json<Vec<DatabaseDto>>> {
     let rows: Vec<DbRow> = sqlx::query_as(
-        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at,
+                COALESCE(ro.conn_limit, 20)
            FROM resources r
            JOIN database_details d ON d.resource_id = r.id
+           LEFT JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'human'
           WHERE r.user_id = $1 AND r.kind = 'database' AND r.deleted_at IS NULL
           ORDER BY r.anon_seq",
     )
@@ -365,10 +386,11 @@ pub async fn rename(
     // 所有者の自分の DB のみ更新。RETURNING で更新後の行をそのまま DTO 化する。
     let row: Option<DbRow> = sqlx::query_as(
         "UPDATE resources r SET display_name = $1
-           FROM database_details d
+           FROM database_details d, database_roles ro
           WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'database' AND r.deleted_at IS NULL
             AND d.resource_id = r.id
-      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at",
+            AND ro.resource_id = r.id AND ro.role_kind = 'human'
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, ro.conn_limit",
     )
     .bind(&display_name)
     .bind(id)
@@ -402,9 +424,11 @@ pub async fn get_one(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<DatabaseDto>> {
     let row: Option<DbRow> = sqlx::query_as(
-        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at,
+                COALESCE(ro.conn_limit, 20)
            FROM resources r
            JOIN database_details d ON d.resource_id = r.id
+           LEFT JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'human'
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
     )
     .bind(id)
@@ -414,6 +438,52 @@ pub async fn get_one(
 
     let row = row.ok_or(AppError::NotFound)?;
     Ok(Json(db_row_to_dto(row)))
+}
+
+/// `GET /api/databases/:id/capacity`:接続枠の上限 + 実時の使用量(web 詳細 / `tbm db info` 用)。
+/// 所有者の自 DB のみ。実時は tenant の `pg_stat_activity` を usename(=ログイン役割 app/human)で数える
+/// (`SET ROLE owner` は `usename` を変えないので計数は正しい)。
+pub async fn capacity(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<DatabaseCapacityDto>> {
+    // 所有権チェック + app/human の役割名 + human の conn_limit。
+    let row: Option<(String, String, i32)> = sqlx::query_as(
+        "SELECT a.pg_role, h.pg_role, h.conn_limit
+           FROM resources r
+           JOIN database_roles a ON a.resource_id = r.id AND a.role_kind = 'app'
+           JOIN database_roles h ON h.resource_id = r.id AND h.role_kind = 'human'
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (app_role, human_role, conn_limit) = row.ok_or(AppError::NotFound)?;
+
+    // human/app の実時接続数を 1 クエリで(FILTER で同時集計、tenant_admin 往復 1 回)。
+    // 引けなければ警告して 0 扱い(上限表示は活かしつつ、無声で隠さない)。
+    let (human_connections, app_connections): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE usename::text = $1),
+                count(*) FILTER (WHERE usename::text = $2)
+           FROM pg_stat_activity",
+    )
+    .bind(&human_role)
+    .bind(&app_role)
+    .fetch_one(&state.tenant_admin)
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = ?e, "capacity: pg_stat_activity の計数に失敗(0 扱い)");
+        (0, 0)
+    });
+
+    Ok(Json(DatabaseCapacityDto {
+        conn_limit,
+        human_connections: human_connections as i32,
+        app_connections: app_connections as i32,
+        pool_mode: "transaction".into(),
+    }))
 }
 
 /// `GET /api/databases/:id/url`:外部(human)接続文字列。**パスワードそのもの**。

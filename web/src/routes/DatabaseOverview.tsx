@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/modal";
 import { Stat } from "@/components/ui/stat";
 import { useAuthInfoQuery } from "@/lib/auth";
 import {
+  useDatabaseCapacity,
   useDatabases,
   useDeleteDatabase,
   useRevealUrl,
@@ -55,6 +56,14 @@ export default function DatabaseOverview() {
             {db?.rotated_at ? new Date(db.rotated_at).toLocaleDateString("ja-JP") : "—"}
           </Stat>
         </dl>
+      </section>
+
+      <Divider type="line-brown" />
+
+      {/* ===== 接続容量 ===== */}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-lg font-bold text-foreground">接続容量</h2>
+        <CapacitySection />
       </section>
 
       <Divider type="line-brown" />
@@ -139,6 +148,28 @@ export default function DatabaseOverview() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// 接続容量カード:1 ロールあたりの上限 + 実時の使用量(human / app)。「接続を食い潰して
+// いないか」を可視化する。実時用量は /capacity を定期取得(useDatabaseCapacity が 15s 毎)。
+function CapacitySection() {
+  const { id = "" } = useParams();
+  const { data: cap } = useDatabaseCapacity(id);
+  return (
+    <>
+      <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl border-2 border-[#e8e2d6] bg-[#e8e2d6] sm:grid-cols-3">
+        <Stat label="接続上限">{cap ? cap.conn_limit : "…"}</Stat>
+        <Stat label="現在アクティブ(human)">{cap ? cap.human_connections : "…"}</Stat>
+        <Stat label="現在アクティブ(app)">{cap ? cap.app_connections : "…"}</Stat>
+      </dl>
+      <p className="text-sm font-medium text-muted-foreground">
+        最大 {cap?.conn_limit ?? "…"} 本まで接続できます。コネクションプールの利用を推奨します
+        (リクエスト毎に新規接続せず、少数の長命接続を使い回す)。pgbouncer が{" "}
+        {cap?.pool_mode ?? "transaction"}{" "}
+        プールで多重化するため、「現在アクティブ」は今クエリを実行中の接続数で、上限よりかなり小さく保たれます。
+      </p>
+    </>
   );
 }
 

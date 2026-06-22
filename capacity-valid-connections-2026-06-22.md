@@ -4,6 +4,17 @@
 - **范围**：`db.tsubomi-app.com:6432` 这条 frp 隧道 + pgbouncer 的**并发承载能力**
 - **与扫描 DoS 的关系**：**不同的风险，不同的解法**。扫描洪流靠"边缘 SNI 闸门"挡；本文讲的是**合法连接本身**把容量占满的风险（含噪声邻居）。
 
+> **✅ 已实装（2026-06-23）**：
+> - **frpc/frps fd 上限 65535**（原 1024 = 第一瓶颈，SNI 闸门那轮已抬）。
+> - **pgbouncer 加固**（dev `infra/pgbouncer/pgbouncer.ini` + prod `compose.prod.yml` 内联）:
+>   `max_user_connections=100`(per-租户客户端上限,挡噪声邻居)、`idle_transaction_timeout=300`、
+>   `client_idle_timeout=3600`、`server_idle_timeout=600`(回收 idle/泄漏)。`default_pool_size` 仍 20。
+> - **按租户上限做成单一真源 + 可见**：`database_roles.conn_limit`(死列)接进 CREATE ROLE,默认 100
+>   (利用者少数 = 不卡偶发重用);既存库经迁移 + `ALTER ROLE` backfill 到 100。新端点
+>   `GET /api/databases/:id/capacity` 出实时用量,web 详情 + `tbm db info` 展示上限/现用量 + 池化提示。
+> - **未做(本轮外)**:owner 调整每库上限(owner 治理,web-only,后续);pgbouncer 客户端连接实时数
+>   (现展示的是后端 pg_stat_activity 计数 + 上限,口径已在 UI/CLI 注明)。
+
 ---
 
 ## 1. 先纠一个误解：frp 的 poolCount 不是并发上限

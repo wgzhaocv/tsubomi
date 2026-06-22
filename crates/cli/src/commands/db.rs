@@ -17,6 +17,11 @@ pub enum DbCmd {
     },
     /// 一覧
     List,
+    /// 接続枠の上限と現在の使用量を表示(接続が満杯に近いかの確認)
+    Info {
+        /// 対象データベースの表示名(`tbm db list` で確認)
+        name: String,
+    },
     /// 外部接続文字列を表示(= パスワードそのもの。git に commit しない / 共有しない)
     Url {
         /// 対象データベースの表示名(`tbm db list` で確認)
@@ -81,6 +86,24 @@ pub async fn run(
                 }
             }
         }
+        DbCmd::Info { name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let cap = api::db_capacity(&c, &server_url, &token, &id).await?;
+            if json {
+                // 共有 DTO(DatabaseCapacityDto)をそのまま:
+                // { conn_limit, human_connections, app_connections, pool_mode }。jq で拾える。
+                print_json(&cap)?;
+            } else {
+                println!("接続上限:   {}(1 ロールあたり)", cap.conn_limit);
+                println!(
+                    "現在の接続: human {} / app {}(pool={})",
+                    cap.human_connections, cap.app_connections, cap.pool_mode
+                );
+                println!(
+                    "💡 コネクションプール推奨:少数の長命接続を使い回す(リクエスト毎の新規接続は上限を圧迫)"
+                );
+            }
+        }
         DbCmd::Url { name } => {
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             let url = api::db_url(&c, &server_url, &token, &id).await?;
@@ -89,6 +112,9 @@ pub async fn run(
             } else {
                 // 警告は stderr、文字列は stdout(パイプで拾えるように)。
                 eprintln!("⚠ この文字列はパスワードそのものです。共有・commit しないこと。");
+                eprintln!(
+                    "💡 コネクションプール推奨:少数の長命接続を使い回す(上限・使用量は `tbm db info {name}`)。"
+                );
                 println!("{url}");
             }
         }

@@ -175,6 +175,7 @@ pub async fn create_database(
     names: &DbNames,
     app_pw: &str,
     human_pw: &str,
+    conn_limit: i32,
 ) -> AppResult<()> {
     check_idents(names)?;
     check_password(app_pw)?;
@@ -198,14 +199,14 @@ pub async fn create_database(
     exec(
         pool,
         format!(
-            "CREATE ROLE {app} LOGIN PASSWORD '{app_pw}' NOSUPERUSER NOCREATEDB INHERIT IN ROLE {owner} CONNECTION LIMIT 20"
+            "CREATE ROLE {app} LOGIN PASSWORD '{app_pw}' NOSUPERUSER NOCREATEDB INHERIT IN ROLE {owner} CONNECTION LIMIT {conn_limit}"
         ),
     )
     .await?;
     exec(
         pool,
         format!(
-            "CREATE ROLE {human} LOGIN PASSWORD '{human_pw}' NOSUPERUSER NOCREATEDB INHERIT IN ROLE {owner} CONNECTION LIMIT 20"
+            "CREATE ROLE {human} LOGIN PASSWORD '{human_pw}' NOSUPERUSER NOCREATEDB INHERIT IN ROLE {owner} CONNECTION LIMIT {conn_limit}"
         ),
     )
     .await?;
