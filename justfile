@@ -81,3 +81,12 @@ release-image:
 # 内容を変えたら crates/cli/Cargo.toml の version を上げてから実行(不可変リリース)。
 release-cli-publish:
     chmod +x scripts/release-cli.sh && scripts/release-cli.sh
+
+# 公網DB 辺縁 SNI 闸门(crates/sni-gate)を x86_64-linux に交叉編譯(配備せず確認だけ)。
+build-sni-gate:
+    PATH="$HOME/.cargo/bin:$PATH" cargo zigbuild --release -p tsubomi-sni-gate --target x86_64-unknown-linux-gnu
+
+# SNI 闸门を VPS(既定 proxy)へ build & deploy(二進制 + systemd unit、入替 & 再起動)。
+# 例: just ship-sni-gate  /  SNI_GATE_HOST=proxy just ship-sni-gate
+ship-sni-gate host="proxy":
+    chmod +x scripts/ship-sni-gate.sh && scripts/ship-sni-gate.sh {{host}}

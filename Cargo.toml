@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/server", "crates/cli", "crates/shared"]
+members = ["crates/server", "crates/cli", "crates/shared", "crates/sni-gate"]
 
 [profile.release]
 lto = "thin"

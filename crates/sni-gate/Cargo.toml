@@ -1,0 +1,13 @@
+[package]
+name = "tsubomi-sni-gate"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tsubomi-sni-gate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }

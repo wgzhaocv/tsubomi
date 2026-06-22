@@ -1,0 +1,41 @@
+# tsubomi-sni-gate — 公網数据库(frp 中継)の VPS 辺縁 SNI 准入闸门。
+# 公網 :443 を受け、SNI == db.tsubomi-app.com の Postgres 接続だけ localhost の
+# frps(127.0.0.1:6432)へ通す。扫描洪流を frp 資源を消費する前に弾く。
+# 配備は `just ship-sni-gate`(scripts/ship-sni-gate.sh)。設定はこの ExecStart の引数。
+[Unit]
+Description=tsubomi SNI gate (Postgres-over-TLS SNI 准入闸门, frps 前置)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tsubomi-sni-gate --listen 0.0.0.0:443 --backend 127.0.0.1:6432 --sni db.tsubomi-app.com
+Restart=on-failure
+RestartSec=2
+
+# 特権ポート 443 を非 root で bind する最小権限(専用の揮発ユーザ + 1 capability のみ)。
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+
+# fd 上限。各接続 ~2 fd(client + backend)。事故時の 1024 が原因の一つだったので明示。
+LimitNOFILE=65535
+
+# ハードニング(TCP 中継しかしないので可能な限り締める)。
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
