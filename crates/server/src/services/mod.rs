@@ -33,7 +33,7 @@ use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ExecReq,
-    ExecResult, InjectionDto, LogsResp, RollbackReq, ServiceDto, SetEnvReq,
+    ExecResult, InjectionDto, LogsResp, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp,
 };
 use uuid::Uuid;
 
@@ -673,12 +673,13 @@ pub async fn list_env(
 }
 
 /// `POST /api/services/:id/env`:静的 env を 1 件 upsert(値は暗号化)。反映には再デプロイ。
+/// 値が公開 DB ホストを指す場合は非破壊の注意喚起(注入へ誘導)を `warning` に載せる(§7.2 footgun)。
 pub async fn set_env(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<SetEnvReq>,
-) -> AppResult<StatusCode> {
+) -> AppResult<Json<SetEnvResp>> {
     ensure_owned(&state, auth.user_id, id).await?;
     validate_env_key(&req.key)?;
     let value_enc = state.crypto.encrypt(&req.value)?;
@@ -691,7 +692,49 @@ pub async fn set_env(
     .bind(&value_enc)
     .execute(&state.db)
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    let warning = public_db_env_warning(&state, id, &req.key, &req.value).await;
+    Ok(Json(SetEnvResp { warning }))
+}
+
+/// 静的 env の値が公開 DB ホストを指していれば注意文を返す(非破壊の footgun 検知)。
+/// コンテナは edge 網内なので DB は **注入(内部接続文字列)**で繋ぐべき:公開文字列を静的 env に
+/// 置くと外部経路を一周(遅延)+ human role で `tbm db rotate` 後に黙って切れる。公開 DB 機能が
+/// 無効な部署では公開入口が無い = footgun も無いので黙る。値は秘密なので含めず、KEY とホストだけ出す。
+async fn public_db_env_warning(
+    state: &AppState,
+    service_id: Uuid,
+    key: &str,
+    value: &str,
+) -> Option<String> {
+    let host = state.config.db_public_host.as_str();
+    if !value_points_at_public_db(state.config.db_public_enabled, host, value) {
+        return None;
+    }
+    // 誘導コマンドに実 service 名を埋める(引けなければ汎用プレースホルダ)。
+    let svc_name: String = sqlx::query_as("SELECT display_name FROM resources WHERE id = $1")
+        .bind(service_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .map(|(n,): (String,)| n)
+        .unwrap_or_else(|| "<service名>".to_string());
+    Some(format!(
+        "env '{key}' は公開 DB ホスト({host})を指しています。コンテナはアプリ内から内部接続文字列を\
+         使うべきです — 静的 env ではなく注入を使ってください:`tbm inject <db名> --into \"{svc_name}\"`\
+         (低遅延・rotate で切れない)。公開文字列を静的 env に置くと外部経路に出て、`tbm db rotate` で\
+         黙って切れます。"
+    ))
+}
+
+/// 値が公開 DB の接続文字列を指すか(純粋判定)。公開機能 off / ホスト空 / 不一致なら false。
+/// Postgres URI 形(`postgres(ql)://…`)に限定して誤検知を抑える(dev の `127.0.0.1` ホストでも、
+/// `http://127.0.0.1` 等の無関係な値を拾わない)。libpq keyword 形は稀なので非破壊機能として許容。
+fn value_points_at_public_db(enabled: bool, host: &str, value: &str) -> bool {
+    enabled
+        && !host.is_empty()
+        && (value.starts_with("postgres://") || value.starts_with("postgresql://"))
+        && value.contains(host)
 }
 
 /// `DELETE /api/services/:id/env/:key`:静的 env を 1 件削除。
@@ -711,9 +754,10 @@ pub async fn unset_env(
 
 /// env 変数名の検査(空 / `=` / NUL を弾く)。
 fn validate_env_key(key: &str) -> AppResult<()> {
-    if key.is_empty() || key.contains('=') || key.contains('\0') {
+    // 制御文字(NUL 含む)を拒否:KEY は警告文・ログに出るので ANSI エスケープ等で出力を汚させない。
+    if key.is_empty() || key.contains('=') || key.chars().any(|c| c.is_control()) {
         return Err(AppError::BadRequest(
-            "env のキーが不正です(空 / '=' / NUL は不可)".into(),
+            "env のキーが不正です(空 / '=' / 制御文字は不可)".into(),
         ));
     }
     Ok(())
@@ -990,5 +1034,38 @@ mod tests {
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
             );
         }
+    }
+
+    #[test]
+    fn public_db_value_detection() {
+        let host = "db.tsubomi-app.com";
+        let pub_url = "postgres://u:p@db.tsubomi-app.com:6432/app?sslmode=verify-full";
+        let pub_url_alt = "postgresql://u:p@db.tsubomi-app.com:6432/app";
+        // 公開機能 on + Postgres URI + 値がホストを含む → 検知(postgres:// と postgresql:// 両形)。
+        assert!(value_points_at_public_db(true, host, pub_url));
+        assert!(value_points_at_public_db(true, host, pub_url_alt));
+        // 公開機能 off(CF Tunnel 等、公開入口なし)→ footgun なし、黙る。
+        assert!(!value_points_at_public_db(false, host, pub_url));
+        // 内部入口は別ホスト = 注入の正しい値 → 検知しない。
+        let internal = "postgres://u:p@tsubomi-pgbouncer:6432/app?sslmode=require";
+        assert!(!value_points_at_public_db(true, host, internal));
+        // ホスト未設定(空)→ 何にもマッチさせない。
+        assert!(!value_points_at_public_db(true, "", pub_url));
+        // Postgres URI でない値はホストを含んでも拾わない(dev 127.0.0.1 の誤検知抑制)。
+        assert!(!value_points_at_public_db(
+            true,
+            "127.0.0.1",
+            "http://127.0.0.1:3000"
+        ));
+    }
+
+    #[test]
+    fn env_key_rejects_control_chars() {
+        assert!(validate_env_key("DATABASE_URL").is_ok());
+        assert!(validate_env_key("").is_err()); // 空
+        assert!(validate_env_key("A=B").is_err()); // '='
+        assert!(validate_env_key("A\0B").is_err()); // NUL
+        assert!(validate_env_key("A\x1b[31mB").is_err()); // ANSI エスケープ
+        assert!(validate_env_key("A\nB").is_err()); // 改行
     }
 }

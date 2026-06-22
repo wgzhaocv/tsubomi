@@ -6,8 +6,8 @@ use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseCapacityDto,
     DatabaseDto,
     DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
-    MoveReq, QueryReq, QueryResp, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, TrashItemDto,
-    VolumeDto,
+    MoveReq, QueryReq, QueryResp, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp,
+    TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -804,6 +804,7 @@ pub async fn env_keys(
     resp.json().await.context("failed to parse env response")
 }
 
+/// env を 1 件設定。サーバが注意喚起(値が公開 DB ホストを指す等)を返せばその文を `Some` で返す。
 pub async fn env_set(
     c: &reqwest::Client,
     server_url: &str,
@@ -811,8 +812,8 @@ pub async fn env_set(
     service_id: &str,
     key: &str,
     value: &str,
-) -> Result<()> {
-    send_ok(
+) -> Result<Option<String>> {
+    let resp = send_ok(
         c.post(format!("{server_url}/api/services/{service_id}/env"))
             .bearer_auth(token)
             .json(&SetEnvReq {
@@ -821,7 +822,15 @@ pub async fn env_set(
             }),
     )
     .await?;
-    Ok(())
+    let body = resp.bytes().await.unwrap_or_default();
+    Ok(parse_set_env_warning(&body))
+}
+
+/// env set 応答から warning を取り出す。空 body(旧サーバの 204)や非 JSON は None に倒す(前方互換)。
+fn parse_set_env_warning(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<SetEnvResp>(body)
+        .unwrap_or_default()
+        .warning
 }
 
 pub async fn env_unset(
@@ -871,4 +880,23 @@ pub async fn post_deploy_hook(
         },
     }
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_warning_parse_is_graceful() {
+        // 旧サーバの 204(空 body)/ 非 JSON は None に倒れる(前方互換)。
+        assert_eq!(parse_set_env_warning(b""), None);
+        assert_eq!(parse_set_env_warning(b"not json"), None);
+        // 警告なしの 200。
+        assert_eq!(parse_set_env_warning(b"{}"), None);
+        // 警告ありはそのまま取り出す(byte string は ASCII 限定なので .as_bytes() で渡す)。
+        assert_eq!(
+            parse_set_env_warning(r#"{"warning":"use inject"}"#.as_bytes()),
+            Some("use inject".to_string())
+        );
+    }
 }

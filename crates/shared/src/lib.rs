@@ -495,6 +495,14 @@ pub struct SetEnvReq {
     pub value: String,
 }
 
+/// `POST /api/services/:id/env` のレスポンス。`warning` は注意喚起がある場合だけ入る
+/// (例:値が公開 DB ホストを指す = 静的 env でなく注入を使うべき footgun)。値自体は秘密なので含めない。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetEnvResp {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// `GET /api/services/:id/logs` のレスポンス。コンテナの直近ログ(text)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsResp {

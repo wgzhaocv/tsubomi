@@ -50,20 +50,27 @@ pub async fn run(
         EnvCmd::Set { svc, pairs } => {
             let id = resolve_service_id(&c, &server_url, &token, &svc).await?;
             let mut keys = Vec::new();
+            let mut warnings = Vec::new();
             for pair in &pairs {
                 let (k, v) = pair
                     .split_once('=')
                     .ok_or_else(|| anyhow::anyhow!("'{pair}' は KEY=VALUE 形式ではありません"))?;
-                api::env_set(&c, &server_url, &token, &id, k, v).await?;
+                if let Some(w) = api::env_set(&c, &server_url, &token, &id, k, v).await? {
+                    warnings.push(w);
+                }
                 keys.push(k.to_string());
             }
             if json {
-                print_json(&json!({ "set": keys }))?;
+                // warnings は秘密でないので json にも載せる(AI が `.warnings` で分岐できる)。
+                print_json(&json!({ "set": keys, "warnings": warnings }))?;
             } else {
                 eprintln!(
                     "env を設定しました(反映には再デプロイが必要です):{}",
                     keys.join(", ")
                 );
+                for w in &warnings {
+                    eprintln!("⚠ {w}");
+                }
             }
         }
         EnvCmd::Unset { svc, keys } => {
