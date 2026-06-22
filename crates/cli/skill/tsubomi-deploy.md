@@ -60,7 +60,21 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 | cache | `tbm inject <cache名> --into <service名>` | `REDIS_URL` + `REDIS_KEY_PREFIX` |
 
 確認:`tbm service status <service名>` の `injections` がすべて `valid: true`。
-（env 名を変えたいときは `--as <NAME>`。cache は `<NAME>_KEY_PREFIX` も併せて入る。）
+
+**接続文字列は「env 名」で繋ぐ(値は環境ごとに解決:ローカル=公開 / 本番=内部)。**
+注入は **env 名にそのまま値を生成する**(内容マッチではない)。本番は起動時に**内部接続文字列**
+(app role・内部入口 `tsubomi-pgbouncer`・社外に出ない)を `DATABASE_URL` に入れる。開発機で使う
+**公開接続文字列**(`tbm db url`。human role・外部入口)とは **同じ env 名で繋ぐ** — コードは
+`process.env.DATABASE_URL` を**読むだけ**で、値はローカル=公開 / 本番=注入と別物。両者は別環境にしか
+存在しないので**衝突せず無縫に切り替わる**。これを成立させる 3 点:
+
+- **env 名を一致させる**:既定は `DATABASE_URL`。既存リポジトリは、コード / `.env.example` が読む名前を
+  確認し、違えば `--as <その名前>` で注入名を寄せる(`tbm inject <db> --into <svc> --as <NAME>`。cache は
+  `<NAME>_KEY_PREFIX` も併せて入る)。確認は `injections[].env_var` と `process.env.XXX` の突き合わせ。
+- **接続文字列をコードに直書きしない**(必ず env 名を読む)。直書きは env をすり抜け、本番でも公開経路に出る。
+- **公開文字列を本番に持ち込まない**:`.env` は `.gitignore` + `.dockerignore`(**イメージに焼かない**)、
+  `tbm service env set DATABASE_URL=<公開>` も**しない**。持ち込むと公開経路(外部入口)に出て、同一ホストの
+  DB に**インターネットを一周**(遅延)+ `tbm db rotate` で**黙って切れる**(注入の内部文字列はどちらも無い)。
 
 ### 3.1 `DATABASE_URL` の TLS は言語で扱いが違う(つまずきやすい)
 
