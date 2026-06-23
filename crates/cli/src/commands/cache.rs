@@ -17,6 +17,13 @@ pub enum CacheCmd {
     },
     /// 一覧
     List,
+    /// 表示名を変更(接続文字列・namespace は不変)
+    Rename {
+        /// 対象キャッシュの表示名(`tbm cache list` で確認)
+        name: String,
+        /// 新しい表示名
+        new_name: String,
+    },
     /// 状態(namespace / REDIS_KEY_PREFIX / キー数 / 最終 rotate)
     Status {
         /// 対象キャッシュの表示名(`tbm cache list` で確認)
@@ -75,6 +82,15 @@ pub async fn run(
                 for cache in caches {
                     println!("cache{:<3} {}", cache.anon_seq, cache.display_name);
                 }
+            }
+        }
+        CacheCmd::Rename { name, new_name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let d = api::cache_rename(&c, &server_url, &token, &id, &new_name).await?;
+            if json {
+                print_json(&d)?;
+            } else {
+                println!("名前を変更しました:{}", d.display_name);
             }
         }
         CacheCmd::Status { name } => {

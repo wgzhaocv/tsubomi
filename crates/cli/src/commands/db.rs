@@ -17,6 +17,13 @@ pub enum DbCmd {
     },
     /// 一覧
     List,
+    /// 表示名を変更(接続文字列・dbname は不変)
+    Rename {
+        /// 対象データベースの表示名(`tbm db list` で確認)
+        name: String,
+        /// 新しい表示名
+        new_name: String,
+    },
     /// 接続枠の上限と現在の使用量を表示(接続が満杯に近いかの確認)
     Info {
         /// 対象データベースの表示名(`tbm db list` で確認)
@@ -84,6 +91,15 @@ pub async fn run(
                 for db in dbs {
                     println!("database{:<3} {}", db.anon_seq, db.display_name);
                 }
+            }
+        }
+        DbCmd::Rename { name, new_name } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            let db = api::db_rename(&c, &server_url, &token, &id, &new_name).await?;
+            if json {
+                print_json(&db)?;
+            } else {
+                println!("名前を変更しました:{}", db.display_name);
             }
         }
         DbCmd::Info { name } => {

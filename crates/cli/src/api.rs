@@ -6,8 +6,8 @@ use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseCapacityDto,
     DatabaseDto,
     DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
-    MoveReq, QueryReq, QueryResp, RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp,
-    TrashItemDto, VolumeDto,
+    MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameVolumeReq, RollbackReq,
+    ServiceDto, SetEnvReq, SetEnvResp, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -140,6 +140,24 @@ pub async fn db_create(
     resp.json().await.context("failed to parse create response")
 }
 
+pub async fn db_rename(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Result<DatabaseDto> {
+    let resp = send_ok(
+        c.patch(format!("{server_url}/api/databases/{id}"))
+            .bearer_auth(token)
+            .json(&RenameDatabaseReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse rename response")
+}
+
 pub async fn db_url(
     c: &reqwest::Client,
     server_url: &str,
@@ -246,6 +264,24 @@ pub async fn cache_create(
     )
     .await?;
     resp.json().await.context("failed to parse create response")
+}
+
+pub async fn cache_rename(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Result<CacheDto> {
+    let resp = send_ok(
+        c.patch(format!("{server_url}/api/caches/{id}"))
+            .bearer_auth(token)
+            .json(&RenameCacheReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse rename response")
 }
 
 pub async fn cache_delete(

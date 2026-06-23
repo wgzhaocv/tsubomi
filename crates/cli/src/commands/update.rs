@@ -88,11 +88,41 @@ pub async fn run(server_override: Option<String>) -> Result<()> {
     fs::create_dir(&extract_dir).context("failed to create extract dir")?;
     let new_binary = extract(&archive, &extract_dir)?;
 
+    // 入れ替え**前**に実行ファイルのパスを控える。self_replace はこのパス上の
+    // ファイルを新バイナリに置き換えるので、入れ替え後はここに新バイナリが居る
+    // (入れ替え後の current_exe() がサイドカーを指す Windows の曖昧さを避ける)。
+    let exe = std::env::current_exe().ok();
+
     // self_replace は実行中バイナリを原子的に入れ替える。新しいファイルは
     // 元のパスと(Unix では)パーミッションを引き継ぐ。
     self_replace::self_replace(&new_binary).context("failed to swap binary")?;
     println!("tbm updated to {}", info.version);
+
+    // 入れ替えた**新**バイナリで skill を再投影する。実行中プロセスは旧バイナリ
+    // (内嵌 skill も旧)なので、新バイナリを子プロセスとして呼んで update と同時に
+    // 最新 skill を agent ターゲットへ揃える(次回コマンドの self-heal を待たない)。
+    if let Some(exe) = exe {
+        refresh_skill_via_new_binary(&exe);
+    }
     Ok(())
+}
+
+/// 入れ替え後の新バイナリ自身に `tbm skill install`(強制再書き出し)をさせて、
+/// 最新 skill を投影する。skill 本文は二進制に焼き込まれているので、旧バイナリの
+/// in-process 呼出しでは旧 skill しか書けない — だから新バイナリを子プロセスで呼ぶ。
+/// best-effort:失敗しても update は成功扱い(欠け / 古いままでも次回コマンドの
+/// self-heal が拾う)。子プロセスの stdout(書き出し先パス)は飲み込み、結果だけ一言出す。
+fn refresh_skill_via_new_binary(exe: &Path) {
+    match Command::new(exe).args(["skill", "install"]).output() {
+        Ok(out) if out.status.success() => {
+            println!("デプロイ skill も最新に更新しました。");
+        }
+        _ => {
+            eprintln!(
+                "note: skill の更新は後回しになりました(次回 tbm 実行時に自動で揃います)。"
+            );
+        }
+    }
 }
 
 fn archive_name(url: &str) -> &str {

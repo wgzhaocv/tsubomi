@@ -44,12 +44,12 @@ enum Cmd {
         #[arg(long)]
         web: bool,
     },
-    /// データベース(作成 / 一覧 / 接続文字列 / rotate / 削除 / psql 接続)
+    /// データベース(作成 / 一覧 / 改名 / 接続文字列 / rotate / 削除 / psql 接続)
     Db {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
-    /// キャッシュ(valkey。作成 / 一覧 / 削除)
+    /// キャッシュ(valkey。作成 / 一覧 / 改名 / rotate / 削除)
     Cache {
         #[command(subcommand)]
         action: commands::cache::CacheCmd,
