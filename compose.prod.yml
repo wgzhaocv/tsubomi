@@ -27,6 +27,19 @@ services:
     image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     container_name: tsubomi-pg-platform
     restart: unless-stopped
+    # 16GB 共有機向けの控えめなチューニング(元数据小库)。shared_buffers は起動時固定予約なので
+    # 小さく抑え、キャッシュは弾力的な OS ページキャッシュに任せる(effective_cache_size はプランナ
+    # 提示=メモリ非占有)。max_connections は管制面プール(既定 20)+ 余裕。
+    command:
+      - postgres
+      - -c
+      - max_connections=150
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=8MB
     environment:
       POSTGRES_USER: tsubomi
       POSTGRES_PASSWORD: ${PG_PLATFORM_PASSWORD:?set PG_PLATFORM_PASSWORD in .env.production}
@@ -47,6 +60,27 @@ services:
     image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     container_name: tsubomi-pg-tenant
     restart: unless-stopped
+    # ユーザ DB の本命チューニング。shared_buffers は固定予約なので控えめ、キャッシュは OS 任せ、
+    # effective_cache_size はプランナ提示で索引寄りに(非占有)。NVMe 前提の cost。work_mem は
+    # ×接続×並行ソートで効くため保守的に(重い分析クエリは session 単位で都度上げる)。
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=6GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - max_wal_size=2GB
     environment:
       POSTGRES_USER: tsubomi_admin
       POSTGRES_PASSWORD: ${PG_TENANT_PASSWORD:?set PG_TENANT_PASSWORD in .env.production}
@@ -201,7 +235,7 @@ services:
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
-    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v28}
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v29}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host

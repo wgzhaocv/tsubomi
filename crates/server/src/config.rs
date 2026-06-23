@@ -11,6 +11,20 @@ pub struct Config {
     /// すべてここへフォールバックして配信する。
     pub web_dir: String,
     pub database_url: String,
+    /// 管制面プール(pg-platform)の最大接続数。`TSUBOMI_DB_MAX_CONN`、既定 20。
+    /// 全認証リクエストが「認証クエリ + ハンドラのクエリ」でここを取り合う。
+    /// **LAN 実測の結論:このプール幅はスループットの律速ではない** — 10→50 に広げても
+    /// /api/databases は ~2350 rps で頭打ちのまま(CPU + 毎リクエスト 3 往復の syscall/IPC が律速)。
+    /// なので既定 20 は「提速」ではなく、遅い query(web SQL の大スキャン等)が接続を握っても
+    /// 速い認証リクエストを待たせないための余裕。Postgres 側 `max_connections` 未満に保つこと。
+    pub db_max_conn: u32,
+    /// 管制面プールの最小保持接続数。`TSUBOMI_DB_MIN_CONN`、既定 5。常時保温して
+    /// 冷えたプールでの接続確立コストを消す。
+    pub db_min_conn: u32,
+    /// pg-tenant への admin(DDL)プールの最大接続数。`TSUBOMI_TENANT_ADMIN_MAX_CONN`、既定 10。
+    /// DDL は低頻度だが web SQL タブもここを通る。**注意:子網 CIDR の `TSUBOMI_TENANT_POOL`
+    /// とは無関係**(あちらは私網 subnet プール、こちらは DB コネクションプール)。
+    pub tenant_admin_max_conn: u32,
     pub google_client_id: String,
     pub google_client_secret: String,
     pub google_redirect_uri: String,
@@ -237,6 +251,25 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("invalid TSUBOMI_BIND_ADDR: {e}"))?;
         let web_dir = std::env::var("TSUBOMI_WEB_DIR").unwrap_or_else(|_| "web/dist".to_string());
         let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+        // DB 接続プール:実測ではプール幅はスループットの律速ではない(CPU/IPC 律速)。env で上書き可、
+        // 未設定なら本番でも安全な既定が効く(子網 CIDR の TSUBOMI_TENANT_POOL とは無関係)。
+        // max=0 はプール枯渇=全 query が acquire_timeout で失敗するので最低 1 に丸める。
+        // min は max を超えても無意味なので max で頭打ち(誤設定で起動を壊さない)。
+        let db_max_conn = std::env::var("TSUBOMI_DB_MAX_CONN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20)
+            .max(1);
+        let db_min_conn = std::env::var("TSUBOMI_DB_MIN_CONN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5)
+            .min(db_max_conn);
+        let tenant_admin_max_conn = std::env::var("TSUBOMI_TENANT_ADMIN_MAX_CONN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10)
+            .max(1);
         let google_client_id =
             std::env::var("GOOGLE_CLIENT_ID").context("GOOGLE_CLIENT_ID must be set")?;
         let google_client_secret =
@@ -443,6 +476,9 @@ impl Config {
             bind_addr,
             web_dir,
             database_url,
+            db_max_conn,
+            db_min_conn,
+            tenant_admin_max_conn,
             google_client_id,
             google_client_secret,
             google_redirect_uri,

@@ -51,7 +51,8 @@ impl AppState {
             PgConnectOptions::from_str(&config.database_url)?.application_name("tsubomi-server");
 
         let db = PgPoolOptions::new()
-            .max_connections(10)
+            .max_connections(config.db_max_conn)
+            .min_connections(config.db_min_conn)
             .acquire_timeout(Duration::from_secs(5))
             .connect_with(pg_opts)
             .await?;
@@ -70,7 +71,8 @@ impl AppState {
         let tenant_opts = PgConnectOptions::from_str(&config.tenant_admin_url)?
             .application_name("tsubomi-tenant-admin");
         let tenant_admin = PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(config.tenant_admin_max_conn)
+            .min_connections(1)
             .acquire_timeout(Duration::from_secs(5))
             .connect_with(tenant_opts)
             .await?;
@@ -100,6 +102,36 @@ impl AppState {
         // ホスト指標の broadcast。初期受信者は即捨てる(閲覧者が WS 接続時に subscribe する)。
         // 容量は小さくてよい(5s 周期・遅い client は Lagged で最新へ追従するだけ)。
         let (metrics_tx, _) = tokio::sync::broadcast::channel(8);
+
+        // プール可観測性:30s 周期で size/idle を記録。idle==0 かつ満杯 = 飽和の兆候を warn。
+        // 「DB が遅い」ではなく「プールが細い」を運用中に見抜けるようにする(LAN 実測で判明した罠)。
+        {
+            let (db, tenant_admin) = (db.clone(), tenant_admin.clone());
+            let (db_max, tenant_max) = (config.db_max_conn, config.tenant_admin_max_conn);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(30));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    for (name, pool, max) in
+                        [("db", &db, db_max), ("tenant_admin", &tenant_admin, tenant_max)]
+                    {
+                        let (size, idle) = (pool.size(), pool.num_idle());
+                        if idle == 0 && size >= max {
+                            tracing::warn!(
+                                pool = name,
+                                size,
+                                idle,
+                                max,
+                                "DB プール飽和(空き 0)— 取得待ちが発生。TSUBOMI_DB_MAX_CONN の拡大を検討"
+                            );
+                        } else {
+                            tracing::debug!(pool = name, size, idle, max, "DB プール統計");
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(Self(Arc::new(AppStateInner {
             config,
