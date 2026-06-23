@@ -166,12 +166,22 @@ fn build_catchall_doc(domain: &str, tls: bool, port: u16) -> String {
     // ★ 最低優先度。service の Host router(優先度=ルール長)に必ず負け、未ルート子域だけ拾う。
     doc.push_str("      priority: 1\n");
     doc.push_str("      service: \"tsubomi-catchall\"\n");
-    doc.push_str("      middlewares: [\"tsubomi-noservice@file\"]\n");
+    // no-cache を **先(外側)** に置く:redirect が内側で生む 302 にも応答ヘッダが乗る
+    // (middleware は先頭が最外殻 = 応答は最後に通る)。これが無いと、未デプロイ期に一度
+    // 踏んだ 302 をブラウザがキャッシュし、後で service が来ても古い noservice に飛び続ける
+    // (アドレス欄補完の `http://<sub>` 経由で特に起きやすい)。
+    doc.push_str("      middlewares: [\"tsubomi-nocache@file\", \"tsubomi-noservice@file\"]\n");
     if tls {
         // certResolver なしで TLS router 化(既定 / ワイルドカード証明書で出す)。理由は doc 参照。
         doc.push_str("      tls: {}\n");
     }
     doc.push_str("  middlewares:\n");
+    // 302 をブラウザにキャッシュさせない(no-store)。`permanent: false` だけでは不十分
+    // — 仕様上 302 は非キャッシュでも、実ブラウザは scheme 込みのキーで残すことがある。
+    doc.push_str("    tsubomi-nocache:\n");
+    doc.push_str("      headers:\n");
+    doc.push_str("        customResponseHeaders:\n");
+    doc.push_str("          Cache-Control: \"no-store\"\n");
     doc.push_str("    tsubomi-noservice:\n");
     doc.push_str("      redirectRegex:\n");
     doc.push_str("        regex: \".*\"\n"); // URL 全体にマッチ → 固定先へ
@@ -261,6 +271,10 @@ mod tests {
         // 302(permanent: false)で apex の /noservice へ。
         assert!(doc.contains("replacement: \"https://tsubomi-app.com/noservice\""));
         assert!(doc.contains("permanent: false"));
+        // 302 はキャッシュさせない(no-store)+ redirect の外側に置く(302 にヘッダが乗るように)。
+        // 補完の `http://<sub>` で踏んだ古い 302 が残り続ける事故(復活後も noservice)を防ぐ。
+        assert!(doc.contains("Cache-Control: \"no-store\""));
+        assert!(doc.contains("middlewares: [\"tsubomi-nocache@file\", \"tsubomi-noservice@file\"]"));
     }
 
     #[test]
