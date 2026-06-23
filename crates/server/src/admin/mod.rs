@@ -1,4 +1,4 @@
-//! owner ガバナンスの管制面(M4)。背骨(paas-m4-design.md):可視性(見える)+
+//! owner ガバナンスの管制面(M4)。背骨(doc/paas-m4-design.md):可視性(見える)+
 //! 兜底(動かす)の 2 枚。**owner 機能は web 専用** — 各ハンドラは owner 身分 **かつ**
 //! session 由来を毎回検証する(Bearer cli_token では触れない。CLI は AI 駆動のユーザ
 //! 資源操作専用というプロジェクト規約)。前端の表示制御はただの UX。

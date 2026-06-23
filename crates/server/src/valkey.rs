@@ -1,5 +1,5 @@
 //! valkey(cache)インスタンスとのやり取りを 1 箇所に集約する:per-cache の ACL ユーザの
-//! 発行 / 削除 / 起動時 + 周期の収束(paas-m5-design.md §6 / §7.3)。管制面 DB(pg-platform)が
+//! 発行 / 削除 / 起動時 + 周期の収束(doc/paas-m5-design.md §6 / §7.3)。管制面 DB(pg-platform)が
 //! 真実源で、valkey の per-cache ACL は揮発(`ACL SETUSER` はメモリのみ)なので平台が収束させる。
 //!
 //! 隔離は ACL(値アクセス `~<ns>:*` + チャンネル `&<ns>:*` + コマンド白名単

@@ -2,7 +2,7 @@
 //!
 //! 背景:公網ポートに裸の Postgres(pgbouncer)を晒すと、扫描洪流が frps の
 //! work-connection 池を**TLS / 認証より前に**食い潰し、隧道が全員に対して死ぬ
-//! (DoS 型事故、`incident-frp-pg-public-2026-06-22.md`)。
+//! (DoS 型事故、`doc/incident-frp-pg-public-2026-06-22.md`)。
 //!
 //! この闸门を frps の**前**に置き、frp の資源を消費する前に SNI で准入する:
 //!   client → [闸门 :443] → (localhost) frps → 隧道 → frpc → pgbouncer

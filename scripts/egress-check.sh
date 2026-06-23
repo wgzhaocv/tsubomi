@@ -4,7 +4,7 @@
 # 縛られているかを assert する:
 #   放行: 公網(全 TCP)/ 同桥 infra(pgbouncer・valkey)
 #   遮断: 宿主機(gateway / LAN IP / tailnet IP の sshd:22)/ 他テナント(横移)
-# 設計は paas-egress-design.md §4。
+# 設計は doc/paas-egress-design.md §4。
 #
 # 使い方(Pi 上 or ssh 越し):
 #   ./scripts/egress-check.sh

@@ -3,7 +3,7 @@
 //!
 //! M3 第 1 チャンク(S1–S3、曳光弾)は最小 create + deploy hook + コンテナ起動まで。
 //! gh オーケストレーション / 注入 / start・stop・logs / rollback / web 画面 / reconcile は
-//! 後チャンク(plan・paas-m3-design.md)。
+//! 後チャンク(plan・doc/paas-m3-design.md)。
 
 pub mod deploy;
 pub mod docker;

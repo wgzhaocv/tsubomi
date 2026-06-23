@@ -1,5 +1,5 @@
 -- tsubomi M4:ガバナンス(可視化 + 最後の砦 + audit 閲覧)のスキーマ。
--- 背骨(paas-m4-design.md §2):可視性(見える)と兜底(動かす)の 2 枚。
+-- 背骨(doc/paas-m4-design.md §2):可視性(見える)と兜底(動かす)の 2 枚。
 -- M1 で audit_log は既に在る(actor/action/target_resource/target_user/detail)。本 migration は
 --   * platform_config    … 平台設定(磁盘告警の去重状態 / 共有 viewer パスワード hash など)
 --   * admin_action_codes … owner の危険操作(他人の資源 stop/delete)の二段確認コード

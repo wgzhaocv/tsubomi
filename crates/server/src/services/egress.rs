@@ -1,6 +1,6 @@
 //! M6 egress(出站隔離):テナント容器の宛先を iptables で縛る。**宿主機 + 全私網を遮断、公網は
 //! 全 TCP 放行**。同桥東西向(app↔infra)は同 subnet 宛 RETURN で例外放行。脅威モデル・規則の根拠は
-//! `paas-egress-design.md`(§1-3)。
+//! `doc/paas-egress-design.md`(§1-3)。
 //!
 //! **prod Linux + root のみ**動く(server は root の host プロセス)。dev macOS / 非 root は no-op。
 //! 期望状態(`config.tenant_pool` + 生存テナント subnet)を毎回 iptables へ収束させる(ipblock と同型・

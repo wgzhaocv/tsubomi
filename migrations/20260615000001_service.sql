@@ -3,7 +3,7 @@
 -- 種別毎の detail テーブル。M3 では service の detail に加え、env / injections /
 -- deploys / deploy_nonces を足す(§9 の規律:env と注入は「注入の相手 = service」が
 -- 在って初めて意味を持つので、このフェーズで入る)。
--- 実装手順の詳細は paas-m3-design.md。
+-- 実装手順の詳細は doc/paas-m3-design.md。
 
 -- ===========================================================================
 -- service_details(resources と 1:1)

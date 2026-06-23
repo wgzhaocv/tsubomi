@@ -1,7 +1,7 @@
 # tsubomi 蕾
 
 社内 PaaS プラットフォーム(セルフホストの「基礎版 Vercel + Neon」)。設計ドキュメント:
-[paas-design-v2.md](paas-design-v2.md)(意図)/ [paas-tech-design.md](paas-tech-design.md)(技術設計)。
+[doc/paas-design-v2.md](doc/paas-design-v2.md)(意図)/ [doc/paas-tech-design.md](doc/paas-tech-design.md)(技術設計)。
 開発の約束事は [CLAUDE.md](CLAUDE.md) を参照。
 
 ```
@@ -97,7 +97,7 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    docker compose --env-file .env.production -f compose.prod.yml up -d
    ```
 6. **前段ルーティング**。M3 で compose に traefik(`:80`、file provider)+ registry が入った。
-   2 モード(詳細は `paas-m3-design.md` §13):
+   2 モード(詳細は `doc/paas-m3-design.md` §13):
    - **(A) 上流が TLS 終端**(Cloudflare Tunnel / CF proxy / Caddy / nginx。`TSUBOMI_TLS` 未設定)—
      前段から 3 系統を転送:`<ドメイン>` → `127.0.0.1:9090`(apex / server)、`*.<ドメイン>` → `127.0.0.1:80`
      (traefik → service コンテナ)、`registry.<ドメイン>` → `127.0.0.1:80`(traefik → registry、basicAuth)。

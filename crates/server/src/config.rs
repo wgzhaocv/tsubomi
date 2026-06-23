@@ -124,7 +124,7 @@ pub struct Config {
     pub svc_network_prefix: String,
     /// テナント私網に明示割当する subnet の親プール(`TSUBOMI_TENANT_POOL`、既定 `10.231.0.0/16`)。
     /// 各 service 桥は ここから `/24` を取り、租户トラフィックを**源 CIDR で一意識別**できるようにする
-    /// (egress 防火墙の `-s <pool>` マッチの前提。`paas-egress-design.md` §3.1)。**10/8 を選ぶ理由**:
+    /// (egress 防火墙の `-s <pool>` マッチの前提。`doc/paas-egress-design.md` §3.1)。**10/8 を選ぶ理由**:
     /// このホストで LAN(192.168)/ docker 自動(172.17・192.168.16)/ tailnet(100.x)と重ならない。
     /// docker 任せの自動割当は範囲が読めず LAN に近づくので、明示割当でプールを固定する。
     /// 起動時に CIDR として parse + `/24` 以上を検証する(domain / master_key と同じく fail-fast)。

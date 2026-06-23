@@ -31,7 +31,7 @@ const VIEWER_PASSWORD_KEY: &str = "viewer_password";
 /// 閲覧 grant の有効期間(時間)。
 const VIEWER_GRANT_HOURS: i32 = 8;
 /// 共有パスワードの最小長。bcrypt(cost 12 ≈数百 ms / 試行)と併せてオンライン総当たりを
-/// 不経済にするための下限(本格的なレート制限は後相 — paas-m4-design.md S5 の積み残し)。
+/// 不経済にするための下限(本格的なレート制限は後相 — doc/paas-m4-design.md S5 の積み残し)。
 const MIN_VIEWER_PASSWORD_LEN: usize = 8;
 
 /// bcrypt(cost 12 ≈数百 ms の同期 CPU)を spawn_blocking に逃がし、JoinError と

@@ -4,7 +4,7 @@ import type { TitleColor } from "@/components/ui/title";
 
 // 管理画面のサイドメニューと各リソース画面を「1 つの設定」から駆動するための定義。
 // ここを編集すれば、ナビ項目とページ(見出し・空状態)が同時に変わる。
-// 並び順は paas-design-v2.md の 4 種リソース(service/database/cache/volume)。
+// 並び順は doc/paas-design-v2.md の 4 種リソース(service/database/cache/volume)。
 // 中身は今後 web → CLI の順で実装する(両方から使える)。
 
 export interface ResourceNav {

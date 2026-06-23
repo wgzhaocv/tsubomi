@@ -86,7 +86,7 @@ services:
 
   valkey:
     # M5:cache の共有実例。per-cache の ACL ユーザは平台(ホスト直走り)が実行時に
-    # ACL SETUSER で足す(揮発 → server が起動時 + 30s で収束。paas-m5-design.md §7.3)。
+    # ACL SETUSER で足す(揮発 → server が起動時 + 30s で収束。doc/paas-m5-design.md §7.3)。
     # default ユーザは off、平台専用 tsubomi-admin だけが管理権(§11-J)。admin は aclfile では
     # なく command の --user で静的定義する(aclfile は ${VAR} を展開しないため。compose が展開)。
     # この方式なら実行時 ACL SETUSER も使える(aclfile と inline user は排他なので aclfile は使わない)。

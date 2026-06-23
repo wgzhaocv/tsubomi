@@ -1,7 +1,7 @@
 -- tsubomi M5:cache(valkey)の detail テーブル。resources スーパーテーブルに
 -- kind='cache' の行がぶら下がり、ここに valkey 固有の期望状態を持つ。
 -- 背骨:cache_details が真実源 = valkey の per-cache ACL ユーザは平台が起動時 +
--- 周期で収束させる(揮発。paas-m5-design.md §7.3 / §2)。
+-- 周期で収束させる(揮発。doc/paas-m5-design.md §7.3 / §2)。
 --
 -- acl_user = namespace = c_<shortid>(同値で足りる。DDL の 2 列は将来の分離余地)。
 -- key 隔離は valkey ACL(~<namespace>:* / &<namespace>:*)+ コマンド白名単。

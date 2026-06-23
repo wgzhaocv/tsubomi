@@ -1,4 +1,4 @@
-//! cache(valkey)リソースの API ハンドラ(paas-m5-design.md §4)。database(`databases.rs`)を
+//! cache(valkey)リソースの API ハンドラ(doc/paas-m5-design.md §4)。database(`databases.rs`)を
 //! 範に、平台が「期望状態」を resources / cache_details に持ち、現実(valkey の per-cache ACL)を
 //! そこへ収束させる。create は valkey に ACL を先に作り、成功してから platform 行を入れる
 //! (失敗時は ACL を掃除)。web と CLI は同一ハンドラの 2 入口 — 認証 extractor(AuthCtx)だけが分岐点。
