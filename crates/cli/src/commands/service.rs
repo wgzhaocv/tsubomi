@@ -204,6 +204,16 @@ pub async fn run(
             }
         }
         ServiceCmd::Create { name, github } => {
+            // GitHub 連携(`gh repo create --source=.` と後の `git push`)は **カレントを git
+            // リポジトリとして** GitHub に繋ぐので、repo でなければ service 作成(= サーバ側の
+            // 副作用)の **前** に `git init` して半端な状態(service だけ出来て連携が失敗)を防ぐ。
+            // init が要るのは configure_github が実際に走るときだけ — それは **gh が使えて**、
+            // かつ「json なら `--github` / text なら常に」連携経路に入るとき。gh が無い経路
+            // (fallback で setup_commands を返すだけ)は repo を作らないので init しない
+            // (不要な `.git` を掘らない)。gh_ok() は orchestrate でも再評価するが安価。
+            if gh_ok() && (github || !json) {
+                ensure_git_repo()?;
+            }
             let resp = api::service_create(&c, &server_url, &token, &name).await?;
             if json {
                 if github {
@@ -356,6 +366,40 @@ fn configure_github(resp: &CreateServiceResp) -> Result<String> {
     gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
     gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
     Ok(repo)
+}
+
+/// カレントが git リポジトリでなければ `git init -b main` する(`--github` 連携の前提)。
+/// `gh repo create --source=.` と後の `git push` に repo が要り、カレントは元々 repo にする対象
+/// なので自動初期化する。**service 作成(サーバ側副作用)の前** に呼ぶことで半端な状態を防ぐ。
+/// 出力は stderr / null に倒し、JSON モードの stdout を汚さない。
+fn ensure_git_repo() -> Result<()> {
+    // `rev-parse --is-inside-work-tree` は work tree 内なら exit 0、repo 外なら非零(128)。
+    let inside = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if inside {
+        return Ok(());
+    }
+    // 初期ブランチを **main** に固定する。素の `git init` は init.defaultBranch 未設定だと
+    // master を作るが、デプロイ経路は一貫して main を前提にする(成功手順の
+    // `git push -u tsubomi main`、生成 workflow の `branches: [main]`)。ここで master のまま
+    // だと push が refspec 不一致で失敗 / workflow が起動せず、半端さを別の形で再発させる。
+    // `-b` は git 2.28+(古い git は下の失敗 bail で気付ける)。
+    eprintln!("$ git init -b main(カレントは git リポジトリではないので初期化します)");
+    let ok = Command::new("git")
+        .args(["init", "-b", "main"])
+        .stdout(Stdio::null()) // 初期化メッセージで JSON の stdout を汚さない。
+        .status()
+        .context("git init の起動に失敗しました(git はインストール済みですか?)")?
+        .success();
+    if !ok {
+        bail!("git init に失敗しました(古い git なら `git init -b main` 相当を手動で)。カレントディレクトリを確認してください");
+    }
+    Ok(())
 }
 
 /// ローカルに `tsubomi` remote が無ければ HTTPS で張る(既存なら触らない)。

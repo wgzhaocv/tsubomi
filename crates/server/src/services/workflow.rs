@@ -12,7 +12,8 @@
 /// `tsubomi-deploy.yml` の中身。CLI / web がそのままファイルに書く。
 pub const TEMPLATE: &str = r##"name: tsubomi deploy
 on:
-  push: { branches: [main] }
+  # main / master どちらの既定ブランチでも起動する(既存 repo が master のこともある)。
+  push: { branches: [main, master] }
   # シークレット修正後などに手動で再デプロイできるよう(空コミット不要)。
   workflow_dispatch: {}
 jobs:
@@ -90,9 +91,10 @@ pub fn setup_commands(
 ) -> Vec<String> {
     let sub = &service.subdomain;
     vec![
-        format!("gh repo create {sub} --private --source=. --remote=tsubomi"),
-        // 以降の gh が必ず新しい tsubomi repo を対象にするよう repo を固定する。
+        // repo を `owner/sub` に固定してから create する(CLI 自動経路の `gh repo create {owner}/{sub}`
+        // と一致 = 紛らわしい不一致を解消)。以降の gh も必ずこの新しい tsubomi repo を対象にする。
         format!("TSUBOMI_REPO=\"$(gh api user -q .login)/{sub}\""),
+        format!("gh repo create \"$TSUBOMI_REPO\" --private --source=. --remote=tsubomi"),
         format!("printf %s '{deploy_key}' | gh secret set TSUBOMI_DEPLOY_KEY -R \"$TSUBOMI_REPO\""),
         format!(
             "printf %s '{}' | gh secret set TSUBOMI_REGISTRY_USER -R \"$TSUBOMI_REPO\"",
