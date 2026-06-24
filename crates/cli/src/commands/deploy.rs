@@ -13,7 +13,7 @@ use tsubomi_shared::{DeployConfig, hmac_sha256, random_b64};
 /// 平台は build しない(決定 #3)— build はここ(ユーザ機の docker)。CI が無い / 緊急時に使う。
 #[derive(Args)]
 pub struct DeployArgs {
-    /// ローカルで build + push して hook を叩く(現状この経路のみ。未指定だと案内のみ)
+    /// ローカルで build + push して hook を叩く(現状この経路のみ。`--local` 未指定はエラー — GitHub 経路は git push)
     #[arg(long)]
     pub local: bool,
     /// 対象サービスの表示名(省略時、サービスが 1 つだけならそれを使う)
