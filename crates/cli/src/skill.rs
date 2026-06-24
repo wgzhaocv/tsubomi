@@ -30,20 +30,30 @@ fn body_rendered() -> String {
 }
 
 /// Claude skill の frontmatter。`description` が skill 発火の判断材料になる。
-const CLAUDE_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi(蕾)プラットフォームに tbm CLI で app をデプロイする手順書。service/database/volume/cache の作成・注入・デプロイ・検証、GitHub 経路と `tbm deploy --local` 退路、gh/docker 不在や GitHub Actions 額度切れ時の誘導を含む。ユーザが「tbm でデプロイ」「tsubomi にデプロイ」等と言ったら必ずこれに従う。\n---\n";
+const CLAUDE_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi(蕾)社内 PaaS を tbm CLI で扱うときの運用手順書(デプロイに限らない)。tsubomi / tbm / 蕾 が関わる作業はすべてこれに従う — service/database/volume/cache の作成・注入・デプロイ・検証、`tbm` 各コマンド(service status/logs/exec、db/cache/volume、inject、rotate、deploy --local)、GitHub 経路と退路、デプロイ可否の判断。次の症状でも必ず読む — app が `succeeded` なのに 502 / サイトが開かない、`tbm` が `unauthorized`・`conflict`・`validation` を返す、注入が効かない、rotate 後に反映されない、gh / docker が無い、GitHub Actions の枠が切れた。「tbm でデプロイ」「tsubomi にあげる」「蕾にデプロイ」等の依頼でも起動。\n---\n";
 
 /// Codex の全局 AGENTS.md に挿す管理ブロックの目印(uninstall がこれを目当てに除去)。
 const MARKER_BEGIN: &str = "<!-- >>> tbm skill: tsubomi-deploy (managed; do not edit) >>> -->";
 const MARKER_END: &str = "<!-- <<< tbm skill: tsubomi-deploy <<< -->";
 
-/// 版本戳 = 本文 + プラットフォームアーキの sha256 先頭 12 hex。`host_arch()` が変われば
-/// (別アーキへ焼き直し)戳も変わり、self-heal が投影を書き直す。BODY を render せず直接ハッシュ
-/// するので、毎コマンドで走る `ensure_fresh()` に `String` 確保(~10KB の replace)を持ち込まない。
+/// 版本戳 = 本文 + アーキ + frontmatter + マーカーの sha256 先頭 12 hex。これら **書き出す
+/// 素材すべて** を含めるのが要点:どれか 1 つでも変われば戳が動き、self-heal が投影を書き直す。
+/// 特に frontmatter(description = skill 発火のトリガ)を含めないと、本文 BODY が同一のまま
+/// description だけ変えたときに戳が動かず、毎コマンドの self-heal が変更を取りこぼす(投影が
+/// 古い description のまま残る)。素材はすべて `&str` 定数(BODY も render せず直接)なので、
+/// 毎コマンド走る `ensure_fresh()` に `String` 確保(~10KB の replace)を持ち込まない。
 fn hash() -> String {
     let mut h = Sha256::new();
+    // 区切り(b"\0")で各素材の連結の曖昧さを断つ。
     h.update(BODY.as_bytes());
-    h.update(b"\0"); // 区切り — 本文とアーキの連結の曖昧さを断つ
+    h.update(b"\0");
     h.update(platform::host_arch().as_bytes());
+    h.update(b"\0");
+    h.update(CLAUDE_FRONTMATTER.as_bytes());
+    h.update(b"\0");
+    h.update(MARKER_BEGIN.as_bytes());
+    h.update(b"\0");
+    h.update(MARKER_END.as_bytes());
     hex::encode(h.finalize())[..12].to_string()
 }
 
@@ -151,16 +161,21 @@ fn replace_or_append_block(existing: &str, block: &str) -> String {
     }
 }
 
-/// self-heal:主ターゲットが無い / 戳が古ければ全ターゲットを書き直す。書いたら `true`。
+/// self-heal:全ターゲット(Claude SKILL.md / Codex AGENTS.md 管理ブロック)のどれかが
+/// 無い / 戳が古ければ全ターゲットを書き直す。書いたら `true`。主ターゲットだけ見ると
+/// Claude が最新でも Codex 側のブロックが消え / 古いまま取りこぼされるため、全ターゲットを見る。
 /// 失敗(権限 / HOME 不明)は黙って `false` — skill の管理で通常コマンドを妨げない。
 pub fn ensure_fresh() -> bool {
-    let Some(primary) = claude_path() else {
-        return false;
-    };
-    let fresh = fs::read_to_string(&primary)
-        .ok()
-        .is_some_and(|c| c.contains(&stamp_line()));
-    if fresh {
+    let targets = target_paths();
+    if targets.is_empty() {
+        return false; // HOME 不明など — 通常コマンドを妨げない。
+    }
+    // stamp_line() は hash() を計算するので一度だけ取り、全ターゲットで使い回す。
+    let stamp = stamp_line();
+    let all_fresh = targets
+        .iter()
+        .all(|p| fs::read_to_string(p).ok().is_some_and(|c| c.contains(&stamp)));
+    if all_fresh {
         return false;
     }
     install().is_ok()
