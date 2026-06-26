@@ -212,22 +212,30 @@ fn connect_redis_cli(url: &str) -> Result<()> {
         println!("{url}");
         return Ok(());
     }
-    let mut parsed = url::Url::parse(url)?;
+    let parsed = url::Url::parse(url)?;
+    let host = parsed.host_str().unwrap_or_default().to_owned();
+    let port = parsed.port().unwrap_or(443);
+    let user = parsed.username().to_owned(); // = acl_user = namespace
     let password = parsed.password().unwrap_or_default().to_owned();
-    // namespace(= acl_user)は password を外す前のパース結果から取る(再パースしない)。
-    let namespace = (!parsed.username().is_empty()).then(|| parsed.username().to_owned());
-    // argv からパスワードを外す(user/host/port だけ残す)。AUTH は env で渡す(`ps` 対策)。
-    let _ = parsed.set_password(None);
-    if let Some(ns) = &namespace {
-        eprintln!("💡 キー前缀 \"{ns}:\" を付けて操作してください(例:GET {ns}:foo)。前缀なしは NOPERM。");
+    if !user.is_empty() {
+        eprintln!("💡 キー前缀 \"{user}:\" を付けて操作してください(例:GET {user}:foo)。前缀なしは NOPERM。");
     }
 
-    // redis-cli / valkey-cli のどちらでも可(環境依存。valkey-cli は redis-cli 互換)。AUTH は両系の
-    // env を立てておく(REDISCLI_AUTH / VALKEYCLI_AUTH)。NotFound なら次の候補へ。両方無ければ URL を表示。
+    // redis-cli / valkey-cli を **明示フラグ**で起動する(`-u rediss://…` だと (1) SNI を送らず
+    // 辺縁の sni-gate に握手段で切られ (2) AUTH env も URL モードでは拾われない、の 2 つで繋がらない。
+    // 実機検証済み)。--sni で gate を通し、--user で ACL ユーザ、パスワードは AUTH env で渡し argv に
+    // 載せない(`ps` 対策)。redis-cli/valkey-cli の両系 env を立てる。NotFound なら次の候補へ。
     for bin in ["redis-cli", "valkey-cli"] {
         match std::process::Command::new(bin)
-            .arg("-u")
-            .arg(parsed.as_str())
+            .arg("--tls")
+            .arg("--sni")
+            .arg(&host)
+            .arg("-h")
+            .arg(&host)
+            .arg("-p")
+            .arg(port.to_string())
+            .arg("--user")
+            .arg(&user)
             .env("REDISCLI_AUTH", &password)
             .env("VALKEYCLI_AUTH", &password)
             .status()

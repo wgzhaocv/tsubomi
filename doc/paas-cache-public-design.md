@@ -4,6 +4,10 @@
 無くても「開発用の接続文字列を一本」もらって `new Redis(URL)` で直に繋げる**こと(原生プロトコル・
 ioredis 既定のまま、**会社ネットワークからも通る**)。公開 DB(`db.tsubomi-app.com`)の双子。
 
+> **落地状態(2026-06-26):LIVE・公網 e2e 済み**。`cache.tsubomi-app.com:443`(VPS sni-gate → frp → frpc@Pi →
+> valkey TLS)で `tbm cache url` の `rediss://` 串が通り、`SET/GET`(keyPrefix 内)成功・跨 namespace は NOPERM を
+> 実機確認。server イメージ v32 / tbm CLI 1.0.11。以下本文の 【提案】 マーカーは概ね落地済み(履歴は git に)。
+
 > ## 2026-06-26 改訂(本書の前提が変わった — 必読)
 >
 > **初版は「公開 DB の原始設計」(直 VPS + Traefik TCP 入口 + 会社 IP 白名単)を写した双子だった。
@@ -203,6 +207,12 @@ const redis = new Redis("rediss://c_xxx:pw@cache.tsubomi-app.com:443", { keyPref
 - **keyPrefix が最大の落とし穴**【確定の語義】:ACL は `~c_xxx:*` しか許さないので、裸の `redis.set("foo",1)` は
   **NOPERM**。`keyPrefix: "c_xxx:"`(= 注入時の `REDIS_KEY_PREFIX` と同じ)を付けるか key 自身に前缀を付ける。
   **`url`/`get` のレスポンスに namespace(=acl_user)を必ず載せ**、web カードにも明記する。
+- **生 redis-cli / valkey-cli は `--sni` が必須**【確定・実機 2026-06-26】:辺縁の sni-gate は ClientHello の
+  SNI で振り分けるので、SNI を送らない素の `redis-cli -u rediss://…` は握手段で切られる(`unexpected eof`)。
+  さらに `-u` モードでは `REDISCLI_AUTH`/`VALKEYCLI_AUTH` env が拾われず WRONGPASS になる。正しい形は
+  `redis-cli --tls --sni cache.<域名> -h cache.<域名> -p 443 --user c_xxx`(パスワードは env)。
+  **`tbm cache connect` がこの形を内部で組む**ので CLI 利用者は意識不要。**ioredis(Node)は TLS で SNI を
+  既定送出**するので `new Redis("rediss://…",{keyPrefix})` のまま通る(主用途。`new Redis` 一行で繋がる)。
 - **rotate の生効**:外部串は人が直接使う = **rotate 後すぐ新串が有効**(`rotate` は DB 先 → valkey、即更新)。
   「再デプロイで効く」は**注入された app 容器**の話(値は起動時解決)で、人が手に持つ外部串とは別。混同しない。
 - **値はキャッシュ = 揮発**:valkey は `allkeys-lru`。内存逼迫で key は淘汰され得る。cache の語義。
