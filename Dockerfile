@@ -1,5 +1,9 @@
 # ---- web:bun で SPA バンドルをビルド ----
-FROM oven/bun:1 AS web-builder
+# web/dist は静的成果物(アーキ非依存)なので **ビルドホストの native アーキで 1 回だけ** ビルドする
+# (`--platform=$BUILDPLATFORM`)。これが無いと multi-arch ビルドで amd64 側の `bun run build` が
+# QEMU エミュレーション下でハングする(実測 2026-06-26:amd64 の bun が起動行も出さず停止)。
+# 両ターゲットの stage-2 は同じ /web/dist を COPY するので、native 1 回で十分。
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS web-builder
 WORKDIR /web
 # vite-plus(`vp`)は起動時に HTTPS クライアントを作る。システムの CA 証明書が
 # 無いと panic する("No CA certificates were loaded")。slim の bun イメージには
