@@ -54,12 +54,13 @@ async fn set_user_on(
         .arg("+@all")
         .arg("-@admin") // CONFIG / CLIENT KILL / ACL / REPLICAOF 等の管理系を禁止
         .arg("-@dangerous") // FLUSHALL / FLUSHDB / KEYS / SHUTDOWN / DEBUG / SWAPDB 等を禁止
-        // SCRIPT / FUNCTION の **容器コマンド**は key 前缀で名前空間化されない**グローバル**状態を
-        // 触る(SCRIPT FLUSH = 共有スクリプトキャッシュ全消し / FUNCTION FLUSH = 他テナントの
-        // 関数ライブラリ破壊)ので個別に禁止する。EVAL / EVALSHA / FCALL は残る — スクリプト内の
-        // key/channel アクセスは ACL パターンで検査される(§6。cross-ns は NOPERM)。
-        .arg("-function")
-        .arg("-script")
+        // **スクリプティングは全面禁止**(`@scripting` = EVAL / EVALSHA / EVAL_RO / FCALL / SCRIPT / FUNCTION)。
+        // 越境防止のためではない(スクリプト内の key/channel も ACL パターンで検査され cross-ns は NOPERM)。
+        // **単一スレッドの共有 valkey でのイベントループ DoS を断つため** — 重い / 無限ループの Lua は
+        // 全テナントを巻き込んで固める(`lua-time-limit` は自動 kill せず、テナントは SCRIPT KILL も不可)。
+        // 管理系(SCRIPT FLUSH / FUNCTION FLUSH = 共有状態破壊)も同カテゴリでまとめて塞がる
+        // (旧 `-function -script` を包含。codex セキュリティ監査 2026-06-26 で EVAL 残存の DoS 面を指摘)。
+        .arg("-@scripting")
         .query_async(conn)
         .await?;
     Ok(())
