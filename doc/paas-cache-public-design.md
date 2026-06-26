@@ -4,9 +4,16 @@
 無くても「開発用の接続文字列を一本」もらって `new Redis(URL)` で直に繋げる**こと(原生プロトコル・
 ioredis 既定のまま、**会社ネットワークからも通る**)。公開 DB(`db.tsubomi-app.com`)の双子。
 
-> **落地状態(2026-06-26):LIVE・公網 e2e 済み**。`cache.tsubomi-app.com:443`(VPS sni-gate → frp → frpc@Pi →
-> valkey TLS)で `tbm cache url` の `rediss://` 串が通り、`SET/GET`(keyPrefix 内)成功・跨 namespace は NOPERM を
-> 実機確認。server イメージ v32 / tbm CLI 1.0.11。以下本文の 【提案】 マーカーは概ね落地済み(履歴は git に)。
+> **落地状態(2026-06-26):LIVE・公網 e2e 済み**。cache は **専用ポート `cache.tsubomi-app.com:8080`**
+> (VPS の専用 **cache-gate**【`deploy/cache-gate/`・`--redis-allow-no-sni` = SNI 無しも許可】→ **独立 frpc-cache 池**
+> → valkey TLS)。**ioredis / go-redis / redis-py / redis-rs / Bun.RedisClient のいずれも裸
+> `new Redis("rediss://…:8080")` で接続可**(SNI を送らない client も通す)。非 TLS / 畸形 / 他ドメイン SNI は弾く。
+> pg は別の :443 sni-gate(SNI 必須・pg 専用)で frp 池も独立。server v33 / tbm CLI 1.0.11。
+>
+> **⚠ 本文との差分**:当初設計は「:443 で pg/cache を SNI 多重化」だったが、**SNI を送らない client(Bun 原生)を
+> 裸串で通す**ため cache を専用ポート **:8080**(no-SNI 許可の cache-gate + 独立 frp 池)へ分離した。
+> 以下本文中の「cache を :443 で SNI 振り分け」「`TSUBOMI_CACHE_PUBLIC_PORT=443`」等の記述は **この追補で上書き**
+> (:8080・no-SNI・独立 frpc-cache が正)。実装は `crates/sni-gate`(`--redis-allow-no-sni`)/ `deploy/cache-gate/`。
 
 > ## 2026-06-26 改訂(本書の前提が変わった — 必読)
 >

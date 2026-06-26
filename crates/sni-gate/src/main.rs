@@ -55,25 +55,26 @@ struct Args {
     #[arg(long, env = "SNI_GATE_BACKEND", default_value = "127.0.0.1:6432")]
     backend: SocketAddr,
 
-    /// **Postgres** 路径で許可する SNI(カンマ区切り複数可)。これ以外は即切断。
-    #[arg(
-        long = "sni",
-        env = "SNI_GATE_SNI",
-        value_delimiter = ',',
-        required = true
-    )]
+    /// **Postgres** 路径で許可する SNI(カンマ区切り複数可)。これ以外は即切断。省略可(redis 専用 gate
+    /// なら不要 — 起動時に pg/redis いずれかの route が必須かを検査する)。
+    #[arg(long = "sni", env = "SNI_GATE_SNI", value_delimiter = ',')]
     allowed_sni: Vec<String>,
 
-    /// **redis**(rediss = TLS-on-connect)路径の後端(localhost の frps cache proxy ポート)。
-    /// cache 公開を同じ :443 に相乗りさせる部署でのみ指定。**未指定なら redis 路径(先頭 0x16)は
-    /// 拒否**(fail-closed = pg のみ配備で HTTPS スキャンを弾く)。
+    /// **redis**(rediss = TLS-on-connect)路径の後端(frps cache proxy ポート)。**未指定なら redis 路径
+    /// (先頭 0x16)は拒否**(fail-closed = pg のみ配備で HTTPS スキャンを弾く)。
     #[arg(long, env = "SNI_GATE_REDIS_BACKEND")]
     redis_backend: Option<SocketAddr>,
 
-    /// **redis** 路径で許可する SNI(カンマ区切り複数可)。`redis_backend` とセットで指定
-    /// (片方だけでは redis 路径は無効)。
+    /// **redis** 路径で許可する SNI(カンマ区切り複数可)。`redis_backend` とセットで指定。
     #[arg(long = "redis-sni", env = "SNI_GATE_REDIS_SNI", value_delimiter = ',')]
     redis_sni: Vec<String>,
+
+    /// **redis 専用ポート用の緩和**:SNI 無しの ClientHello も許可する(`Bun.RedisClient` 等、SNI を
+    /// 送らない client 向け)。SNI が**有る**場合は依然 `--redis-sni` と一致必須(他ドメイン狙いの扫描は
+    /// 拒否)。443 共用 gate では **off**(SNI 無し = pg と区別不能なので拒否)。専用ポート(例 8080)用。
+    /// なお非 TLS / 畸形 ClientHello は SNI の有無に関係なく弾かれる(基本的な拒否は維持)。
+    #[arg(long, env = "SNI_GATE_REDIS_ALLOW_NO_SNI", default_value_t = false)]
+    redis_allow_no_sni: bool,
 
     /// 前導(GSS/SSLRequest + ClientHello)読み取りと後端接続のタイムアウト秒。slowloris 対策。
     #[arg(long, env = "SNI_GATE_TIMEOUT", default_value_t = 10)]
@@ -103,6 +104,15 @@ struct Stats {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Arc::new(Args::parse());
+    // route が 1 つも無いと無意味(全拒否)。pg(--sni)か redis(--redis-backend)のどちらかは要る。
+    if args.allowed_sni.is_empty() && args.redis_backend.is_none() {
+        bail!("route が未設定:--sni(pg)か --redis-backend(redis)のいずれかを指定してください");
+    }
+    // redis-backend だけ指定して redis-sni が空だと、redis 路径は実行時に全拒否(無 SNI 許可でも
+    // 「route not configured」)になる。起動時に誤配置として弾く(オペレータへの早期フィードバック)。
+    if args.redis_backend.is_some() && args.redis_sni.is_empty() {
+        bail!("--redis-backend を指定したら --redis-sni も必須です(空だと redis 路径が全拒否になる)");
+    }
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind {}", args.listen))?;
@@ -257,14 +267,17 @@ async fn read_phase(client: &mut TcpStream, args: &Args) -> Result<Routed> {
             Some(addr) if !args.redis_sni.is_empty() => addr,
             _ => return Ok(Routed::Reject("redis route not configured".into())),
         };
-        // 先頭 `0x16` は読み済み = それを content_type に TLS record を組む。
+        // 先頭 `0x16` は読み済み = それを content_type に TLS record を組む(非 TLS / 畸形は read_tls_record が拒否)。
         let record = read_tls_record(client, TLS_HANDSHAKE).await?;
-        let sni = match sni::parse_sni(&record[5..]) {
-            Some(s) => s,
-            None => return Ok(Routed::Reject("no SNI in ClientHello".into())),
-        };
-        if !sni_allowed(&args.redis_sni, &sni) {
-            return Ok(Routed::Reject(format!("redis SNI {sni:?} not allowed")));
+        // SNI 検証:有 → `--redis-sni` 一致必須(他ドメイン狙いの扫描を拒否)。
+        // 無 → `--redis-allow-no-sni` on なら許可(専用 :8080 = Bun 原生など SNI 非送出 client 向け)、
+        //      off なら拒否(pg と同居の :443 では SNI 無し = pg と区別不能のため)。
+        // ※ 非 TLS / record framing 不正は read_tls_record が既に弾く(allow-no-sni でも基本拒否は維持)。
+        match sni::parse_sni(&record[5..]) {
+            Some(sni) if sni_allowed(&args.redis_sni, &sni) => {}
+            Some(sni) => return Ok(Routed::Reject(format!("redis SNI {sni:?} not allowed"))),
+            None if args.redis_allow_no_sni => {}
+            None => return Ok(Routed::Reject("no SNI in ClientHello (--redis-allow-no-sni off)".into())),
         }
         Ok(Routed::To {
             proto: Proto::Redis,

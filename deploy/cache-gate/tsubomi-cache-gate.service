@@ -1,0 +1,45 @@
+# tsubomi-cache-gate — 公開 cache(frp 中継)の VPS 辺縁 redis 准入闸门(:8080、**cache 専用**)。
+# 同じ `tsubomi-sni-gate` バイナリの第 2 インスタンス(コードは crates/sni-gate を共有)。
+# :8080(会社防火墙が通す非特権ポート)で TLS-on-connect の redis(rediss)接続を受け、localhost frps の
+# cache proxy(127.0.0.1:6381 = **独立 frpc-cache の池**)へ passthrough(TLS 非終端・valkey が終端)。
+#
+# **--redis-allow-no-sni**:SNI 無しの client(`Bun.RedisClient` 等)も通す = どの言語/client でも
+#   裸 `rediss://cache.<域名>:8080` で繋がる(SNI を送る ioredis/Go/Rust/Python は元々 OK)。
+# 基本的な拒否は SNI 無しでも維持:非 TLS / 畸形 ClientHello / 他ドメイン SNI は弾き、max-pending/active で
+#   並発を絞る。pg(:443)とは **frp 池が独立**なので、:8080 が扫描されても DB トンネルを巻き込まない。
+# 配備は `just ship-sni-gate`(sni-gate と cache-gate を一緒に配る)。
+[Unit]
+Description=tsubomi cache gate (redis-over-TLS 准入闸门, frps 前置, no-SNI 許可)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tsubomi-sni-gate --listen 0.0.0.0:8080 --redis-backend 127.0.0.1:6381 --redis-sni cache.tsubomi-app.com --redis-allow-no-sni
+Restart=on-failure
+RestartSec=2
+
+# :8080 は非特権ポート = CAP_NET_BIND_SERVICE 不要(専用の揮発ユーザだけで bind 可)。
+DynamicUser=yes
+NoNewPrivileges=yes
+
+# fd 上限。各接続 ~2 fd(client + backend)。
+LimitNOFILE=65535
+
+# ハードニング(TCP 中継しかしないので可能な限り締める。sni-gate と同じ)。
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

@@ -23,16 +23,19 @@ BIN="target/$TARGET/release/tsubomi-sni-gate"
 
 echo "=== ship to $HOST ==="
 # 二進制は一時名で scp → atomic mv(走行中バイナリの差し替えは mv が安全)。
+# 1 つのバイナリを 2 インスタンスで使う:tsubomi-sni-gate(:443 pg)+ tsubomi-cache-gate(:8080 cache・
+# 独立 frp 池・SNI 無し許可)。両 unit を配って両方再起動する。
 scp -q "$BIN" "$HOST:/usr/local/bin/tsubomi-sni-gate.new"
 scp -q deploy/sni-gate/tsubomi-sni-gate.service "$HOST:/etc/systemd/system/tsubomi-sni-gate.service"
+scp -q deploy/cache-gate/tsubomi-cache-gate.service "$HOST:/etc/systemd/system/tsubomi-cache-gate.service"
 ssh "$HOST" 'set -e
   mv /usr/local/bin/tsubomi-sni-gate.new /usr/local/bin/tsubomi-sni-gate
   chmod 755 /usr/local/bin/tsubomi-sni-gate
   systemctl daemon-reload
-  systemctl enable tsubomi-sni-gate
-  systemctl restart tsubomi-sni-gate
+  systemctl enable tsubomi-sni-gate tsubomi-cache-gate
+  systemctl restart tsubomi-sni-gate tsubomi-cache-gate
   sleep 0.6
-  systemctl --no-pager --full status tsubomi-sni-gate | head -14'
+  systemctl --no-pager --full status tsubomi-sni-gate tsubomi-cache-gate | head -30'
 
 echo ""
-echo "=== done。確認: ssh $HOST 'ss -tlnp | grep :443' / journalctl -u tsubomi-sni-gate -f ==="
+echo "=== done。確認: ssh $HOST '\''ss -tlnp | grep -E \":443|:8080\"'\'' / journalctl -u tsubomi-cache-gate -f ==="
