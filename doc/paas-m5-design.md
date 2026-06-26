@@ -203,24 +203,29 @@ ACL SETUSER <acl_user> on >password         # ★ パスワード追加は単一
   ~<namespace>:*                 # この前缀の key だけ読み書き可
   resetchannels &<namespace>:*   # pub/sub もこの前缀のチャンネルだけ
   +@all -@admin -@dangerous      # 危険(FLUSHALL/FLUSHDB/KEYS/SHUTDOWN/DEBUG/CONFIG/SWAPDB…)を除く全コマンド
-  -function -script              # SCRIPT/FUNCTION 容器(グローバル状態)は別途禁止 — 下記
+  -@scripting                    # EVAL/EVALSHA/FCALL/SCRIPT/FUNCTION = スクリプティング全面禁止 — 下記
 ```
 (valkey の `ACL SETUSER` は同一ユーザへの複数呼びが累積。上は 1 回で書くなら一行に連ねる。
 `reset` で初期化してから組み立てると冪等。`>password` は**単一の `>`**。)
 
 - `~<ns>:*`:他人の namespace の key を**値として読み書き**すると **NOPERM**。
-- **`-function -script`(S1 実測で追加)**:`@dangerous` は KEYS/FLUSHALL/FLUSHDB/SWAPDB/CONFIG/SHUTDOWN/
-  REPLICAOF を覆う(valkey 8 で実測確認)が、**`SCRIPT FLUSH`(共有スクリプトキャッシュ全消し)と
-  `FUNCTION FLUSH`/`LOAD`/`DELETE`(他テナントの関数ライブラリを破壊・上書き)は @dangerous に**
-  **入らない**。関数 / スクリプトキャッシュは **key 前缀で名前空間化されないグローバル状態**なので、
-  容器コマンド `SCRIPT` / `FUNCTION` を個別に禁止する。`EVAL` / `EVALSHA` / `FCALL` は残し、スクリプト内の
-  key アクセスは ACL パターンで検査される(cross-ns は NOPERM。下の Lua 項)。
+- **`-@scripting`(S1 で `-function -script`、その後 codex 監査 2026-06-26 で全面禁止に拡大)**:
+  `@scripting` = `EVAL` / `EVALSHA` / `EVAL_RO` / `FCALL` / `SCRIPT` / `FUNCTION` を**まとめて禁止**する。
+  **理由は越境防止ではない**(スクリプト内で触る key/channel も ACL パターンで検査され cross-ns は NOPERM
+  だった)。**単一スレッドの共有 valkey でのイベントループ DoS を断つため** — 重い / 無限ループの Lua を
+  投げられると全テナントを巻き込んで valkey が固まる(`lua-time-limit` は自動 kill せず、テナントは
+  `SCRIPT KILL` も持たない)。**管理系の容器コマンドも同カテゴリで一網に塞がる**:`SCRIPT FLUSH`
+  (共有スクリプトキャッシュ全消し)と `FUNCTION FLUSH`/`LOAD`/`DELETE`(他テナントの関数ライブラリを
+  破壊・上書き)は **key 前缀で名前空間化されないグローバル状態**を触るが、これらも `@scripting` に含まれる
+  (旧 `-function -script` を包含。`@dangerous` には入らないので個別禁止が必要だった点は不変)。
 - `-@dangerous`:FLUSHALL / FLUSHDB(共有実例を消す)/ KEYS(全 key 走査)/ SHUTDOWN / DEBUG 等を禁止。
 - `-@admin`:CONFIG / CLIENT KILL / ACL / REPLICAOF 等の管理系を禁止。
 - `&<ns>:*` + resetchannels:pub/sub も namespace 内のみ。
-- **Lua(EVAL / FUNCTION)**:スクリプト内で触る key も ACL の key パターンで検査される — **ただし
-  valkey/redis ≥ 7.0** の挙動(本番は valkey 8 なので OK。最低バージョンとして明記)。EVAL 自体は
-  `@scripting`(`@dangerous` ではない)なので許可されるが、`otherns:*` への `redis.call` は弾かれる。
+- **Lua / Functions = 全面禁止(`-@scripting`)**:当初は「EVAL を残し、スクリプト内の key も ACL の
+  key パターンで検査(valkey/redis ≥ 7.0 の挙動。`otherns:*` への `redis.call` は NOPERM)」で隔離は
+  成立していた。**が、可用性(DoS)面で残った穴** — 重い / 無限ループ Lua が単一スレッドの共有 valkey を
+  固める — を codex 監査(2026-06-26)が指摘し、**EVAL 系も含めスクリプティングを全て禁止**にした(上項)。
+  テナントが Lua を使いたい用途は今は無く、共有実例の安定を優先する。
 - **⚠ 既知の隔離ギャップ(§11-I):key の「**値**」アクセスは ~ns:* で隔離されるが、`SCAN` / `RANDOMKEY` /
   `DBSIZE` は **key 引数を取らない**ため ACL の key パターンで**出力がフィルタされない**(redis/valkey の
   既知挙動)。つまり他テナントの **key 名 / 総数が列挙され得る**(値は依然 NOPERM)。完了判定の
@@ -342,7 +347,7 @@ tbm inject <cache> --into <svc> [--as REDIS_URL]   # 既存 inject に cache 種
 | **B** | **cache は内部注入のみ(外部入口なし)** | app から使うのが主用途。db の human 外部串のような外部デバッグ需要は cache では薄い | 外部 `cache.<域名>:6379`(会社 CIDR)を足す（valkey を host 公開 + DOCKER-USER CIDR） |
 | **C** | **key 隔離 = ACL `~<ns>:*` + `REDIS_URL` と `REDIS_KEY_PREFIX` の 2 本注入**。app はクライアントの keyPrefix に設定 | 隔離を機構(ACL)で硬く保ちつつ、app 側の負担は 1 行。前缀無しは NOPERM = fail-safe | 透過プロキシで前缀を平台が付与(平台が数据路径に入る — 設計が拒否)/ valkey DB index で分離(ACL は DB を分離しない = 安全でない)/ cache 毎に valkey 実例(重い) |
 | **D** | **delete = `ACL DELUSER` のみ（key は内存温存を試みる）、restore = ACL 再作成、purge(3d) で key 削除。データ復元は best-effort** | dump 無しで凭据壳 + 生き残った key を復元。`allkeys-lru` なので**温存中の key は圧力下で evict され得る** ⇒ db/volume の完全復元とは意図的に区別(cache は本質的に易失)。**noisy neighbor**:1 テナントの大量書き込みが他テナントの key を evict しうる(cache として許容、明記) | delete 時に key も即削除(メモリ即解放だが復元でデータ喪失)/ dump してファイル trash(重い)/ `volatile-lru`(TTL 付きだけ evict、非 TTL を守るが OOM 余地) |
-| **E** | **コマンド白名単 = `+@all -@admin -@dangerous -function -script`**（key は `~<ns>:*`、channel は `&<ns>:*`） | `@dangerous` で FLUSHALL/FLUSHDB/KEYS/SWAPDB/SHUTDOWN/DEBUG/CONFIG を一網で禁止(valkey 8 で実測確認)しつつ string/hash/list/set/zset/stream/pubsub/SCAN/EVAL は使える。**`SCRIPT`/`FUNCTION` 容器は @dangerous に入らないが key 前缀で名前空間化されないグローバル状態(共有スクリプトキャッシュ / 関数ライブラリ)を破壊できるので個別に禁止**(S1 実測で判明・§6) | 個別 `+GET +SET …` の許可リスト（網羅が大変・取りこぼし）/ `+@all`(危険) / `-@scripting`(EVAL も失い §6 の Lua 方針に反する) |
+| **E** | **コマンド白名単 = `+@all -@admin -@dangerous -@scripting`**（key は `~<ns>:*`、channel は `&<ns>:*`） | `@dangerous` で FLUSHALL/FLUSHDB/KEYS/SWAPDB/SHUTDOWN/DEBUG/CONFIG を一網で禁止(valkey 8 で実測確認)しつつ string/hash/list/set/zset/stream/pubsub/SCAN は使える。**`@scripting`(EVAL/EVALSHA/FCALL/SCRIPT/FUNCTION)は全面禁止** — 単一スレッドの共有 valkey で重い/無限ループ Lua がイベントループを固める DoS を断つため(codex 監査 2026-06-26)。`SCRIPT FLUSH`/`FUNCTION FLUSH` の共有状態破壊も同カテゴリで一網に塞がる(§6) | 個別 `+GET +SET …` の許可リスト（網羅が大変・取りこぼし）/ `+@all`(危険) / **EVAL を残す**(当初案。隔離は ACL key パターンで成立するが DoS 面が残る — 監査で却下) |
 | **F** | **cache データは備份しない / per-namespace メモリは「key 数」で代用** | cache は易失（消えても再生成される前提）。valkey に per-namespace の正確メモリ API は無い | valkey BGSAVE の RDB を日次備份に / `MEMORY USAGE` をキー走査で集計(O(n)・高コスト) |
 | **G** | **per-cache ACL 永続化は平台の収束に委ねる(`ACL SETUSER` は揮発)。収束は起動時 **+ 周期(30s)**の両方。周期収束は毎 tick で fresh に生存 cache を読んでから SETUSER(RACE-1)** | cache_details が真実源 = 背骨。**周期収束は必須**:valkey 単独再起動(ACL 全消失・平台は無再起動)を起動時収束だけでは直せない穴を塞ぐ。再接続窓は tick 幅+クライアント再試行で吸収。**fresh スナップショット**で delete↔tick の競態(削除直後ユーザの一瞬復活)を防ぐ(§7.3) | 起動時のみ(valkey 単独再起動で ACL が永遠に欠落)/ aclfile + `ACL SAVE`(per-cache も valkey 側に二重真実源)/ 古いスナップショットで収束(delete と競態) |
 | **H** | **依存 = `redis` crate** | 成熟・tokio 対応・ACL 発行と e2e 検証に十分 | `fred`(高機能だが M5 には過剰) |

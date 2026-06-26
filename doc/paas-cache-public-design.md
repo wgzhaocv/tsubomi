@@ -8,7 +8,7 @@ ioredis 既定のまま、**会社ネットワークからも通る**)。公開 
 > (VPS の専用 **cache-gate**【`deploy/cache-gate/`・`--redis-allow-no-sni` = SNI 無しも許可】→ **独立 frpc-cache 池**
 > → valkey TLS)。**ioredis / go-redis / redis-py / redis-rs / Bun.RedisClient のいずれも裸
 > `new Redis("rediss://…:8080")` で接続可**(SNI を送らない client も通す)。非 TLS / 畸形 / 他ドメイン SNI は弾く。
-> pg は別の :443 sni-gate(SNI 必須・pg 専用)で frp 池も独立。server v33 / tbm CLI 1.0.11。
+> pg は別の :443 sni-gate(SNI 必須・pg 専用)で frp 池も独立。server v34 / tbm CLI 1.0.11。
 >
 > **⚠ 本文との差分**:当初設計は「:443 で pg/cache を SNI 多重化」だったが、**SNI を送らない client(Bun 原生)を
 > 裸串で通す**ため cache を専用ポート **:8080**(no-SNI 許可の cache-gate + 独立 frp 池)へ分離した。
@@ -108,7 +108,7 @@ ioredis 既定のまま、**会社ネットワークからも通る**)。公開 
  香橙派  frpc(tsubomi-frpc)→ 127.0.0.1:<valkey TLS 口>
    ▼
  valkey  --tls-port <ローカル>(SAN=cache.tsubomi-app.com の LE 証書で TLS 終端)+ --port 6379(内部明文・不変)
-   ▼  ACL: ~c_xxx:* / &c_xxx:* / +@all -@admin -@dangerous -function -script
+   ▼  ACL: ~c_xxx:* / &c_xxx:* / +@all -@admin -@dangerous -@scripting
 ```
 
 - **公網に晒すのは VPS :443 の sni-gate ただ一つ**。pg も cache も**同じ 443**を共有し、闸门が **SNI で振り分ける**

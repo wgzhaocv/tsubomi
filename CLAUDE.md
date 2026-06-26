@@ -30,8 +30,9 @@ M5 で入ったもの(S1–S3。dev e2e 済み):infra に **valkey**(`valkey/val
 default off + `tsubomi-admin` を compose の `--user` で静的定義、ホスト側 6433 で loopback 公開)+
 migration `cache_details`(`acl_user=namespace=c_<shortid>`/`password_enc`/`rotated_at`)。**cache リソース一式**:
 `crates/server/src/{caches.rs,valkey.rs}`(create/list/get/rename/url/rotate/delete)。隔離は **valkey ACL**
-(値 `~<ns>:*` + チャンネル `&<ns>:*` + コマンド白名単 `+@all -@admin -@dangerous -function -script` = 越境 /
-FLUSHALL / KEYS / SCRIPT・FUNCTION FLUSH は NOPERM。値は隔離・key/channel **名**は SCAN/PUBSUB で列挙され得る =
+(値 `~<ns>:*` + チャンネル `&<ns>:*` + コマンド白名単 `+@all -@admin -@dangerous -@scripting` = 越境 /
+FLUSHALL / KEYS / EVAL 系・SCRIPT・FUNCTION は NOPERM。スクリプティング全禁は単一スレッド共有 valkey の
+イベントループ DoS 対策 — codex 監査 2026-06-26。値は隔離・key/channel **名**は SCAN/PUBSUB で列挙され得る =
 受容済み §11-I)。per-cache ACL は揮発なので**起動時 + 30s 周期で収束**(`valkey::reconcile_acls`、毎 tick fresh に
 生存 cache を読む = RACE-1)。**注入**:cache → `REDIS_URL`(内部入口 `tsubomi-valkey:6379`)+ `REDIS_KEY_PREFIX`
 (`<ns>:`。値は起動の瞬間に解決 — rotate は再デプロイで効く)。rotate は **DB 先 → valkey**(背骨どおり前向き収束)。
