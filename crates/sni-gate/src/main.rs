@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 
@@ -36,6 +36,9 @@ const SSL_REQUEST: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f];
 const GSS_REQUEST: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x30];
 /// TLS record の最大サイズ(RFC 上限 16384)+ ヘッダ 5。
 const MAX_TLS_RECORD: usize = 16384 + 5;
+/// TLS record の content_type = handshake(0x16)。接続の先頭がこれなら redis(rediss = TLS-on-connect、
+/// 前導なし)、そうでなければ Postgres の SSLRequest/GSSENCRequest 前導(0x00 始まり)とみなす。
+const TLS_HANDSHAKE: u8 = 0x16;
 
 #[derive(Parser)]
 #[command(
@@ -47,11 +50,12 @@ struct Args {
     #[arg(long, env = "SNI_GATE_LISTEN", default_value = "0.0.0.0:443")]
     listen: SocketAddr,
 
-    /// 後端(localhost の frps proxy ポート)。
+    /// **Postgres** 路径の後端(localhost の frps pg proxy ポート)。先頭が 8B SSLRequest/GSSENCRequest
+    /// の接続をここへ流す(前導を本地終結し replay する)。
     #[arg(long, env = "SNI_GATE_BACKEND", default_value = "127.0.0.1:6432")]
     backend: SocketAddr,
 
-    /// 許可する SNI(カンマ区切り複数可)。これ以外は即切断。
+    /// **Postgres** 路径で許可する SNI(カンマ区切り複数可)。これ以外は即切断。
     #[arg(
         long = "sni",
         env = "SNI_GATE_SNI",
@@ -59,6 +63,17 @@ struct Args {
         required = true
     )]
     allowed_sni: Vec<String>,
+
+    /// **redis**(rediss = TLS-on-connect)路径の後端(localhost の frps cache proxy ポート)。
+    /// cache 公開を同じ :443 に相乗りさせる部署でのみ指定。**未指定なら redis 路径(先頭 0x16)は
+    /// 拒否**(fail-closed = pg のみ配備で HTTPS スキャンを弾く)。
+    #[arg(long, env = "SNI_GATE_REDIS_BACKEND")]
+    redis_backend: Option<SocketAddr>,
+
+    /// **redis** 路径で許可する SNI(カンマ区切り複数可)。`redis_backend` とセットで指定
+    /// (片方だけでは redis 路径は無効)。
+    #[arg(long = "redis-sni", env = "SNI_GATE_REDIS_SNI", value_delimiter = ',')]
+    redis_sni: Vec<String>,
 
     /// 前導(GSS/SSLRequest + ClientHello)読み取りと後端接続のタイムアウト秒。slowloris 対策。
     #[arg(long, env = "SNI_GATE_TIMEOUT", default_value_t = 10)]
@@ -92,8 +107,8 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {}", args.listen))?;
     eprintln!(
-        "tsubomi-sni-gate: listening {} -> {} (allowed sni: {:?})",
-        args.listen, args.backend, args.allowed_sni
+        "tsubomi-sni-gate: listening {} | pg {} sni {:?} | redis {:?} sni {:?}",
+        args.listen, args.backend, args.allowed_sni, args.redis_backend, args.redis_sni
     );
 
     let sem = Arc::new(Semaphore::new(args.max_pending));
@@ -171,38 +186,107 @@ async fn main() -> Result<()> {
     }
 }
 
-/// 前導処理 + SNI 検証。許可なら後端へ繋いで前導を replay し、その stream を返す。
+/// 闸门が振り分ける後端の種別。前導の有無 = 後端への接続手順が違う(下記 connect_*)。
+enum Proto {
+    /// Postgres:SSLRequest 前導を本地終結 → 後端へ replay してから ClientHello を流す。
+    Pg,
+    /// redis(rediss = TLS-on-connect):前導なし。ClientHello をそのまま流す。
+    Redis,
+}
+
+/// 読み取り段の結果:振り分け先(後端種別 + アドレス + 読んだ ClientHello record)か、客户端側の拒否。
+enum Routed {
+    To {
+        proto: Proto,
+        addr: SocketAddr,
+        record: Vec<u8>,
+    },
+    Reject(String),
+}
+
+/// 前導処理 + SNI 検証 + 振り分け。許可なら後端へ繋いでその stream を返す。
 ///
-/// 戻り値の住み分け:
-///   - `Ok(Some(backend))` = 許可(splice へ)
-///   - `Ok(None)`          = 客户端側の拒否(無言。`--log-rejects` 時のみ理由を出す)
-///   - `Err(_)`            = 後端=自インフラの不調(常に記録)
+/// **timeout は 2 段**:
+///   (A) 読み取り段(先頭バイト + 前導 + ClientHello + SNI 検証 = `read_phase`)を **1 つ**の
+///       timeout で囲む。段ごとに分けると slowloris のソケット保持時間が延びるため、読み取りは
+///       接続毎まとめて 1×。
+///   (B) 後端(frps)接続を別 timeout で。(A) の失敗 = 客户端側(無言拒否)、(B) の失敗 = 自インフラ
+///       (Err として記録)、という住み分けを保つ。
+///
+/// 戻り値:`Ok(Some)` = 許可(splice へ)/ `Ok(None)` = 客户端側の拒否 / `Err(_)` = 自インフラ不調。
 async fn handshake(client: &mut TcpStream, args: &Args) -> Result<Option<TcpStream>> {
     let dur = Duration::from_secs(args.timeout);
 
-    // --- 前導 + ClientHello 読み取り(全体にタイムアウト)。失敗は客户端側の拒否扱い。---
-    let record = match tokio::time::timeout(dur, read_preamble_and_hello(client)).await {
-        Ok(Ok(rec)) => rec,
-        Ok(Err(e)) => return Ok(reject(args, || format!("{e}"))),
-        Err(_) => return Ok(reject(args, || "preamble timeout".into())),
+    // (A) 読み取り + 協議判定 + SNI 検証(まとめて 1 つの timeout)。
+    let routed = match tokio::time::timeout(dur, read_phase(client, args)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Ok(reject(args, || format!("{e}"))), // 読み取り中の I/O エラー
+        Err(_) => return Ok(reject(args, || "handshake read timeout".into())),
+    };
+    let (proto, addr, record) = match routed {
+        Routed::To {
+            proto,
+            addr,
+            record,
+        } => (proto, addr, record),
+        Routed::Reject(why) => return Ok(reject(args, move || why)),
     };
 
-    // --- SNI 検証(record の中身 = ヘッダ 5B を除いた handshake)---
-    let sni = match sni::parse_sni(&record[5..]) {
-        Some(s) => s,
-        None => return Ok(reject(args, || "no SNI in ClientHello".into())),
+    // (B) 後端接続(別 timeout = 自インフラの不調は Err として記録)。
+    let connected = match proto {
+        Proto::Pg => tokio::time::timeout(dur, connect_pg_backend(addr, &record)).await,
+        Proto::Redis => tokio::time::timeout(dur, connect_redis_backend(addr, &record)).await,
     };
-    if !args.allowed_sni.iter().any(|a| a.eq_ignore_ascii_case(&sni)) {
-        return Ok(reject(args, || format!("SNI {sni:?} not allowed")));
+    match connected {
+        Ok(Ok(b)) => Ok(Some(b)),
+        Ok(Err(e)) => Err(e),
+        Err(_) => bail!("backend setup timeout ({addr})"),
     }
+}
 
-    // --- 許可。後端へ繋いで前導を replay(後端接続にもタイムアウト)---
-    let backend = match tokio::time::timeout(dur, connect_backend(args, &record)).await {
-        Ok(Ok(b)) => b,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => bail!("backend setup timeout ({})", args.backend),
-    };
-    Ok(Some(backend))
+/// 先頭 1 バイトで協議を判定し、前導 / ClientHello を読んで SNI を検証する(I/O をここに集約 = 呼び側が
+/// 1 つの timeout で囲める)。先頭 `0x16` = redis(TLS-on-connect)、それ以外 = Postgres(SSLRequest
+/// 前導は `0x00` 始まり)。客户端側の拒否は `Ok(Routed::Reject)`、読み取り I/O エラーは `Err`。
+async fn read_phase(client: &mut TcpStream, args: &Args) -> Result<Routed> {
+    let mut first = [0u8; 1];
+    client.read_exact(&mut first).await?;
+
+    if first[0] == TLS_HANDSHAKE {
+        // redis。ルート未設定(pg のみ部署)なら ClientHello を読む前に拒否(扫描を安く弾く)。
+        let addr = match args.redis_backend {
+            Some(addr) if !args.redis_sni.is_empty() => addr,
+            _ => return Ok(Routed::Reject("redis route not configured".into())),
+        };
+        // 先頭 `0x16` は読み済み = それを content_type に TLS record を組む。
+        let record = read_tls_record(client, TLS_HANDSHAKE).await?;
+        let sni = match sni::parse_sni(&record[5..]) {
+            Some(s) => s,
+            None => return Ok(Routed::Reject("no SNI in ClientHello".into())),
+        };
+        if !sni_allowed(&args.redis_sni, &sni) {
+            return Ok(Routed::Reject(format!("redis SNI {sni:?} not allowed")));
+        }
+        Ok(Routed::To {
+            proto: Proto::Redis,
+            addr,
+            record,
+        })
+    } else {
+        // Postgres。先頭バイトを渡し前導(GSS/SSLRequest)を本地終結 → ClientHello を読む。
+        let record = read_pg_preamble_and_hello(client, first[0]).await?;
+        let sni = match sni::parse_sni(&record[5..]) {
+            Some(s) => s,
+            None => return Ok(Routed::Reject("no SNI in ClientHello".into())),
+        };
+        if !sni_allowed(&args.allowed_sni, &sni) {
+            return Ok(Routed::Reject(format!("pg SNI {sni:?} not allowed")));
+        }
+        Ok(Routed::To {
+            proto: Proto::Pg,
+            addr: args.backend,
+            record,
+        })
+    }
 }
 
 /// 客户端側の拒否:既定で無言、`--log-rejects` 時のみ理由を出す。常に `None` を返す。
@@ -213,12 +297,18 @@ fn reject(args: &Args, reason: impl FnOnce() -> String) -> Option<TcpStream> {
     None
 }
 
-/// 前導(GSS は `N` で断り SSLRequest を待つ)→ 闸门が `S` を返す → 客户端の
-/// TLS ClientHello record を 1 本読んで返す(ヘッダ 5B + 本体)。
-async fn read_preamble_and_hello(client: &mut TcpStream) -> Result<Vec<u8>> {
+/// SNI が許可リストにあるか(大小無視)。pg / redis 両路径で共有。
+fn sni_allowed(allowed: &[String], sni: &str) -> bool {
+    allowed.iter().any(|a| a.eq_ignore_ascii_case(sni))
+}
+
+/// Postgres 前導(GSS は `N` で断り SSLRequest を待つ)→ 闸门が `S` を返す → 客户端の
+/// TLS ClientHello record を 1 本読んで返す。`first` は `handshake` が先読みした先頭バイト。
+async fn read_pg_preamble_and_hello(client: &mut TcpStream, first: u8) -> Result<Vec<u8>> {
     let mut req = [0u8; 8];
-    client.read_exact(&mut req).await?;
-    // GSSEncRequest が先に来たら本地で `N`(GSS 非対応)を返し、次の前導を待つ。
+    req[0] = first;
+    client.read_exact(&mut req[1..]).await?;
+    // GSSEncRequest が先に来たら本地で `N`(GSS 非対応)を返し、次の前導(新規 8B)を待つ。
     if req == GSS_REQUEST {
         client.write_all(b"N").await?;
         client.read_exact(&mut req).await?;
@@ -228,42 +318,57 @@ async fn read_preamble_and_hello(client: &mut TcpStream) -> Result<Vec<u8>> {
     }
     // 闸门が「TLS で良い」= `S` を本地で返す。客户端は直後に ClientHello を送る。
     client.write_all(b"S").await?;
+    // ClientHello は新規の TLS record。content_type(1B)を読んでから残りを read_tls_record で。
+    let mut ct = [0u8; 1];
+    client.read_exact(&mut ct).await?;
+    read_tls_record(client, ct[0]).await
+}
 
-    // TLS record ヘッダ(5B): content_type(1) + version(2) + length(2)。
-    let mut hdr = [0u8; 5];
-    client.read_exact(&mut hdr).await?;
-    if hdr[0] != 0x16 {
-        bail!(
-            "expected TLS handshake record, got content type 0x{:02x}",
-            hdr[0]
-        );
+/// TLS record を 1 本読んで返す(ヘッダ 5B + 本体)。`content_type` は呼び側が先に読んだ 1 バイト
+/// (pg は `S` 応答後に新規読み、redis は接続の先頭バイトを流用)。handshake(0x16)以外は拒否。
+async fn read_tls_record<R: AsyncRead + Unpin>(stream: &mut R, content_type: u8) -> Result<Vec<u8>> {
+    if content_type != TLS_HANDSHAKE {
+        bail!("expected TLS handshake record, got content type 0x{content_type:02x}");
     }
-    let rec_len = ((hdr[3] as usize) << 8) | hdr[4] as usize;
+    // ヘッダ残り 4B: version(2) + length(2)。
+    let mut rest = [0u8; 4];
+    stream.read_exact(&mut rest).await?;
+    let rec_len = ((rest[2] as usize) << 8) | rest[3] as usize;
     if rec_len == 0 || rec_len + 5 > MAX_TLS_RECORD {
         bail!("bad TLS record length {rec_len}");
     }
     let mut record = Vec::with_capacity(5 + rec_len);
-    record.extend_from_slice(&hdr);
+    record.push(content_type);
+    record.extend_from_slice(&rest);
     record.resize(5 + rec_len, 0);
-    client.read_exact(&mut record[5..]).await?;
+    stream.read_exact(&mut record[5..]).await?;
     Ok(record)
 }
 
-/// 後端(localhost frps)へ繋ぎ、前導(SSLRequest→`S` 受領)を replay してから
+/// Postgres 後端(frps pg proxy)へ繋ぎ、前導(SSLRequest→`S` 受領)を replay してから
 /// 客户端の ClientHello record を流し込む。以降は素通し可能な stream を返す。
-async fn connect_backend(args: &Args, client_hello_record: &[u8]) -> Result<TcpStream> {
-    let mut backend = TcpStream::connect(args.backend)
+async fn connect_pg_backend(addr: SocketAddr, client_hello_record: &[u8]) -> Result<TcpStream> {
+    let mut backend = TcpStream::connect(addr)
         .await
-        .with_context(|| format!("connect backend {}", args.backend))?;
+        .with_context(|| format!("connect pg backend {addr}"))?;
     backend.write_all(&SSL_REQUEST).await?;
     // 不変量:後端(pgbouncer)は ClientHello を受け取る前、SSLRequest への応答として
-    // **1 バイト `S` だけ**を返す。余分な先行バイトは想定しない(正常な pgbouncer は出さない。
-    // 出すなら誤配置 = ここで気付くべき。codex review [低] 指摘)。
+    // **1 バイト `S` だけ**を返す。余分な先行バイトは想定しない(正常な pgbouncer は出さない)。
     let mut s = [0u8; 1];
     backend.read_exact(&mut s).await?;
     if s[0] != b'S' {
-        bail!("backend declined SSL (replied 0x{:02x})", s[0]);
+        bail!("pg backend declined SSL (replied 0x{:02x})", s[0]);
     }
+    backend.write_all(client_hello_record).await?;
+    Ok(backend)
+}
+
+/// redis 後端(frps cache proxy、valkey が TLS を終端)へ繋ぎ、読んだ ClientHello record を
+/// そのまま流す。**前導は無い**(rediss = TLS-on-connect)ので `S` 応答も replay もしない。
+async fn connect_redis_backend(addr: SocketAddr, client_hello_record: &[u8]) -> Result<TcpStream> {
+    let mut backend = TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("connect redis backend {addr}"))?;
     backend.write_all(client_hello_record).await?;
     Ok(backend)
 }
@@ -272,4 +377,60 @@ async fn connect_backend(args: &Args, client_hello_record: &[u8]) -> Result<TcpS
 async fn splice(mut client: TcpStream, mut backend: TcpStream) {
     // エラー(片側 RST 等)は通常のセッション終了なので握り潰す。
     let _ = copy_bidirectional(&mut client, &mut backend).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// content_type(0x16) + version(2) + length(2) + body の TLS record を組む。
+    fn tls_record(body: &[u8]) -> Vec<u8> {
+        let mut rec = vec![TLS_HANDSHAKE, 0x03, 0x03];
+        rec.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        rec.extend_from_slice(body);
+        rec
+    }
+
+    // content_type は呼び側が先読みする契約なので、テストも先頭バイトを別渡し・残りを stream に置く。
+    // `&[u8]` は tokio の AsyncRead を実装するので read_tls_record にそのまま渡せる。
+
+    #[tokio::test]
+    async fn read_tls_record_roundtrips() {
+        let rec = tls_record(b"clienthello-body-bytes");
+        let mut rest: &[u8] = &rec[1..];
+        let out = read_tls_record(&mut rest, rec[0]).await.unwrap();
+        assert_eq!(out, rec);
+    }
+
+    #[tokio::test]
+    async fn read_tls_record_rejects_non_handshake_content_type() {
+        // 0x17 = application_data 等。handshake(0x16)以外は拒否。
+        let mut rest: &[u8] = &[0x03, 0x03, 0x00, 0x01, 0xff];
+        assert!(read_tls_record(&mut rest, 0x17).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_tls_record_rejects_zero_length() {
+        let mut rest: &[u8] = &[0x03, 0x03, 0x00, 0x00];
+        assert!(read_tls_record(&mut rest, TLS_HANDSHAKE).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_tls_record_rejects_truncated_body() {
+        // 宣言長より本体が 1B 短い → read_exact が EOF で失敗(畸形を素通ししない)。
+        let rec = tls_record(b"0123456789");
+        let truncated = &rec[1..rec.len() - 1];
+        let mut rest: &[u8] = truncated;
+        assert!(read_tls_record(&mut rest, rec[0]).await.is_err());
+    }
+
+    #[test]
+    fn sni_allowed_is_case_insensitive_and_exact() {
+        let allowed = vec!["cache.tsubomi-app.com".to_string()];
+        assert!(sni_allowed(&allowed, "cache.tsubomi-app.com"));
+        assert!(sni_allowed(&allowed, "CACHE.Tsubomi-App.com")); // 大小無視
+        assert!(!sni_allowed(&allowed, "db.tsubomi-app.com")); // 別ホストは不可
+        assert!(!sni_allowed(&allowed, "evil.cache.tsubomi-app.com")); // 部分一致は不可
+        assert!(!sni_allowed(&[], "anything")); // 空リスト = 全拒否(redis 未設定相当)
+    }
 }
