@@ -22,6 +22,9 @@ export type AuthInfo = {
   // 外部(human)接続文字列機能が有効か。off の部署(CF Tunnel 等、公網 TCP 入口なし)では
   // DB 詳細の接続文字列カードを隠す。秘密ではない(機能の有無のみ)。
   db_public_enabled: boolean;
+  // キャッシュの外部(rediss://)接続文字列機能が有効か。on では cache 詳細で「手元から繋がる
+  // 外部串」カードを出す(off は内部串の控えのまま)。秘密ではない。
+  cache_public_enabled: boolean;
 };
 
 export const authKeys = {

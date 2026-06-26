@@ -42,14 +42,20 @@ pub fn routes() -> Router<AppState> {
         .route("/caches/{id}/rotate", post(rotate))
 }
 
-/// 内部入口の接続文字列(REDIS_URL)を組み立てる。host は docker DNS の tsubomi-valkey(§11-A)
-/// = 注入経由でコンテナからのみ届く(利用者の手元からは繋がらない・§11-B)。
+/// url/rotate が返す接続文字列。**公開 cache が有効な部署**(公網 VPS + sni-gate + valkey TLS)では
+/// 外部 `rediss://cache_public_host:port`(人が手元から繋げる upstash 式の串)、無効なら従来どおり
+/// 内部 `redis://tsubomi-valkey:6379`(注入された service コンテナからのみ届く控え・§11-B)。
+/// `rediss` は ioredis 等が既定で CA 検証する(端点の valkey が LE 証書を出す)ので追加オプション不要。
+/// **硬 403 闸は付けない**:cache の内部串は「注入される REDIS_URL の控え」として off でも意味がある
+/// (DB の `require_db_public` とは意図的に非対称。詳細は `doc/paas-cache-public-design.md`)。
 fn build_url(state: &AppState, acl_user: &str, password: &str) -> String {
     let cfg = &state.config;
-    format!(
-        "redis://{acl_user}:{password}@{}:{}",
-        cfg.cache_internal_host, cfg.cache_internal_port
-    )
+    let (scheme, host, port) = if cfg.cache_public_enabled {
+        ("rediss", &cfg.cache_public_host, cfg.cache_public_port)
+    } else {
+        ("redis", &cfg.cache_internal_host, cfg.cache_internal_port)
+    };
+    format!("{scheme}://{acl_user}:{password}@{host}:{port}")
 }
 
 /// 所有者チェック付きで (acl_user, namespace, password_enc) を引く。url / rotate が共有。

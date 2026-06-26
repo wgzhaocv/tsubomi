@@ -114,6 +114,11 @@ pub struct AuthInfo {
     /// 秘密ではない(機能の有無を示すだけ)。古いクライアント互換のため `serde(default)`。
     #[serde(default)]
     pub db_public_enabled: bool,
+    /// キャッシュの外部(`rediss://`)接続文字列機能が有効か(`TSUBOMI_CACHE_PUBLIC_ENABLED`)。
+    /// on の部署では web が cache 詳細で「手元から繋がる外部串」カードを出す(off は内部串の控えのまま)。
+    /// 秘密ではない。古いクライアント互換のため `serde(default)`。
+    #[serde(default)]
+    pub cache_public_enabled: bool,
 }
 
 /// `GET /api/auth/me` のレスポンスボディ。

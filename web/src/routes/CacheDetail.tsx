@@ -11,16 +11,21 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Stat } from "@/components/ui/stat";
 import { Title } from "@/components/ui/title";
+import { useAuthInfoQuery } from "@/lib/auth";
 import { useCache, useDeleteCache, useRenameCache, useRevealUrl, useRotate } from "@/lib/caches";
 
 // キャッシュ詳細(単一ページ):戻りリンク + 見出し(+ リネーム)+ 状態 + 接続文字列
 // (表示 / rotate)+ 危険ゾーン(削除)。cache はタブが概要のみなので Layout/Outlet は使わない。
-// 接続文字列(REDIS_URL)は秘密かつ**内部入口**(注入された service コンテナからのみ繋がる)。
+// 接続文字列はパスワードそのもの。既定は**内部入口**(注入された service コンテナからのみ)だが、
+// 公開 cache 有効時(cache_public_enabled)は外部 rediss:// = 手元から直接繋がる串を出す。
 
 export default function CacheDetail() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const { data: cache, error } = useCache(id);
+  const { data: authInfo } = useAuthInfoQuery();
+  // 公開 cache 有効な部署か。有効→外部 rediss:// 串(手元から繋がる)、無効→内部串の控え。
+  const publicEnabled = authInfo?.cache_public_enabled ?? false;
 
   const rename = useRenameCache(id);
   const reveal = useRevealUrl();
@@ -115,21 +120,49 @@ export default function CacheDetail() {
 
         {/* ===== 接続(注入)情報 ===== */}
         <section className="flex flex-col gap-3">
-          <h2 className="text-lg font-bold text-foreground">接続文字列</h2>
+          <h2 className="text-lg font-bold text-foreground">
+            {publicEnabled ? "接続文字列(外部接続)" : "接続文字列(サービスに注入)"}
+          </h2>
           <div className="flex items-start gap-2 rounded-2xl border-2 border-[#f5c31c] bg-[rgba(245,195,28,0.1)] px-4 py-3">
             <TriangleAlert className="mt-0.5 size-4.5 shrink-0 text-[#dba90e]" />
-            <p className="text-sm font-semibold text-[#8a6d12]">
-              この文字列は<strong>パスワードそのもの</strong>です。git に commit
-              したり共有したりしないでください。漏れたら rotate で失効できます。
-              <strong>内部入口</strong>なので、注入したサービスのコンテナからのみ接続できます。
-            </p>
+            {publicEnabled ? (
+              <p className="text-sm font-semibold text-[#8a6d12]">
+                <strong>あなたの PC からそのまま接続できます</strong>(TLS 必須の{" "}
+                <code className="font-mono">rediss://</code>)。下の<strong>キー前缀</strong>
+                を必ず付けてください ——付けないと <code className="font-mono">NOPERM</code>{" "}
+                で弾かれます。また
+                <strong>パスワードそのもの</strong>なので、git に commit
+                したり共有したりしないでください(漏れたら rotate で失効できます)。
+              </p>
+            ) : (
+              <p className="text-sm font-semibold text-[#8a6d12]">
+                この文字列は<strong>デプロイしたサービスの中からだけ</strong>使えます。ホスト名{" "}
+                <code className="font-mono">tsubomi-valkey</code>{" "}
+                は社内ネットワーク内部の名前なので、
+                <strong>あなたの PC からは繋がりません</strong>
+                (サービスには <code className="font-mono">REDIS_URL</code>{" "}
+                として自動で注入されます)。 また<strong>パスワードそのもの</strong>なので、git に
+                commit したり共有したりしないでください(漏れたら rotate で失効できます)。
+              </p>
+            )}
           </div>
 
           {cache && (
             <p className="text-xs font-medium text-muted-foreground">
               キー前缀(<code className="font-mono">REDIS_KEY_PREFIX</code>):
               <code className="font-mono font-semibold text-foreground">{cache.namespace}:</code>
-              {" — "}注入時に <code className="font-mono">REDIS_URL</code> と一緒に渡されます。
+              {" — "}
+              {publicEnabled ? (
+                <>
+                  クライアントの <code className="font-mono">keyPrefix</code> に設定するか、key
+                  に前缀を付けてください(この namespace 以外は{" "}
+                  <code className="font-mono">NOPERM</code>)。
+                </>
+              ) : (
+                <>
+                  注入時に <code className="font-mono">REDIS_URL</code> と一緒に渡されます。
+                </>
+              )}
             </p>
           )}
 

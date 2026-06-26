@@ -100,6 +100,13 @@ pub struct Config {
     /// (§11-B:cache は内部注入のみ)。pgbouncer と同型でコンテナは社外に出ない。REDIS_URL に載る。
     pub cache_internal_host: String,
     pub cache_internal_port: u16,
+    /// 公開 cache(人が手にする外部 `rediss://`)のホスト / ポート / 提供可否。`db_public_*` の cache 版。
+    /// **off**(既定):build_url は内部 `redis://`、web は内部串カードのまま。**on**(公網 VPS + sni-gate +
+    /// valkey TLS):build_url が `rediss://cache_public_host:port` を出す。公網ポートは会社防火墙の都合で
+    /// 443 一択(`incident-frp-pg-public-2026-06-22`)。値は url/rotate 表示時に解決(人が手に持つ外部串)。
+    pub cache_public_host: String,
+    pub cache_public_port: u16,
+    pub cache_public_enabled: bool,
 
     // ===== M3 service =====
     /// service の subdomain のルートドメイン。ルーティングは `<subdomain>.<domain>`。
@@ -374,6 +381,17 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6379);
+        // 公開 cache(外部 rediss://)。db_public_* の cache 版。公網は会社防火墙の都合で 443 一択
+        // (incident-frp-pg-public-2026-06-22)。既定 off(公網入口を持たない部署で誤って届かない串を見せない)。
+        let cache_public_host = std::env::var("TSUBOMI_CACHE_PUBLIC_HOST")
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        let cache_public_port: u16 = std::env::var("TSUBOMI_CACHE_PUBLIC_PORT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(443);
+        let cache_public_enabled = std::env::var("TSUBOMI_CACHE_PUBLIC_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
 
         let volumes_dir = std::env::var("TSUBOMI_VOLUMES_DIR")
             .map(PathBuf::from)
@@ -499,6 +517,9 @@ impl Config {
             valkey_admin_url,
             cache_internal_host,
             cache_internal_port,
+            cache_public_host,
+            cache_public_port,
+            cache_public_enabled,
             master_key,
             backup_dir,
             trash_dir,
