@@ -127,22 +127,16 @@ export default function CacheDetail() {
             <TriangleAlert className="mt-0.5 size-4.5 shrink-0 text-[#dba90e]" />
             {publicEnabled ? (
               <p className="text-sm font-semibold text-[#8a6d12]">
-                <strong>あなたの PC からそのまま接続できます</strong>(TLS 必須の{" "}
-                <code className="font-mono">rediss://</code>)。下の<strong>キー前缀</strong>
-                を必ず付けてください ——付けないと <code className="font-mono">NOPERM</code>{" "}
-                で弾かれます。また
-                <strong>パスワードそのもの</strong>なので、git に commit
-                したり共有したりしないでください(漏れたら rotate で失効できます)。
+                <strong>手元から直接繋がります</strong>(TLS の{" "}
+                <code className="font-mono">rediss://</code>)。<strong>パスワードそのもの</strong>
+                なので共有・git commit しない(漏れたら rotate で失効)。
               </p>
             ) : (
               <p className="text-sm font-semibold text-[#8a6d12]">
-                この文字列は<strong>デプロイしたサービスの中からだけ</strong>使えます。ホスト名{" "}
-                <code className="font-mono">tsubomi-valkey</code>{" "}
-                は社内ネットワーク内部の名前なので、
-                <strong>あなたの PC からは繋がりません</strong>
-                (サービスには <code className="font-mono">REDIS_URL</code>{" "}
-                として自動で注入されます)。 また<strong>パスワードそのもの</strong>なので、git に
-                commit したり共有したりしないでください(漏れたら rotate で失効できます)。
+                <strong>デプロイしたサービスの中からだけ</strong>使えます(
+                <code className="font-mono">tsubomi-valkey</code> は社内内部名 =
+                手元からは繋がりません。<code className="font-mono">REDIS_URL</code>{" "}
+                として自動注入)。<strong>パスワードそのもの</strong>なので共有・git commit しない。
               </p>
             )}
           </div>
@@ -154,8 +148,7 @@ export default function CacheDetail() {
               {" — "}
               {publicEnabled ? (
                 <>
-                  クライアントの <code className="font-mono">keyPrefix</code> に設定するか、key
-                  に前缀を付けてください(この namespace 以外は{" "}
+                  クライアントの <code className="font-mono">keyPrefix</code> に設定(他 namespace は{" "}
                   <code className="font-mono">NOPERM</code>)。
                 </>
               ) : (
