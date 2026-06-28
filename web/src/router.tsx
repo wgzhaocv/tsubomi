@@ -1,4 +1,4 @@
-import { createBrowserRouter } from "react-router";
+import { createBrowserRouter, Navigate } from "react-router";
 
 import { DashboardLayout } from "@/components/dashboard-layout";
 import { RequireOwner } from "@/components/require-owner";
@@ -27,7 +27,6 @@ import OauthCodeCallback from "@/routes/OauthCodeCallback";
 import ResourcePage from "@/routes/ResourcePage";
 import ServiceDeploys from "@/routes/ServiceDeploys";
 import ServiceEnv from "@/routes/ServiceEnv";
-import ServiceInjections from "@/routes/ServiceInjections";
 import ServiceLayout from "@/routes/ServiceLayout";
 import ServiceLogs from "@/routes/ServiceLogs";
 import ServiceOverview from "@/routes/ServiceOverview";
@@ -63,13 +62,14 @@ export const router = createBrowserRouter([
       // service 一覧 + 作成導線(M3 S4)。
       { path: "services", element: <Services /> },
       {
-        // 詳細の外殻(見出し + サブナビ)。子が 概要 / デプロイ / 注入 / 環境変数 / ログ / ターミナル。
+        // 詳細の外殻(見出し + サブナビ)。子が 概要 / デプロイ / 環境変数 / ログ / ターミナル。
         path: "services/:id",
         element: <ServiceLayout />,
         children: [
           { index: true, element: <ServiceOverview /> },
           { path: "deploys", element: <ServiceDeploys /> },
-          { path: "injections", element: <ServiceInjections /> },
+          // 旧「注入」タブは環境変数に統合済み。旧 URL のブックマーク救済で env へ redirect。
+          { path: "injections", element: <Navigate to="../env" replace /> },
           { path: "env", element: <ServiceEnv /> },
           { path: "logs", element: <ServiceLogs /> },
           { path: "terminal", element: <ServiceTerminal /> },

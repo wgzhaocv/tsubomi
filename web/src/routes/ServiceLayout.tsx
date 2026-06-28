@@ -1,6 +1,5 @@
 import {
   ArrowLeft,
-  Cable,
   History,
   LayoutDashboard,
   ScrollText,
@@ -17,12 +16,12 @@ import { useService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 
 // サービス詳細の外殻:戻りリンク + 見出し(phase バッジ)+ サブナビ(概要 / デプロイ /
-// 注入 / 環境変数 / ログ / ターミナル)。各ページはこの <Outlet> に差さる。DatabaseLayout と同じ構造。
+// 環境変数 / ログ / ターミナル)。各ページはこの <Outlet> に差さる。DatabaseLayout と同じ構造。
+// 注入は環境変数タブに統合済み(容器が受け取る変数の全体像を 1 画面で。注入は「注入」バッジで特別表示)。
 
 const NAV = [
   { to: "", end: true, label: "概要", icon: LayoutDashboard },
   { to: "deploys", end: false, label: "デプロイ", icon: History },
-  { to: "injections", end: false, label: "注入", icon: Cable },
   { to: "env", end: false, label: "環境変数", icon: SlidersHorizontal },
   { to: "logs", end: false, label: "ログ", icon: ScrollText },
   { to: "terminal", end: false, label: "ターミナル", icon: SquareTerminal },
