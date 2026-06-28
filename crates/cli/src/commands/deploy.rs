@@ -56,6 +56,7 @@ pub async fn run(
         "service_id": dc.service_id,
         "git_sha": git_sha,
         "image_digest": digest,
+        "commit_message": commit_subject(),
         "ts": now_unix(),
         "nonce": random_b64(16),
     }))
@@ -189,6 +190,18 @@ fn tag() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "local".to_string())
+}
+
+/// commit の件名(`git log -1 --pretty=%s`)。deploy 履歴の見出し。repo 外 / 失敗は None
+/// (server 側 `#[serde(default)]` Option が null/欠落を吸収する)。
+fn commit_subject() -> Option<String> {
+    Command::new("git")
+        .args(["log", "-1", "--pretty=%s"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn now_unix() -> i64 {

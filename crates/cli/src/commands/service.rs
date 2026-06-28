@@ -280,11 +280,17 @@ fn print_status(
             .as_deref()
             .map(|e| format!("  — {e}"))
             .unwrap_or_default();
+        let msg = d
+            .commit_message
+            .as_deref()
+            .map(|m| format!("  {m}"))
+            .unwrap_or_default();
         println!(
-            "    {}  {:<9} {}  id={}{}",
+            "    {}  {:<9} {}{}  id={}{}",
             d.created_at,
             d.status,
             short_sha(&d.git_sha),
+            msg,
             d.id,
             err
         );

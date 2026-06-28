@@ -441,6 +441,9 @@ pub struct CreateServiceResp {
 pub struct DeployDto {
     pub id: Uuid,
     pub git_sha: String,
+    /// commit の件名(`git log -1 --pretty=%s`)。旧 deploy / 旧 workflow は None。
+    #[serde(default)]
+    pub commit_message: Option<String>,
     pub image_digest: String,
     /// received / pulling / starting / succeeded / failed(deploys.status)。
     pub status: String,

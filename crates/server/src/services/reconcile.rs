@@ -246,7 +246,7 @@ async fn converge_running(state: &AppState) {
                 }
             };
             // 成功 deploy が無い(理屈上は phase=running と矛盾)→ 触らない。
-            let Some((digest, git_sha)) = latest else {
+            let Some((digest, git_sha, msg)) = latest else {
                 continue;
             };
             tracing::info!(%id, "reconcile: コンテナ消失を検知 — 復活させる");
@@ -262,7 +262,10 @@ async fn converge_running(state: &AppState) {
             // ロックは持たずに redeploy(run_digest が内部で deploy_lock を取る — 二重取得回避)。
             // Reconcile 契機:run_digest がロック取得後に「まだ走るべきか」を再確認し、その間に stop が
             // 割り込んでいたら蘇らせない(stop レース防止)。
-            if let Err(e) = redeploy(state, id, &digest, &git_sha, DeployTrigger::Reconcile).await {
+            if let Err(e) =
+                redeploy(state, id, &digest, &git_sha, msg.as_deref(), DeployTrigger::Reconcile)
+                    .await
+            {
                 tracing::warn!(error = ?e, %id, "reconcile: 復活に失敗(phase=failed。次パスでは対象外)");
             } else {
                 restored += 1;

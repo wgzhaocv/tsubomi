@@ -152,7 +152,7 @@ async fn ensure_owned(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<()
     if ok { Ok(()) } else { Err(AppError::NotFound) }
 }
 
-/// deploys 行(id, git_sha, image_digest, status, error, created_at, finished_at)。
+/// deploys 行(id, git_sha, image_digest, status, error, created_at, finished_at, commit_message)。
 type DeployRow = (
     Uuid,
     String,
@@ -161,6 +161,7 @@ type DeployRow = (
     Option<String>,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
+    Option<String>,
 );
 
 fn deploy_row_to_dto(r: DeployRow) -> DeployDto {
@@ -172,6 +173,7 @@ fn deploy_row_to_dto(r: DeployRow) -> DeployDto {
         error: r.4,
         created_at: r.5,
         finished_at: r.6,
+        commit_message: r.7,
     }
 }
 
@@ -183,7 +185,7 @@ pub async fn deploys(
 ) -> AppResult<Json<Vec<DeployDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<DeployRow> = sqlx::query_as(
-        "SELECT id, git_sha, image_digest, status, error, created_at, finished_at
+        "SELECT id, git_sha, image_digest, status, error, created_at, finished_at, commit_message
            FROM deploys WHERE service_id = $1 ORDER BY created_at DESC LIMIT 50",
     )
     .bind(id)
@@ -224,14 +226,14 @@ pub async fn deploy_config(
 
 // ===== lifecycle(start / stop / logs / delete / rollback)=====
 
-/// 直近に成功した deploy の `(image_digest, git_sha)`(同じ行なので整合)。1 件も無ければ未デプロイ。
-/// start(現行を再起動)と reconcile(消えたコンテナを復活)が共有する。
+/// 直近に成功した deploy の `(image_digest, git_sha, commit_message)`(同じ行なので整合)。
+/// 1 件も無ければ未デプロイ。start(現行を再起動)と reconcile(消えたコンテナを復活)が共有する。
 pub(crate) async fn latest_succeeded_deploy(
     state: &AppState,
     service_id: Uuid,
-) -> AppResult<Option<(String, String)>> {
+) -> AppResult<Option<(String, String, Option<String>)>> {
     Ok(sqlx::query_as(
-        "SELECT image_digest, git_sha FROM deploys
+        "SELECT image_digest, git_sha, commit_message FROM deploys
           WHERE service_id = $1 AND status = 'succeeded'
           ORDER BY created_at DESC LIMIT 1",
     )
@@ -264,15 +266,17 @@ pub(crate) async fn redeploy(
     service_id: Uuid,
     image_digest: &str,
     git_sha: &str,
+    commit_message: Option<&str>,
     trigger: deploy::DeployTrigger,
 ) -> AppResult<()> {
     let deploy_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO deploys (service_id, git_sha, image_digest, status)
-              VALUES ($1, $2, $3, 'received') RETURNING id",
+        "INSERT INTO deploys (service_id, git_sha, image_digest, status, commit_message)
+              VALUES ($1, $2, $3, 'received', $4) RETURNING id",
     )
     .bind(service_id)
     .bind(git_sha)
     .bind(image_digest)
+    .bind(commit_message)
     .fetch_one(&state.db)
     .await?;
     deploy::run_digest(state, deploy_id, service_id, image_digest, git_sha, trigger).await
@@ -286,14 +290,22 @@ pub async fn start(
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
-    // 直近に成功した deploy の (digest, git_sha) を再起動する。1 件も無ければ未デプロイ。
-    let (digest, git_sha) = latest_succeeded_deploy(&state, id).await?.ok_or_else(|| {
+    // 直近に成功した deploy の (digest, git_sha, message) を再起動する。1 件も無ければ未デプロイ。
+    let (digest, git_sha, msg) = latest_succeeded_deploy(&state, id).await?.ok_or_else(|| {
         AppError::BadRequest(
             "まだデプロイされていません(git push か `tbm deploy --local` でデプロイしてください)"
                 .into(),
         )
     })?;
-    redeploy(&state, id, &digest, &git_sha, deploy::DeployTrigger::User).await?;
+    redeploy(
+        &state,
+        id,
+        &digest,
+        &git_sha,
+        msg.as_deref(),
+        deploy::DeployTrigger::User,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -504,16 +516,24 @@ pub async fn rollback(
     Json(req): Json<RollbackReq>,
 ) -> AppResult<StatusCode> {
     ensure_owned(&state, auth.user_id, id).await?;
-    // 指定 deploy はこの service のものに限る(IDOR 防止)。
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT image_digest, git_sha FROM deploys WHERE id = $1 AND service_id = $2",
+    // 指定 deploy はこの service のものに限る(IDOR 防止)。message も引き継ぐ(履歴の見出しが空かない)。
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT image_digest, git_sha, commit_message FROM deploys WHERE id = $1 AND service_id = $2",
     )
     .bind(req.deploy_id)
     .bind(id)
     .fetch_optional(&state.db)
     .await?;
-    let (digest, git_sha) = row.ok_or(AppError::NotFound)?;
-    redeploy(&state, id, &digest, &git_sha, deploy::DeployTrigger::User).await?;
+    let (digest, git_sha, msg) = row.ok_or(AppError::NotFound)?;
+    redeploy(
+        &state,
+        id,
+        &digest,
+        &git_sha,
+        msg.as_deref(),
+        deploy::DeployTrigger::User,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

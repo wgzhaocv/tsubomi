@@ -48,6 +48,23 @@ struct HookBody {
     image_digest: String,
     ts: i64,
     nonce: String,
+    /// commit の件名(`git log -1 --pretty=%s`)。message を送らない旧 workflow / 旧 CLI からの
+    /// hook では欠落するので `#[serde(default)]`(None でも 202 で通す = 後方互換)。
+    #[serde(default)]
+    commit_message: Option<String>,
+}
+
+/// commit_message を保存用に健全化(空 → None、char 境界で 500 文字に切る = DB 膨張防止)。
+/// git_sha / nonce は識別子なので不正は 400 で弾くが、これは表示専用の情報なので**切り詰めて
+/// 通す**(長い commit message で deploy 自体を失敗させない)。HMAC 済みなので注入はしない。
+fn sanitize_commit_message(m: Option<String>) -> Option<String> {
+    let m = m?;
+    let t = m.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.chars().take(500).collect())
+    }
 }
 
 /// `POST /api/hook/deploy`(session 不要、IP 除外。決定 #4)。
@@ -139,12 +156,13 @@ pub async fn deploy(
         .await
         .map_err(|e| map_unique(e, "この nonce は既に使われています(リプレイ)"))?;
     let deploy_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO deploys (service_id, git_sha, image_digest, status)
-              VALUES ($1, $2, $3, 'received') RETURNING id",
+        "INSERT INTO deploys (service_id, git_sha, image_digest, status, commit_message)
+              VALUES ($1, $2, $3, 'received', $4) RETURNING id",
     )
     .bind(body.service_id)
     .bind(&body.git_sha)
     .bind(&body.image_digest)
+    .bind(sanitize_commit_message(body.commit_message))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;

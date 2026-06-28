@@ -80,6 +80,8 @@ export function deployStatusLabel(status: string): string {
 export type Deploy = {
   id: string;
   git_sha: string;
+  // commit の件名(旧 deploy / 旧 workflow は null → git_sha に回退)。
+  commit_message: string | null;
   image_digest: string;
   status: string;
   error: string | null;

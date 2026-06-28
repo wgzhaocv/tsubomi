@@ -61,10 +61,13 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
       - name: notify tsubomi
         run: |
+          # commit の件名(deploy 履歴の見出し)。checkout 済みなので git log が使える
+          # (workflow_dispatch でも HEAD の件名が取れる)。jq --arg なので引用符/改行は安全。
           BODY=$(jq -nc --arg s "${{ vars.TSUBOMI_SERVICE_ID }}" \
             --arg sha "${{ github.sha }}" --arg d "${{ steps.build.outputs.digest }}" \
+            --arg msg "$(git log -1 --pretty=%s)" \
             --argjson ts "$(date +%s)" --arg n "$(openssl rand -hex 16)" \
-            '{service_id:$s, git_sha:$sha, image_digest:$d, ts:$ts, nonce:$n}')
+            '{service_id:$s, git_sha:$sha, image_digest:$d, commit_message:$msg, ts:$ts, nonce:$n}')
           SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.TSUBOMI_DEPLOY_KEY }}" -hex | sed 's/^.* //')
           curl -fsS -X POST "${{ vars.TSUBOMI_HOOK_URL }}" \
             -H "content-type: application/json" -H "x-tsubomi-signature: $SIG" -d "$BODY"
@@ -137,6 +140,8 @@ mod tests {
             "secrets.TSUBOMI_REGISTRY_PASS",
             "x-tsubomi-signature",
             "image_digest",
+            // commit の件名を hook body に載せる(deploy 履歴の見出し)。
+            "commit_message",
             // 手動再デプロイ(空コミット不要)。
             "workflow_dispatch",
         ] {

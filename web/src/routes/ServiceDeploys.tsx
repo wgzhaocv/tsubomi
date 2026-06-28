@@ -38,11 +38,12 @@ export default function ServiceDeploys() {
               className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
             >
               <div className="flex min-w-0 flex-col gap-0.5">
-                <span className="font-bold text-foreground">
-                  <StatusDot status={d.status} /> {d.git_sha}
+                <span className="truncate font-bold text-foreground">
+                  <StatusDot status={d.status} /> {d.commit_message || d.git_sha}
                 </span>
                 <span className="truncate text-xs font-medium text-muted-foreground">
-                  {new Date(d.created_at).toLocaleString("ja-JP")} · {shortDigest(d.image_digest)}
+                  {new Date(d.created_at).toLocaleString("ja-JP")} · {d.git_sha} ·{" "}
+                  {shortDigest(d.image_digest)}
                 </span>
                 {d.error && <span className="text-xs font-semibold text-[#e05a5a]">{d.error}</span>}
               </div>
