@@ -61,7 +61,7 @@ enum Cmd {
     },
     /// デプロイ(`--local`:ローカルで build+push して hook を叩く。GitHub 非依存の退路)
     Deploy(commands::deploy::DeployArgs),
-    /// リソース(database / volume)を service に注入する
+    /// リソース(database / volume / cache / 別 service)を service に注入する
     Inject(commands::inject::InjectArgs),
     /// 注入を外す(injection-id は `tbm service status` で確認)
     Eject {
