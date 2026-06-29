@@ -9,10 +9,11 @@ use crate::commands::{
 use crate::config;
 
 /// `tbm inject <resource> --into <service> [--as ENV] [--mount /path]`。
-/// database / volume / cache を service に注入(バインディングを保存。値は起動の瞬間に解決)。
+/// database / volume / cache / 別 service を service に注入(バインディングを保存。値は起動の瞬間に解決)。
+/// service 注入は内部直連 URL `http://<subdomain>:<port>` を渡す(公網を通らない。同一 owner 限定)。
 #[derive(Args)]
 pub struct InjectArgs {
-    /// 注入するリソースの表示名(database / volume / cache)
+    /// 注入するリソースの表示名(database / volume / cache / service)
     pub resource: String,
     /// 注入先サービスの表示名
     #[arg(long)]
@@ -85,20 +86,21 @@ pub async fn run_eject(
     Ok(())
 }
 
-/// リソース表示名 → id(database + volume + cache を横断検索)。複数種別ヒットは曖昧エラー。
+/// リソース表示名 → id(database + volume + cache + service を横断検索)。複数種別ヒットは曖昧エラー。
 async fn resolve_resource(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
     name: &str,
 ) -> Result<String> {
-    // database / volume / cache 一覧は独立なので並行取得する。
-    let (dbs, vols, caches) = tokio::join!(
+    // database / volume / cache / service 一覧は独立なので並行取得する。
+    let (dbs, vols, caches, svcs) = tokio::join!(
         api::db_list(c, server_url, token),
         api::volume_list(c, server_url, token),
         api::cache_list(c, server_url, token),
+        api::service_list(c, server_url, token),
     );
-    let (dbs, vols, caches) = (dbs?, vols?, caches?);
+    let (dbs, vols, caches, svcs) = (dbs?, vols?, caches?, svcs?);
     let mut hits: Vec<String> = Vec::new();
     for d in &dbs {
         if d.display_name == name {
@@ -115,15 +117,22 @@ async fn resolve_resource(
             hits.push(ca.id.to_string());
         }
     }
+    for s in &svcs {
+        if s.display_name == name {
+            hits.push(s.id.to_string());
+        }
+    }
     match hits.len() {
         1 => Ok(hits.remove(0)),
         0 => Err(api::ApiError {
             code: "not_found",
-            message: format!("リソース '{name}' が見つかりません(database / volume / cache)"),
+            message: format!(
+                "リソース '{name}' が見つかりません(database / volume / cache / service)"
+            ),
         }
         .into()),
         _ => bail!(
-            "'{name}' が複数の種別(database / volume / cache)に存在します。一方を改名してから注入してください"
+            "'{name}' が複数の種別(database / volume / cache / service)に存在します。一方を改名してから注入してください"
         ),
     }
 }

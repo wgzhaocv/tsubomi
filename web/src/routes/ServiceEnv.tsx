@@ -13,6 +13,7 @@ import {
   useEjectInjection,
   useServiceEnvKeys,
   useServiceInjections,
+  useServices,
   useSetEnv,
   useUnsetEnv,
 } from "@/lib/services";
@@ -20,9 +21,9 @@ import { useVolumes } from "@/lib/volumes";
 
 // 注入元リソースの詳細ページ(クリックで遷移)。種別でルートが分かれる。
 function resourceHref(inj: Injection): string {
-  return inj.resource_kind === "database"
-    ? `/databases/${inj.resource_id}`
-    : `/volumes/${inj.resource_id}`;
+  if (inj.resource_kind === "database") return `/databases/${inj.resource_id}`;
+  if (inj.resource_kind === "service") return `/services/${inj.resource_id}`;
+  return `/volumes/${inj.resource_id}`;
 }
 
 // 環境変数:この service の容器が受け取る変数を 1 画面に集約する。容器にとって注入も静的変数も
@@ -37,6 +38,7 @@ export default function ServiceEnv() {
   const { data: keys, isPending, error: envError } = useServiceEnvKeys(id);
   const { data: dbs } = useDatabases();
   const { data: vols } = useVolumes();
+  const { data: svcs } = useServices();
   const create = useCreateInjection(id);
   const eject = useEjectInjection(id);
   const setEnv = useSetEnv(id);
@@ -60,8 +62,13 @@ export default function ServiceEnv() {
   const options = [
     ...(dbs ?? []).map((d) => ({ key: d.id, label: `${d.display_name}(database)` })),
     ...(vols ?? []).map((v) => ({ key: v.id, label: `${v.display_name}(volume)` })),
+    // 別 service を注入(内部 URL)。自分自身は除く(自注入はサーバが弾く)。
+    ...(svcs ?? [])
+      .filter((s) => s.id !== id)
+      .map((s) => ({ key: s.id, label: `${s.display_name}(service)` })),
   ];
   const isVolume = (vols ?? []).some((v) => v.id === resourceId);
+  const isService = (svcs ?? []).some((s) => s.id === resourceId);
 
   const submitInjection = () => {
     if (!resourceId || create.isPending) return;
@@ -121,8 +128,8 @@ export default function ServiceEnv() {
         </div>
       </div>
       <p className="text-sm font-medium text-muted-foreground">
-        コンテナに渡す環境変数の全体像です。「注入」付きは database / volume
-        の注入由来で、接続情報やマウント先が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。
+        コンテナに渡す環境変数の全体像です。「注入」付きは database / volume / service
+        の注入由来で、接続情報・マウント先・別 app の内部 URL が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。
         その他はここで追加した静的変数です(値は表示されません=上書きのみ)。
         <strong>反映には再デプロイ(または開始)が必要</strong>です。
       </p>
@@ -152,7 +159,7 @@ export default function ServiceEnv() {
                   </span>
                 </div>
                 {/* 2 行目:注入元のリソース(クリックで該当リソースへ)+ 値の説明。
-                    volume はマウント先パス、database は接続文字列(値は表示しない)。 */}
+                    volume はマウント先パス、service は内部 URL、その他は接続文字列(値は表示しない)。 */}
                 <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs font-medium text-muted-foreground">
                   <span>{inj.resource_kind}</span>
                   {inj.valid ? (
@@ -168,6 +175,8 @@ export default function ServiceEnv() {
                   )}
                   {inj.resource_kind === "volume" ? (
                     inj.mount_path && <span>→ {inj.mount_path} にマウント</span>
+                  ) : inj.resource_kind === "service" ? (
+                    <span>の内部 URL</span>
                   ) : (
                     <span>の接続文字列</span>
                   )}
@@ -257,13 +266,13 @@ export default function ServiceEnv() {
               options={options}
               value={resourceId}
               onChange={setResourceId}
-              placeholder="database / volume を選択"
+              placeholder="database / volume / service を選択"
             />
           </div>
           <Input
             label="環境変数名(任意)"
             value={injEnvVar}
-            placeholder={isVolume ? "STORAGE_PATH" : "DATABASE_URL"}
+            placeholder={isVolume ? "STORAGE_PATH" : isService ? "<名前>_URL" : "DATABASE_URL"}
             onChange={(e) => setInjEnvVar(e.target.value)}
             description="省略するとリソース種別の既定名を使います。"
           />
