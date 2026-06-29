@@ -352,6 +352,12 @@ async fn run_digest_inner(
         spec.container_port,
     ) {
         Ok(()) => {
+            // route が新を指した = 成功確定の切替点。**内部リンクも公開 route と同一の瞬間に切替える**:
+            // この service を callee として注入している caller 群の私網へ、新コンテナを別名で attach する。
+            // commit_success より後 = 旧版にしか繋がっていなかった内部呼び出しも、ここで初めて新版へ向く
+            // (公開と内部のカットオーバーが揃う)。先に新を付けてから旧を消す(旧 endpoint は旧コンテナ
+            // 削除で自然消滅 = 別名は新へ収束。新を付ける前に旧を消すと一瞬 A→B が切れるため順序が肝心)。
+            crate::services::network::attach_as_callee(state, service_id, &spec.subdomain, &new_name).await;
             // route が新を指したので旧を消してよい(失敗しても新は稼働中。reconcile が掃除)。
             if let Err(e) = docker::remove_others(state, service_id, &new_name).await {
                 tracing::warn!(error = ?e, %service_id, "旧コンテナの掃除に失敗(新は稼働中。reconcile が後で掃除)");

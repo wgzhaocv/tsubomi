@@ -7,6 +7,12 @@
 //! route の yaml は無改修**:同名コンテナ DNS は私網に attach すれば引けるため。pgbouncer/valkey
 //! は私網からも到達可だが、隔離は資格(pg role / valkey ACL)が担保 = データ安全は本変更で不変。
 //!
+//! **service↔service 内部リンク**(`doc/paas-service-link-design.md`):A が B を注入すると、B(callee)
+//! の稼働コンテナを A(caller)の私網へ **docker 網別名 = B の subdomain** で客人 attach する。A は
+//! `http://<subdomain>:<port>` を docker DNS で引いて B へ直連できる(公網を通らない)。同一 owner 限定
+//! (注入作成時に担保)= 跨租户の東西向は開かない。caller 側は `ensure_service_network`(deploy 前 +
+//! reconcile)、callee 側は `attach_as_callee`(B の deploy 直後)で収束、eject は `detach_callee` で即掃除。
+//!
 //! ライフサイクルは **service 紐づき**(deploy ではない):start-first swap の新旧コンテナは
 //! 同じ私網に同居する。create は冪等(`run()` がコンテナ起動の直前に ensure)、撤去は
 //! 削除 / 購読 + reconcile の孤児 GC。infra 単独再起動や手動削除からは reconcile が自己回復する。
@@ -15,7 +21,8 @@ use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
 use bollard::models::{
-    Ipam, IpamConfig, NetworkConnectRequest, NetworkCreateRequest, NetworkDisconnectRequest,
+    EndpointSettings, Ipam, IpamConfig, NetworkConnectRequest, NetworkCreateRequest,
+    NetworkDisconnectRequest,
 };
 use bollard::query_parameters::ListNetworksOptionsBuilder;
 use ipnet::Ipv4Net;
@@ -172,9 +179,97 @@ pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -
     // infra を attach。失敗は伝播させる(infra 不達のまま app を起こすと注入/route が壊れた
     // service になる — 黙って成功させない。reconcile から呼ばれた時は呼び出し側が per-item で log)。
     for container in infra_containers(state) {
-        connect(state, &name, container).await?;
+        connect(state, &name, container, &[]).await?;
     }
+
+    // この service が注入する別 service(callee)を私網へ客人 attach(別名=callee.subdomain)。
+    // **失敗は伝播させない** — リンク 1 本の不調で caller 全体の deploy を止めない(reconcile が後で拾う)。
+    // infra と違い「届かなくても caller 自身は起動できる」ので best-effort が正しい。
+    attach_callees(state, &name, service_id).await;
     Ok(())
+}
+
+/// caller が注入する callee service の (id, subdomain)。未削除の service 注入だけ。
+async fn service_callees(state: &AppState, caller_id: Uuid) -> AppResult<Vec<(Uuid, String)>> {
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT r.id, d.subdomain
+           FROM injections i
+           JOIN resources r ON r.id = i.resource_id
+           JOIN service_details d ON d.resource_id = r.id
+          WHERE i.service_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
+    )
+    .bind(caller_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(rows)
+}
+
+/// caller の私網へ、その callee 群の稼働コンテナを別名 attach する(best-effort・per-item で log)。
+/// callee が未稼働(停止/未デプロイ/削除)なら skip。`ensure_service_network` と reconcile から呼ぶ。
+async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
+    let callees = match service_callees(state, caller_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, %caller_id, "callee 一覧の取得に失敗(網リンク)");
+            return;
+        }
+    };
+    for (callee_id, subdomain) in callees {
+        // 対象は callee の **route 後端コンテナ**(= 直近成功 deploy の serving 容器)。in-flight な
+        // swap 中でも「公開中の版」だけを指すので、走行中の任意コンテナを掴んで別名を取り違えない。
+        // route 無し(未デプロイ / 停止 = route 撤去済み)なら skip。
+        if let Some(container) = super::route::backend_container(state, callee_id)
+            && let Err(e) = connect(state, network, &container, std::slice::from_ref(&subdomain)).await
+        {
+            tracing::warn!(error = ?e, %callee_id, alias = %subdomain, "callee の attach に失敗");
+        }
+    }
+}
+
+/// B(callee)の新コンテナを、**B を注入している caller 群**の私網へ別名=B.subdomain で attach する。
+/// B の deploy(start-first swap)直後に `docker::run` から呼ぶ(旧コンテナ撤去で消えた endpoint を
+/// 即補い、次 reconcile までの A→B 断を塞ぐ)。caller 未デプロイ(網無し)なら skip — その caller の
+/// deploy 時に `attach_callees` が付ける。best-effort(reconcile が漏れを拾う)。
+pub(crate) async fn attach_as_callee(state: &AppState, callee_id: Uuid, subdomain: &str, container: &str) {
+    // caller(i.service_id)が **生存している** service だけを対象にする(soft-delete 済みだが網撤去に
+    // 失敗して網が残っている caller の孤児網へ、B redeploy が客人を入れ直す事故を防ぐ — codex 監査)。
+    let callers: Vec<(Uuid,)> = match sqlx::query_as(
+        "SELECT i.service_id
+           FROM injections i
+           JOIN resources caller ON caller.id = i.service_id
+           JOIN resources src    ON src.id = i.resource_id
+          WHERE i.resource_id = $1
+            AND src.kind = 'service'
+            AND caller.deleted_at IS NULL",
+    )
+    .bind(callee_id)
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, %callee_id, "caller 一覧の取得に失敗(網リンク)");
+            return;
+        }
+    };
+    for (caller_id,) in callers {
+        let net = svc_network_name(state, caller_id);
+        if !network_exists(state, &net).await {
+            continue; // caller 未デプロイ = その deploy 時に attach される
+        }
+        if let Err(e) = connect(state, &net, container, &[subdomain.to_string()]).await {
+            tracing::warn!(error = ?e, %caller_id, alias = %subdomain, "caller 網への attach に失敗");
+        }
+    }
+}
+
+/// eject(リンク削除)時に caller の私網から callee コンテナを即切断(best-effort)。これが無いと
+/// callee は次の自分の redeploy まで caller 網に客人として残る(同 owner なので無害だが掃く)。
+pub(crate) async fn detach_callee(state: &AppState, caller_id: Uuid, callee_id: Uuid) {
+    let net = svc_network_name(state, caller_id);
+    if let Ok(Some(container)) = super::docker::running_container_name(state, callee_id).await {
+        disconnect(state, &net, &container).await;
+    }
 }
 
 /// 私網が既に在るか(inspect で軽く確認)。エラーは「無い」扱い — 新規作成パスへ倒し、実在していれば
@@ -187,11 +282,18 @@ async fn network_exists(state: &AppState, name: &str) -> bool {
         .is_ok()
 }
 
-/// infra コンテナを私網へ接続(既接続=403 は冪等に握り潰す)。
-async fn connect(state: &AppState, network: &str, container: &str) -> AppResult<()> {
+/// コンテナを私網へ接続(既接続=403 は冪等に握り潰す)。`aliases` 非空なら docker 網別名を付ける
+/// (callee を caller の subdomain で引けるようにする。infra は別名なし `&[]` で呼ぶ)。
+/// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できないが、callee は両 attach 経路とも
+/// 最初から別名付きで繋ぐので問題にならない(infra は元々別名不要)。
+async fn connect(state: &AppState, network: &str, container: &str, aliases: &[String]) -> AppResult<()> {
+    let endpoint_config = (!aliases.is_empty()).then(|| EndpointSettings {
+        aliases: Some(aliases.to_vec()),
+        ..Default::default()
+    });
     let req = NetworkConnectRequest {
         container: container.to_string(),
-        endpoint_config: None,
+        endpoint_config,
     };
     match state.docker.connect_network(network, req).await {
         Ok(()) => Ok(()),
@@ -202,13 +304,24 @@ async fn connect(state: &AppState, network: &str, container: &str) -> AppResult<
     }
 }
 
-/// service の私網を撤去する:infra を disconnect(force)→ 網削除。**順序厳守** — endpoint が
-/// 残ると remove は "active endpoints" で失敗する。app コンテナは呼び出し側が先に stop_remove
-/// 済みである前提(soft_delete / purge / 孤児掃除はいずれもそうしている)。網が無い(404)は成功扱い。
+/// service の私網を撤去する:**網上の全 endpoint を disconnect(force)→ 網削除**。**順序厳守** —
+/// endpoint が残ると remove は "active endpoints" で失敗する。infra に加え、客人として attach された
+/// callee コンテナ(service↔service リンク)も剥がす必要があるので、固定 infra 名ではなく inspect で
+/// 現接続コンテナを列挙して全部外す。app コンテナは呼び出し側が先に stop_remove 済みである前提
+/// (soft_delete / purge / 孤児掃除はいずれもそうしている)。網が無い(404)は成功扱い。
 pub(crate) async fn remove_service_network(state: &AppState, service_id: Uuid) -> AppResult<()> {
     let name = svc_network_name(state, service_id);
-    for container in infra_containers(state) {
-        disconnect(state, &name, container).await;
+    // inspect で現在の接続コンテナ(キー=コンテナ id)を列挙し force-disconnect(best-effort・冪等)。
+    // inspect が落ちても(網消失など)remove の 404 経路で吸収する。
+    if let Ok(net) = state
+        .docker
+        .inspect_network(&name, None::<bollard::query_parameters::InspectNetworkOptions>)
+        .await
+        && let Some(containers) = net.containers
+    {
+        for cid in containers.keys() {
+            disconnect(state, &name, cid).await;
+        }
     }
     match state.docker.remove_network(&name).await {
         Ok(()) => Ok(()),
@@ -229,9 +342,10 @@ async fn disconnect(state: &AppState, network: &str, container: &str) {
 }
 
 /// 網の期望状態への収束(valkey::reconcile_acls と同型:毎 tick fresh SELECT・best-effort・
-/// per-item・panic しない)。(1)生存 service には私網 + infra attach を保証、(2)生存 service を
-/// 持たない孤児私網(`tsubomi.managed=true` ラベル)を撤去する。infra 単独再起動や手動削除からの
-/// 自己回復をここで担保する(起動時収束だけでは塞げない穴)。
+/// per-item・panic しない)。(1)生存 service には私網 + infra + 現リンクの callee attach を保証、
+/// (2)生存 service を持たない孤児私網(`tsubomi.managed=true` ラベル)を撤去、(3)生存 caller の私網に
+/// 居残る「現リンクに無い別 service の app 容器」(eject 即時 detach の取りこぼし等)を剥がす。
+/// infra 単独再起動や手動削除からの自己回復をここで担保する(起動時収束だけでは塞げない穴)。
 pub(crate) async fn reconcile_networks(state: &AppState) {
     // (1) 生存 service に私網を保証。
     let live: Vec<(Uuid,)> = match sqlx::query_as(
@@ -292,6 +406,46 @@ pub(crate) async fn reconcile_networks(state: &AppState) {
         match remove_service_network(state, sid).await {
             Ok(()) => removed += 1,
             Err(e) => tracing::warn!(error = ?e, %sid, "network reconcile: 孤児私網の撤去に失敗"),
+        }
+    }
+
+    // (3) 陳腐な客人 GC:生存 caller の私網に居残る「現リンクに無い別 service の app 容器」を剥がす。
+    //     eject の即時 detach(`detach_callee`)が失敗した等で残った客人を、ここで収束させる(背骨どおり
+    //     「DB の期望状態へ現実を寄せる」)。infra は `tsubomi.managed=true` を持たず list_managed に
+    //     出ないので対象外 = 安全。caller 自身の容器と現リンク先(desired)は温存。
+    let cid_to_svc: HashMap<String, Uuid> = super::docker::list_managed(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(cid, sid)| sid.map(|s| (cid, s)))
+        .collect();
+    for caller_id in &live_ids {
+        let desired: HashSet<Uuid> = match service_callees(state, *caller_id).await {
+            Ok(c) => c.into_iter().map(|(id, _)| id).collect(),
+            Err(e) => {
+                tracing::warn!(error = ?e, %caller_id, "network reconcile: callee 集合の取得に失敗");
+                continue;
+            }
+        };
+        let net = svc_network_name(state, *caller_id);
+        let Ok(info) = state
+            .docker
+            .inspect_network(&net, None::<bollard::query_parameters::InspectNetworkOptions>)
+            .await
+        else {
+            continue;
+        };
+        let Some(containers) = info.containers else {
+            continue;
+        };
+        for cid in containers.keys() {
+            // app 容器(managed)で、caller 自身でも現リンク先でもない = 陳腐な客人 → 剥がす。
+            if let Some(svc) = cid_to_svc.get(cid)
+                && *svc != *caller_id
+                && !desired.contains(svc)
+            {
+                disconnect(state, &net, cid).await;
+            }
         }
     }
     tracing::debug!(live = live.len(), orphan_removed = removed, "network reconcile: 網収束");

@@ -2,7 +2,12 @@
 //!
 //! `injections` 表は **バインディング**だけを持ち、値はここでコンテナ create の直前に解決する。
 //! 最終 env = `service_env`(復号した静的値)∪ injections を 1 件ずつ解決(database → 内部 app
-//! role の接続文字列 / volume → bind マウント + パス env)。PORT は呼び出し側(deploy.rs)が足す。
+//! role の接続文字列 / volume → bind マウント + パス env / cache → ACL ユーザ URL + 前缀 /
+//! service → 別 app の内部直連 URL `http://<subdomain>:<port>`)。PORT は呼び出し側(deploy.rs)が足す。
+//!
+//! service 注入は **値の解決だけ** — 実際に届くかは `network.rs` の網リンク(注入元 B の稼働
+//! コンテナを A の私網へ別名 attach)が担保する(env 文字列があっても網が無ければ繋がらない =
+//! 別関心事)。詳細は `doc/paas-service-link-design.md`。
 //!
 //! 失効(注入元がソフト削除済み)→ その 1 件は**空に解決**(env に出さない / bind を張らない)。
 //! service は普通に起動する(§7.1)。復元すれば次の deploy で自動的に生き返る。
@@ -91,6 +96,14 @@ pub async fn resolve(
                     env.push((prefix_env, format!("{namespace}:")));
                 }
             }
+            "service" => {
+                // 別 app の内部直連 URL。失効(注入元 service が削除済み)→ None でスキップ。
+                // 値は subdomain を docker 網別名として引く `http://<subdomain>:<port>`(http 固定 —
+                // 内部網なので TLS 無し。§9)。実到達は network.rs の網リンクが担保する。
+                if let Some((subdomain, port)) = fetch_service_endpoint(state, resource_id).await? {
+                    env.push((env_var, format!("http://{subdomain}:{port}")));
+                }
+            }
             // 未知 kind は無視。
             _ => {}
         }
@@ -136,6 +149,24 @@ async fn fetch_app_role(
            JOIN database_details d ON d.resource_id = r.id
            JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'app'
           WHERE r.id = $1 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(resource_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row)
+}
+
+/// 注入元 service の (subdomain, container_port) を引く。削除済み(失効)/ service でない → None。
+/// 所有権は注入作成時に検証済みなので resource_id で引く。値 = 内部直連 URL `http://<subdomain>:<port>`。
+async fn fetch_service_endpoint(
+    state: &AppState,
+    resource_id: Uuid,
+) -> AppResult<Option<(String, i32)>> {
+    let row: Option<(String, i32)> = sqlx::query_as(
+        "SELECT d.subdomain, d.container_port
+           FROM resources r
+           JOIN service_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
     .bind(resource_id)
     .fetch_optional(&state.db)

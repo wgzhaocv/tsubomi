@@ -574,8 +574,9 @@ pub async fn list_injections(
     Ok(Json(rows.into_iter().map(injection_row_to_dto).collect()))
 }
 
-/// `POST /api/services/:id/injections`:database / volume を service に注入する(バインディング)。
-/// 反映には再デプロイ(値は起動の瞬間に解決 — 決定 #5)。
+/// `POST /api/services/:id/injections`:database / volume / cache / **別 service** を注入する
+/// (バインディング)。反映には再デプロイ(値は起動の瞬間に解決 — 決定 #5)。service 注入は
+/// 内部直連 URL を渡し、網リンクは deploy / reconcile が張る(`doc/paas-service-link-design.md`)。
 pub async fn create_injection(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -584,22 +585,45 @@ pub async fn create_injection(
 ) -> AppResult<(StatusCode, Json<InjectionDto>)> {
     ensure_owned(&state, auth.user_id, id).await?;
 
-    // 注入元は本人の database / volume / cache(未削除)。kind と表示名を取る。
-    let resource: Option<(String, String)> = sqlx::query_as(
-        "SELECT kind, display_name FROM resources
-          WHERE id=$1 AND user_id=$2 AND kind IN ('database','volume','cache') AND deleted_at IS NULL",
+    // 注入元は本人の database / volume / cache / service(未削除)。kind・表示名・subdomain(service のみ)を取る。
+    // 源クエリが user_id=$2 で縛るので、別ユーザの資源は NotFound = **同一 owner 限定は自動で担保**。
+    let resource: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT r.kind, r.display_name, sd.subdomain
+           FROM resources r
+           LEFT JOIN service_details sd ON sd.resource_id = r.id
+          WHERE r.id=$1 AND r.user_id=$2
+            AND r.kind IN ('database','volume','cache','service') AND r.deleted_at IS NULL",
     )
     .bind(req.resource_id)
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await?;
-    let (kind, name) = resource.ok_or(AppError::NotFound)?;
+    let (kind, name, subdomain) = resource.ok_or(AppError::NotFound)?;
 
     // env_var / mount_path の既定を kind で決める。
     let (env_var, mount_path) = match kind.as_str() {
         "database" => (req.env_var.unwrap_or_else(|| "DATABASE_URL".into()), None),
         // cache は REDIS_URL(既定)。REDIS_KEY_PREFIX は inject.rs が env_var から導出する(§5)。
         "cache" => (req.env_var.unwrap_or_else(|| "REDIS_URL".into()), None),
+        "service" => {
+            // 自注入禁止(自分の URL を自分に注ぐのは無意味で、網リンクも自網へ自分を入れる無駄になる)。
+            if req.resource_id == id {
+                return Err(AppError::BadRequest("service 自身は注入できません".into()));
+            }
+            // 既定 env 名は subdomain から導く(例 api-backend → API_BACKEND_URL)。subdomain は
+            // kind='service' なら service_details(1:1)に必ず在る = LEFT JOIN で Some。万一欠落
+            // (データ不整合)ならハンドラを panic させず 500 に倒す(codex 監査:リクエスト経路で panic させない)。
+            let subdomain = subdomain.ok_or_else(|| {
+                AppError::Other(anyhow::anyhow!(
+                    "service {} に service_details がありません(データ不整合)",
+                    req.resource_id
+                ))
+            })?;
+            let ev = req
+                .env_var
+                .unwrap_or_else(|| default_service_env_var(&subdomain));
+            (ev, None)
+        }
         _ => {
             // volume
             let ev = req.env_var.unwrap_or_else(|| "STORAGE_PATH".into());
@@ -651,27 +675,37 @@ pub async fn create_injection(
     ))
 }
 
-/// `DELETE /api/injections/:id`:注入を外す(所有権は service 経由で確認)。
+/// `DELETE /api/injections/:id`:注入を外す(所有権は service 経由で確認)。service 注入なら
+/// caller の私網から callee を即切断する(網リンクの掃除。再デプロイ不要)。
 pub async fn delete_injection(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let owned: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM injections i JOIN resources r ON r.id = i.service_id
-                        WHERE i.id = $1 AND r.user_id = $2)",
+    // 所有権確認 + 掃除に要る情報を一発で取る(caller=i.service_id / 源=i.resource_id / 源 kind)。
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "SELECT i.service_id, i.resource_id, src.kind
+           FROM injections i
+           JOIN resources r   ON r.id = i.service_id
+           JOIN resources src ON src.id = i.resource_id
+          WHERE i.id = $1 AND r.user_id = $2",
     )
     .bind(id)
     .bind(auth.user_id)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await?;
-    if !owned {
-        return Err(AppError::NotFound);
-    }
+    let (caller_id, source_id, source_kind) = row.ok_or(AppError::NotFound)?;
+
     sqlx::query("DELETE FROM injections WHERE id = $1")
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    // service↔service リンクなら caller 網から callee を即 detach(best-effort。失敗しても callee の
+    // 次回 redeploy で自然消滅 = 同 owner なので無害)。db/volume/cache は網リンク無しなので何もしない。
+    if source_kind == "service" {
+        network::detach_callee(&state, caller_id, source_id).await;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -781,6 +815,26 @@ fn validate_env_key(key: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+/// service 注入の既定 env 名を subdomain から導く:英数は大文字化・それ以外は `_`・先頭が
+/// 数字なら `_` を前置・末尾に `_URL`(例 `api-backend` → `API_BACKEND_URL`)。`validate_env_key`
+/// (空 / `=` / 制御文字のみ拒否)を必ず通る形を返す(subdomain は DNS 安全 `[a-z0-9-]` 非空)。
+fn default_service_env_var(subdomain: &str) -> String {
+    let mut s: String = subdomain
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.starts_with(|c: char| c.is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    format!("{s}_URL")
 }
 
 /// マウント先パスの検査(絶対パス + NUL / `:` なし)。`:` を弾くのは、bind 文字列
@@ -1042,6 +1096,21 @@ mod tests {
         assert_eq!(slugify("123start"), "s123start");
         assert_eq!(slugify("!!!"), "");
         assert_eq!(slugify("日本語app"), "app");
+    }
+
+    #[test]
+    fn default_service_env_var_derives_from_subdomain() {
+        // 典型:ハイフン → アンダースコア + 大文字 + _URL。
+        assert_eq!(default_service_env_var("api-backend"), "API_BACKEND_URL");
+        assert_eq!(default_service_env_var("web"), "WEB_URL");
+        // 乱数語付き subdomain(<service>-<word>)も DNS 安全文字のみ = 全部通る。
+        assert_eq!(default_service_env_var("shop-x7k2"), "SHOP_X7K2_URL");
+        // 先頭が数字なら `_` 前置(env 名として安全)。subdomain 生成は基本数字始まりにしないが防御的に。
+        assert_eq!(default_service_env_var("9to5"), "_9TO5_URL");
+        // 返り値は必ず validate_env_key を通る(空 / '=' / 制御文字なし)。
+        for s in ["api-backend", "web", "shop-x7k2", "9to5"] {
+            assert!(validate_env_key(&default_service_env_var(s)).is_ok());
+        }
     }
 
     #[test]
