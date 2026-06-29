@@ -58,6 +58,20 @@ JSON 契約に合わないので web 専用**、一発 exec は捕獲出力 = AI
 不足。既存 metrics WS にも同適用)。地雷(tty 一致・WS split で 2 方向・input drop が唯一の回収・
 最大セッション timeout・出力 cap 厳守)は **`doc/paas-terminal-design.md`** に集約。
 
+**M6 後の追加(マイルストーン外):service↔service 内部リンク**。app A が app B を呼ぶのに公開 URL
+(Cloudflare 往復 = 公網)しか無かったのを、**注入で内部直連**できるようにした(新表・migration なし)。
+`tbm inject B --into A` で A に `B_URL=http://<B-subdomain>:<B-port>` を注入し、**B の serving コンテナを
+A の per-service 私網へ docker 網別名 = B の subdomain で客人 attach** → A は docker DNS で B へ直連(公網
+不経由)。M6 の真の境界=租户なので **同一 owner 限定**(注入作成時に自動担保 + 自注入禁止)。egress は
+同 subnet RETURN で素通り=不変。実装:`inject.rs` の service 分支(値解決)+ `network.rs`(別名 connect /
+`attach_callees`=caller 側が callee の route 後端を attach / `attach_as_callee`=callee の deploy 直後 / 
+`detach_callee`=eject 即時 / `remove_service_network` は全 endpoint 剥がし / reconcile に陳腐客人 GC)+ 
+**attach は deploy の route 切替点で呼ぶ**(公開カットオーバーと内部可達性を揃える — codex 監査)。CLI/web
+は注入入口に service を足すだけ(`resolve_resource` / `ServiceEnv.tsx` の下拉)。正直な差異(内部串は http・
+Host は `b:<port>`・IP 白名単/中間件なし)は受容済み。**本番 e2e 済み**:fg-arch の私網に hanadayori を
+リンクし、診断コンテナから `http://hanadayori:8080` が実体を返す一方、未リンクの sagi-ad-demo は `bad address`
+(隔離維持)を香橙派で実機確認。地雷・確定事項は **`doc/paas-service-link-design.md`**。
+
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
 本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =
