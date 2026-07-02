@@ -427,6 +427,11 @@ pub struct CreateServiceResp {
     pub hook_url: String,
     /// build 対象 arch(GitHub Variable `TSUBOMI_PLATFORMS`、例 `linux/arm64`。§6.6)。
     pub platforms: String,
+    /// GHA ランナー(GitHub Variable `TSUBOMI_RUNNER`。平台が platforms から導出 —
+    /// arm64 単独なら `ubuntu-24.04-arm` 原生でビルドが桁違いに速い)。旧サーバは
+    /// 送ってこないので default(空)— CLI は空なら設定をスキップする。
+    #[serde(default)]
+    pub runner: String,
     /// `.github/workflows/tsubomi-deploy.yml` のテンプレ(平台が単一真源として配る)。
     pub workflow_yaml: String,
     /// GitHub 連携の手順コマンド列(リポジトリ直下で実行)。平台が **単一真源**として

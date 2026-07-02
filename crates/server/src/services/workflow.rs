@@ -18,8 +18,11 @@ on:
   workflow_dispatch: {}
 jobs:
   deploy:
-    # 既定は amd64 ランナー + QEMU。arm64 を原生で速くしたいなら ubuntu-24.04-arm に。
-    runs-on: ubuntu-latest
+    # ランナーは gh variable TSUBOMI_RUNNER で決まる(service create 時に平台が platforms から
+    # 導出して設定。arm64 のみ → ubuntu-24.04-arm 原生 = Rust 等のビルドが QEMU 比で桁違いに速い)。
+    # 変数が無い古い repo は ubuntu-latest(amd64 + QEMU)へフォールバック。手動切替も
+    # `gh variable set TSUBOMI_RUNNER --body ubuntu-24.04-arm` だけ(yml は不変)。
+    runs-on: ${{ vars.TSUBOMI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -75,6 +78,24 @@ jobs:
 
 use tsubomi_shared::{RegistryCreds, ServiceDto, WORKFLOW_PATH};
 
+/// `TSUBOMI_PLATFORMS`(buildx の build 対象)から GHA ランナーを導出する。
+/// arm64 のみの部署なら原生 arm ランナー(QEMU の Rust ビルド数十分 → 原生数分)。
+/// amd64 を含む(または不明な)場合は ubuntu-latest に倒す — 混在は結局どちらかを
+/// QEMU で作るので、可用性が最も高い既定を選ぶ。個人私有 repo でも arm ランナーは
+/// 無料枠で使える(2026-07 実機確認)ため arm 単独は原生を既定にできる。
+pub fn runner_for(platforms: &str) -> &'static str {
+    let mut archs = platforms
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .peekable();
+    if archs.peek().is_some() && archs.all(|p| p == "linux/arm64") {
+        "ubuntu-24.04-arm"
+    } else {
+        "ubuntu-latest"
+    }
+}
+
 /// GitHub 連携の手順コマンド列(ユーザがリポジトリ直下で実行 / AI が実行 / web が表示)。
 /// 平台が **単一真源**として組み立て、CreateServiceResp.setup_commands に載せる
 /// (CLI / web はこの文字列をそのまま使い、各々で gh コマンドを再構築しない)。
@@ -118,6 +139,10 @@ pub fn setup_commands(
         format!("gh variable set TSUBOMI_HOOK_URL -R \"$TSUBOMI_REPO\" --body '{hook_url}'"),
         format!("gh variable set TSUBOMI_PLATFORMS -R \"$TSUBOMI_REPO\" --body '{platforms}'"),
         format!(
+            "gh variable set TSUBOMI_RUNNER -R \"$TSUBOMI_REPO\" --body '{}'",
+            runner_for(platforms)
+        ),
+        format!(
             "# {WORKFLOW_PATH} を workflow_yaml の内容で作成 → git add/commit/push で自動デプロイ"
         ),
     ]
@@ -125,7 +150,19 @@ pub fn setup_commands(
 
 #[cfg(test)]
 mod tests {
-    use super::TEMPLATE;
+    use super::{TEMPLATE, runner_for};
+
+    /// platforms → ランナー導出の真理値表(arm64 単独だけが原生 arm)。
+    #[test]
+    fn runner_derivation() {
+        assert_eq!(runner_for("linux/arm64"), "ubuntu-24.04-arm");
+        assert_eq!(runner_for("linux/arm64,linux/arm64"), "ubuntu-24.04-arm");
+        assert_eq!(runner_for("linux/amd64"), "ubuntu-latest");
+        assert_eq!(runner_for("linux/arm64,linux/amd64"), "ubuntu-latest");
+        // 空 / 不正は可用性優先で ubuntu-latest。
+        assert_eq!(runner_for(""), "ubuntu-latest");
+        assert_eq!(runner_for(" , "), "ubuntu-latest");
+    }
 
     /// テンプレが hook 契約の必須要素を持つことを固定する(占位の取りこぼし防止)。
     #[test]
@@ -135,6 +172,8 @@ mod tests {
             "vars.TSUBOMI_SERVICE_ID",
             "vars.TSUBOMI_HOOK_URL",
             "vars.TSUBOMI_PLATFORMS",
+            // ランナーは gh variable で切替(平台が platforms から導出。yml は不変のまま)。
+            "vars.TSUBOMI_RUNNER",
             "secrets.TSUBOMI_DEPLOY_KEY",
             "secrets.TSUBOMI_REGISTRY_USER",
             "secrets.TSUBOMI_REGISTRY_PASS",

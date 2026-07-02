@@ -381,6 +381,12 @@ fn configure_github(resp: &CreateServiceResp) -> Result<String> {
     gh_variable(&repo, "TSUBOMI_REGISTRY", &resp.registry.host)?;
     gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
     gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
+    // ランナーは平台が platforms から導出した値をそのまま使う(CLI で再導出しない =
+    // 単一真源)。旧サーバは runner を返さない(空)ので、その場合は設定しない
+    // (workflow テンプレの || 'ubuntu-latest' フォールバックが効く)。
+    if !resp.runner.is_empty() {
+        gh_variable(&repo, "TSUBOMI_RUNNER", &resp.runner)?;
+    }
     Ok(repo)
 }
 

@@ -948,6 +948,7 @@ pub async fn create(
         deploy_key,
         registry,
         hook_url,
+        runner: workflow::runner_for(&platforms).to_string(),
         platforms,
         workflow_yaml: workflow::TEMPLATE.to_string(),
         setup_commands,
