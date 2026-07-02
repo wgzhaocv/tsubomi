@@ -211,10 +211,20 @@ pub async fn run(
             // かつ「json なら `--github` / text なら常に」連携経路に入るとき。gh が無い経路
             // (fallback で setup_commands を返すだけ)は repo を作らないので init しない
             // (不要な `.git` を掘らない)。gh_ok() は orchestrate でも再評価するが安価。
-            if gh_ok() && (github || !json) {
-                ensure_git_repo()?;
-            }
-            let resp = api::service_create(&c, &server_url, &token, &name).await?;
+            let created_git = gh_ok() && (github || !json) && ensure_git_repo()?;
+            // service 作成(サーバ側の最初の副作用)。失敗時、直前に掘った `.git` はまだ何も
+            // 載っていない(空ディレクトリで init しただけ)ので削除して原子性を保つ —
+            // 「remote add 失敗後に半端な状態が残る」という実利用フィードバックへの対処。
+            // service 作成 **後** の gh 失敗は巻き戻さない(repo は再開に必要。orchestrate_json の
+            // fallback = setup_commands で完遂できる)。
+            let resp = api::service_create(&c, &server_url, &token, &name)
+                .await
+                .inspect_err(|_| {
+                    if created_git {
+                        let _ = std::fs::remove_dir_all(".git");
+                        eprintln!("(初期化した .git は削除しました — 再実行はクリーンな状態から)");
+                    }
+                })?;
             if json {
                 if github {
                     // AI 経路でも GitHub 連携を Rust 側で組み立てる(setup_commands の bash 文字列を
@@ -378,7 +388,13 @@ fn configure_github(resp: &CreateServiceResp) -> Result<String> {
 /// `gh repo create --source=.` と後の `git push` に repo が要り、カレントは元々 repo にする対象
 /// なので自動初期化する。**service 作成(サーバ側副作用)の前** に呼ぶことで半端な状態を防ぐ。
 /// 出力は stderr / null に倒し、JSON モードの stdout を汚さない。
-fn ensure_git_repo() -> Result<()> {
+///
+/// 汚染防止(実利用のフィードバック起因):**repo でもなく空でもないディレクトリでは拒否**する。
+/// 誤って別プロジェクトの根や home で実行すると、そのディレクトリ全体が新 repo として GitHub に
+/// push される事故になる。デプロイ対象なら `git init -b main` を明示実行してから再実行してもらう
+/// (= ユーザの明示同意)。戻り値は「この呼び出しで `.git` を新規作成したか」— 呼び側が
+/// service 作成失敗時のロールバック(掘った `.git` の削除)に使う。
+fn ensure_git_repo() -> Result<bool> {
     // `rev-parse --is-inside-work-tree` は work tree 内なら exit 0、repo 外なら非零(128)。
     let inside = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -388,7 +404,20 @@ fn ensure_git_repo() -> Result<()> {
         .map(|s| s.success())
         .unwrap_or(false);
     if inside {
-        return Ok(());
+        return Ok(false);
+    }
+    // 空判定:macOS の `.DS_Store` だけは無視(実質空)。読めないエントリは「非空」に倒す
+    // (安全側 = 空と証明できない限り init しない)。
+    let non_empty = std::fs::read_dir(".")
+        .context("カレントディレクトリを読めません")?
+        .any(|e| match e {
+            Ok(e) => e.file_name() != ".DS_Store",
+            Err(_) => true,
+        });
+    if non_empty {
+        bail!(
+            "カレントディレクトリは git リポジトリではなく、空でもありません。誤ったディレクトリを GitHub へ push する事故を防ぐため中止しました。このディレクトリをデプロイ対象にするなら `git init -b main` を実行してから再実行、そうでなければ空のディレクトリで実行してください"
+        );
     }
     // 初期ブランチを **main** に固定する。素の `git init` は init.defaultBranch 未設定だと
     // master を作るが、デプロイ経路は一貫して main を前提にする(成功手順の
@@ -405,7 +434,7 @@ fn ensure_git_repo() -> Result<()> {
     if !ok {
         bail!("git init に失敗しました(古い git なら `git init -b main` 相当を手動で)。カレントディレクトリを確認してください");
     }
-    Ok(())
+    Ok(true)
 }
 
 /// ローカルに `tsubomi` remote が無ければ HTTPS で張る(既存なら触らない)。
