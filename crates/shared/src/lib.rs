@@ -387,6 +387,10 @@ pub struct ServiceDto {
     /// 古いサーバ相手でも壊れないよう default(空文字)を許す。
     #[serde(default)]
     pub url: String,
+    /// 公開範囲:private(route 無し = 公網不可視)/ company(既定 = 会社 IP のみ)/
+    /// public(全網)。旧サーバ相手は default(空文字)= company 扱い。
+    #[serde(default)]
+    pub visibility: String,
 }
 
 /// `POST /api/services` のリクエストボディ。

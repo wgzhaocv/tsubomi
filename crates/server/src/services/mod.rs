@@ -44,6 +44,49 @@ const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "ap
 /// deploy_key の乱数バイト数(base64url で ≈43 字)。HMAC の鍵そのもの。
 const DEPLOY_KEY_BYTES: usize = 32;
 
+/// 公開範囲(`service_details.visibility`)。DB の CHECK と対を成す単一真源 —
+/// API 入力検証(不正値は 400)と route 分岐(ipallow 有無)をここに集約する。
+/// 意味論は公開範囲設計 §0:private = route ファイルを書かない(公網不可視・subdomain 温存)、
+/// company = 既定(route + 会社 IP 許可リスト)、public = route はあるが ipallow を挂けない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Visibility {
+    Private,
+    Company,
+    Public,
+}
+
+impl Visibility {
+    /// DB / API の文字列表現から。未知は None(API 側で 400 にする。DB は CHECK が保証)。
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "private" => Some(Self::Private),
+            "company" => Some(Self::Company),
+            "public" => Some(Self::Public),
+            _ => None,
+        }
+    }
+
+    /// DB 由来の値を読む(CHECK が保証するが防御的に:未知値は既定の company へ倒す)。
+    /// 「触らない」に倒したい読み手(reconcile の fresh 再確認)は `parse` を使う — 方針の違いは意図。
+    pub(crate) fn from_db(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::Company)
+    }
+
+    /// `parse` の逆(DB / DTO へ書く文字列)。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Company => "company",
+            Self::Public => "public",
+        }
+    }
+
+    /// route に会社 IP 許可リスト middleware を挂けるか(public だけ外す)。
+    pub(crate) fn ipallow(self) -> bool {
+        !matches!(self, Self::Public)
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/services", get(list).post(create))
@@ -78,6 +121,7 @@ type ServiceRow = (
     i32,                   // container_port
     Option<String>,        // image_digest
     Option<DateTime<Utc>>, // last_deploy_at
+    String,                // visibility
 );
 
 fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
@@ -95,6 +139,7 @@ fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
         image_digest: r.8,
         last_deploy_at: r.9,
         url,
+        visibility: r.10,
     }
 }
 
@@ -105,7 +150,8 @@ pub async fn list(
 ) -> AppResult<Json<Vec<ServiceDto>>> {
     let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
-                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
+                s.visibility
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.user_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL
           ORDER BY r.anon_seq",
@@ -128,7 +174,8 @@ pub async fn get_one(
 ) -> AppResult<Json<ServiceDto>> {
     let row: Option<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
-                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
+                s.visibility
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
@@ -259,6 +306,43 @@ pub(crate) async fn latest_succeeded_deploy_id(
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?)
+}
+
+/// serving すべき容器名 = **直近成功 deploy の容器**(`container_name`)を DB から導く
+/// (実走確認はしない)。成功 deploy 無し = 未デプロイは None。
+async fn expected_container_name(state: &AppState, id: Uuid) -> Option<String> {
+    let deploy_id = match latest_succeeded_deploy_id(state, id).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = ?e, %id, "serving 容器の解決:直近成功 deploy の取得に失敗");
+            return None;
+        }
+    };
+    Some(deploy::container_name(id, deploy_id))
+}
+
+/// serving すべき容器名が今 `running_names` に居る(= 実際に走っている)時だけ Some。走っていない
+/// (mid-deploy / クラッシュ)や成功 deploy 無しは None。新旧併存時に「正しい新版」を一意に選ぶ
+/// 唯一の判断点(reconcile の route drift 収束と網リンクの callee 解決が共有 — route ファイルでは
+/// なく DB を真源にするので private でも解ける)。
+pub(crate) async fn expected_running_container(
+    state: &AppState,
+    id: Uuid,
+    running_names: &[String],
+) -> Option<String> {
+    let expected = expected_container_name(state, id).await?;
+    running_names.contains(&expected).then_some(expected)
+}
+
+/// `expected_running_container` の糖衣:docker から実走一覧を引いてから判定する。
+/// `attach_callees`(網リンク)と visibility 切替が使う(reconcile は presence を既に
+/// 手に持っているので本体を直接呼ぶ — docker 照会を二重にしない)。
+/// SQL を先に引く — 未デプロイの callee で docker 照会を無駄撃ちしない。
+pub(crate) async fn serving_container(state: &AppState, id: Uuid) -> Option<String> {
+    let expected = expected_container_name(state, id).await?;
+    let (_, running) = docker::presence(state, id).await.ok()?;
+    running.contains(&expected).then_some(expected)
 }
 
 /// 指定 digest を新しい deploy として起こす(start / rollback / reconcile が共有)。deploys 行を
@@ -1141,6 +1225,7 @@ async fn insert_attempt(
         image_digest: None,
         last_deploy_at: None,
         url: config.service_url(subdomain),
+        visibility: Visibility::Company.as_str().into(), // DB の DEFAULT と一致(INSERT は列を指定しない)
     })
 }
 

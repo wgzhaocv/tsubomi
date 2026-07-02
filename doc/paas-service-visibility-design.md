@@ -157,9 +157,12 @@ route::backend_container(state, callee_id)  →  serving_container(state, callee
 
 **reconcile.rs(converge_running)**:候補 SELECT に `visibility` を追加し、
 
-- `private`:期望状態 = 「ファイル無し」。`route::backend_container(..).is_some()` なら deploy_lock →
-  fresh 再確認(visibility とファイル存在)→ `route::remove` + audit(`route_drift`)。
-  容器消失→復活パス(redeploy)は deploy.rs の分岐が visibility を読むので無改修で正しい。
+- `private`:期望状態 = 「ファイル無し」。ファイルが在れば deploy_lock → fresh 再確認(visibility と
+  ファイル存在)→ `route::remove` + audit(`route_drift`)。**回収はコンテナ状態と無関係に、存在収束
+  (redeploy)より先に行う** — 後回しにすると「コンテナ消失 → 復活 redeploy 失敗 → phase=failed で
+  候補外」の経路で陳腐ファイルが永久残留する(converge は phase=running だけを見るため — codex 監査
+  2026-07-02 第 2 回)。容器消失→復活パス(redeploy)自体は deploy.rs の分岐が visibility を読むので
+  無改修で正しい。
 - `company` / `public`:drift 条件 = backend 不一致 **OR** `has_ipallow(..) != Some(期望 ipallow)`。
   修正は lock + fresh 再確認 → `route::write(.., ipallow)`。これで §0-F(fail-open ドリフト排除)が成る。
   **lock 取得後の fresh 再確認は 4 点セット**(visibility / 期望 backend / ファイル存在 / ipallow 有無)—

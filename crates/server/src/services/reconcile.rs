@@ -19,7 +19,8 @@ use crate::databases::audit;
 use crate::error::AppResult;
 use crate::services::deploy::{DeployTrigger, container_name};
 use crate::services::{
-    docker, egress, latest_succeeded_deploy, latest_succeeded_deploy_id, network, redeploy, route,
+    Visibility, docker, egress, expected_running_container, latest_succeeded_deploy,
+    latest_succeeded_deploy_id, network, redeploy, route,
 };
 use crate::state::AppState;
 use serde_json::json;
@@ -87,8 +88,8 @@ async fn recover_interrupted(state: &AppState) {
         // deploy_lock の中で状態を読み直し、再起動直後に割り込んだ stop / 新 deploy と競合しない。
         let lock = state.deploy_lock(id);
         let _guard = lock.lock().await;
-        let cur: Option<(String, String)> = match sqlx::query_as(
-            "SELECT s.desired_state, s.phase FROM service_details s
+        let cur: Option<(String, String, String)> = match sqlx::query_as(
+            "SELECT s.desired_state, s.phase, s.visibility FROM service_details s
                JOIN resources r ON r.id = s.resource_id
               WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
         )
@@ -102,7 +103,7 @@ async fn recover_interrupted(state: &AppState) {
                 continue;
             }
         };
-        let Some((desired, phase)) = cur else {
+        let Some((desired, phase, visibility)) = cur else {
             continue;
         }; // 削除済み
         if phase != "deploying" {
@@ -133,6 +134,15 @@ async fn recover_interrupted(state: &AppState) {
             let keep = container_name(id, sdid);
             if let Err(e) = docker::remove_others(state, id, &keep).await {
                 tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの孤児コンテナ掃除に失敗");
+            }
+            // private は「route ファイル無し」が期望状態:中断が route 撤去の前後どちらでも陳腐
+            // ファイルが残り得るので、起動時にここで確実に掃く(周期 converge の実行順序に依存
+            // させない — codex 監査 2026-07-02)。company/public の陳腐 route(旧容器指し)は
+            // 従来どおり温存が正しい(旧版が serving 中)。
+            if Visibility::from_db(&visibility) == Visibility::Private
+                && let Err(e) = route::remove(state, id)
+            {
+                tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの private route 掃除に失敗");
             }
             let _ = sqlx::query(
                 "UPDATE service_details SET phase='running', phase_detail=NULL WHERE resource_id=$1",
@@ -208,8 +218,8 @@ async fn reconcile_pass(state: &AppState) {
 /// 取得後の再確認で進行中 deploy と競合しない(取得待ちの間に deploy が容器を入れ替え route も直せば、
 /// 再確認で一致 → 何もしない。start-first の一瞬の新旧共存中も lock 待ちで定常状態を見るので誤修正しない)。
 async fn converge_running(state: &AppState) {
-    let candidates: Vec<(Uuid, String, i32)> = match sqlx::query_as(
-        "SELECT s.resource_id, s.subdomain, s.container_port
+    let candidates: Vec<(Uuid, String, i32, String)> = match sqlx::query_as(
+        "SELECT s.resource_id, s.subdomain, s.container_port, s.visibility
            FROM service_details s
            JOIN resources r ON r.id = s.resource_id
           WHERE r.kind = 'service' AND r.deleted_at IS NULL
@@ -227,7 +237,43 @@ async fn converge_running(state: &AppState) {
     };
 
     let (mut restored, mut rerouted) = (0usize, 0usize);
-    for (id, subdomain, port) in candidates {
+    for (id, subdomain, port, visibility) in candidates {
+        let vis = Visibility::from_db(&visibility);
+
+        // private の陳腐 route はコンテナ状態と**無関係に、存在収束より先に**掃く。後回しにすると
+        // 「コンテナ消失 → 復活 redeploy 失敗 → phase=failed で候補外」の経路で陳腐ファイルが永久
+        // 残留する(この関数は phase=running だけを見るため — codex 監査 2026-07-02)。
+        if vis == Visibility::Private
+            && route::exists(state, id)
+        {
+            // deploy_lock + fresh 再確認(visibility / ファイル存在)— lock 待ち中の toggle / deploy と
+            // 競合しない。
+            let lock = state.deploy_lock(id);
+            let _guard = lock.lock().await;
+            if fresh_visibility(state, id).await == Some(Visibility::Private)
+                && route::exists(state, id)
+            {
+                match route::remove(state, id) {
+                    Ok(()) => {
+                        rerouted += 1;
+                        audit(
+                            &state.db,
+                            None,
+                            "service.reconcile",
+                            id,
+                            json!({ "reason": "route_drift", "action": "private_route_removed" }),
+                            None,
+                        )
+                        .await;
+                        tracing::info!(%id, "reconcile: private の陳腐 route ファイルを撤去");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, %id, "reconcile: private の route 撤去に失敗")
+                    }
+                }
+            }
+        }
+
         let (present, running) = match docker::presence(state, id).await {
             Ok(v) => v,
             Err(e) => {
@@ -273,20 +319,34 @@ async fn converge_running(state: &AppState) {
             continue;
         }
 
-        // (2) 走っている → route ドリフト点検。route が指すべきは **直近成功 deploy の容器**(start-first
-        //     の命名規約で一意)であって「走っている任意の容器」ではない — 旧片付け(remove_others、
-        //     best-effort)失敗で新旧併存した時に route を旧版へ巻き戻さないため(serving stale 事故の回避)。
-        //     その容器が実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
+        // (2) 走っている → route ドリフト点検。private は上で回収済み(期望状態 =「ファイル無し」)。
+        if vis == Visibility::Private {
+            continue;
+        }
+
+        //     company/public の期望状態は「backend = 直近成功 deploy の容器 かつ ipallow = visibility
+        //     どおり」。ipallow も組に入れるのは、public→company の切替書込だけが失敗すると「DB は
+        //     社内限定・現実は全網公開」の fail-open ドリフトが黙って残るため(公開範囲設計 §0-F)。
+        //     backend が「走っている任意の容器」でないのは従来どおり(旧片付け失敗時に route を旧版へ
+        //     巻き戻さない)。その容器が実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
         let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
-        if route::backend_container(state, id).as_deref() == Some(expected.as_str()) {
-            continue; // route は正しい容器を指している(定常状態の大多数)
+        if route_matches(state, id, &expected, vis) {
+            continue; // backend も ipallow も正しい(定常状態の大多数)
         }
-        // ドリフト確定(route 無し / 別容器を指す)。deploy_lock を取り進行中の deploy と競合しない。
+        // ドリフト確定(route 無し / 別容器 / ipallow 不一致)。deploy_lock を取り進行中の deploy と
+        // 競合しない。取得後の fresh 再確認は **4 点セット**(visibility / 期望 backend / ファイル存在 /
+        // ipallow)— 取得待ちの間に toggle や deploy が走った可能性があり、どれか一つでも古い値で書くと
+        // 陳腐な flavor の route を書き戻す(codex 監査 2026-07-02)。
         let lock = state.deploy_lock(id);
         let _guard = lock.lock().await;
-        // 取得待ちの間に deploy が容器 / route を入れ替えた可能性 → 取得後に fresh 再確認(正容器も再取得)。
+        let Some(vis) = fresh_visibility(state, id).await else {
+            continue; // 削除済み / 取得失敗 → 触らない
+        };
+        if vis == Visibility::Private {
+            continue; // lock 待ち中に private へ切替 → 上の private 分岐(次パス)に委ねる
+        }
         let (_, running) = match docker::presence(state, id).await {
             Ok(v) => v,
             _ => continue,
@@ -294,10 +354,10 @@ async fn converge_running(state: &AppState) {
         let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
-        if route::backend_container(state, id).as_deref() == Some(expected.as_str()) {
+        if route_matches(state, id, &expected, vis) {
             continue;
         }
-        match route::write(state, id, &subdomain, &expected, port) {
+        match route::write(state, id, &subdomain, &expected, port, vis.ipallow()) {
             Ok(()) => {
                 rerouted += 1;
                 audit(
@@ -322,24 +382,33 @@ async fn converge_running(state: &AppState) {
     }
 }
 
-/// route が指すべき容器名 = **直近成功 deploy の容器**(`container_name`)。それが今 `running_names` に
-/// 居る(= 実際に走っている)時だけ Some。走っていない(mid-deploy / クラッシュ)や成功 deploy 無しは
-/// None(route を直さず存在収束 / 次パスに委ねる)。新旧併存時に「正しい新版」を一意に選ぶ唯一の判断点。
-async fn expected_running_container(
-    state: &AppState,
-    id: Uuid,
-    running_names: &[String],
-) -> Option<String> {
-    let deploy_id = match latest_succeeded_deploy_id(state, id).await {
-        Ok(Some(d)) => d,
-        Ok(None) => return None,
+/// 現実の route が期望 `(backend, ipallow)` と一致しているか(drift 判定の組 — 公開範囲設計 §0-F)。
+/// pre-lock の粗い判定と post-lock の fresh 再確認が同じ定義を共有する(判定が二箇所で分岐しない)。
+fn route_matches(state: &AppState, id: Uuid, expected: &str, vis: Visibility) -> bool {
+    route::current(state, id).is_some_and(|(backend, ipallow)| {
+        backend == expected && ipallow == vis.ipallow()
+    })
+}
+
+/// lock 取得後の fresh visibility(未削除の service のみ)。None = 削除済み / 取得失敗 / 未知値
+/// → 呼び出し側は触らない。drift 修正が「古い visibility で route を書き戻す」のを防ぐ。
+async fn fresh_visibility(state: &AppState, id: Uuid) -> Option<Visibility> {
+    let s: Option<String> = match sqlx::query_scalar(
+        "SELECT s.visibility FROM service_details s
+           JOIN resources r ON r.id = s.resource_id
+          WHERE s.resource_id = $1 AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = ?e, %id, "reconcile: route drift の直近成功 deploy 取得に失敗");
+            tracing::warn!(error = ?e, %id, "reconcile: visibility の fresh 取得に失敗");
             return None;
         }
     };
-    let expected = container_name(id, deploy_id);
-    running_names.contains(&expected).then_some(expected)
+    Visibility::parse(&s?)
 }
 
 /// 孤児掃除:

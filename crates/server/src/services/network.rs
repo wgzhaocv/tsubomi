@@ -215,10 +215,11 @@ async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
         }
     };
     for (callee_id, subdomain) in callees {
-        // 対象は callee の **route 後端コンテナ**(= 直近成功 deploy の serving 容器)。in-flight な
-        // swap 中でも「公開中の版」だけを指すので、走行中の任意コンテナを掴んで別名を取り違えない。
-        // route 無し(未デプロイ / 停止 = route 撤去済み)なら skip。
-        if let Some(container) = super::route::backend_container(state, callee_id)
+        // 対象は callee の **serving 容器**(= 直近成功 deploy の容器が実走中の時だけ Some)。
+        // DB + docker から解決し **route ファイルに依存しない** — private callee(route 無し)への
+        // リンクを成立させるのが要点(公開範囲設計 §5)。in-flight な swap 中も commit 済みの版
+        // だけを指すので別名を取り違えない。未稼働(停止 / 未デプロイ / 削除)なら skip。
+        if let Some(container) = super::serving_container(state, callee_id).await
             && let Err(e) = connect(state, network, &container, std::slice::from_ref(&subdomain)).await
         {
             tracing::warn!(error = ?e, %callee_id, alias = %subdomain, "callee の attach に失敗");

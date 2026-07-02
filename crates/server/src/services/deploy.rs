@@ -13,6 +13,7 @@
 
 use crate::databases::{audit, map_unique};
 use crate::error::{AppError, AppResult};
+use crate::services::Visibility;
 use crate::services::docker::{self, RunSpec};
 use crate::services::inject;
 use crate::state::AppState;
@@ -292,14 +293,16 @@ async fn run_digest_inner(
     git_sha: &str,
 ) -> AppResult<()> {
     // 起動に必要な確定値を引く。
-    let row: Option<(String, i32, i32, i32)> = sqlx::query_as(
-        "SELECT subdomain, container_port, memory_mb, cpu_shares
+    let row: Option<(String, i32, i32, i32, String)> = sqlx::query_as(
+        "SELECT subdomain, container_port, memory_mb, cpu_shares, visibility
            FROM service_details WHERE resource_id = $1",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?;
-    let (subdomain, container_port, memory_mb, cpu_shares) = row.ok_or(AppError::NotFound)?;
+    let (subdomain, container_port, memory_mb, cpu_shares, visibility) =
+        row.ok_or(AppError::NotFound)?;
+    let visibility = Visibility::from_db(&visibility);
 
     set_status(state, deploy_id, "pulling").await;
     let image_ref = docker::pull(state, service_id, image_digest).await?;
@@ -344,29 +347,45 @@ async fn run_digest_inner(
     // ★ ここから先は「成功確定」点を越えている(DB 上 new が正、新コンテナは起動済み)。route
     //   切替・旧削除の失敗は **致命にしない**:failed と誤記録すると「実際は成功した deploy」を
     //   巻き戻すことになる。不整合は reconcile(S8)/ 再 deploy が収束させる。
-    match crate::services::route::write(
-        state,
-        service_id,
-        &spec.subdomain,
-        &new_name,
-        spec.container_port,
-    ) {
-        Ok(()) => {
-            // route が新を指した = 成功確定の切替点。**内部リンクも公開 route と同一の瞬間に切替える**:
-            // この service を callee として注入している caller 群の私網へ、新コンテナを別名で attach する。
-            // commit_success より後 = 旧版にしか繋がっていなかった内部呼び出しも、ここで初めて新版へ向く
-            // (公開と内部のカットオーバーが揃う)。先に新を付けてから旧を消す(旧 endpoint は旧コンテナ
-            // 削除で自然消滅 = 別名は新へ収束。新を付ける前に旧を消すと一瞬 A→B が切れるため順序が肝心)。
-            crate::services::network::attach_as_callee(state, service_id, &spec.subdomain, &new_name).await;
-            // route が新を指したので旧を消してよい(失敗しても新は稼働中。reconcile が掃除)。
-            if let Err(e) = docker::remove_others(state, service_id, &new_name).await {
-                tracing::warn!(error = ?e, %service_id, "旧コンテナの掃除に失敗(新は稼働中。reconcile が後で掃除)");
+    //   まず route を visibility どおりに合わせ(cutover 可否が決まる)、可なら内部リンク切替 + 旧掃除。
+    let cutover = if visibility == Visibility::Private {
+        // private の期望状態 = route ファイル無し(公開範囲設計 §6)。旧 visibility の残骸を掃く(冪等)。
+        // remove 失敗でも cutover を進めるのは意図した **fail-closed**:陳腐ファイルは消えた backend を
+        // 指し公網は最悪 502(= 内容不可達)で、旧掃除を止めて旧版が公網に出続けるより安全側。
+        // reconcile の private 分岐が ≤30s でファイルを回収し /noservice へ収束する。
+        if let Err(e) = crate::services::route::remove(state, service_id) {
+            tracing::error!(error = ?e, %service_id, "private の route 撤去に失敗(fail-closed で続行。reconcile が回収)");
+        }
+        true
+    } else {
+        match crate::services::route::write(
+            state,
+            service_id,
+            &spec.subdomain,
+            &new_name,
+            spec.container_port,
+            visibility.ipallow(),
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                // route 切替失敗:旧を消すと route→消えた旧 で 502 になるため旧を **残す**
+                // (旧版が当面トラフィックを受ける。reconcile / 再 deploy が route を直す)。
+                tracing::error!(error = ?e, %service_id, "route 切替に失敗。旧版を温存(reconcile / 再 deploy で収束)");
+                false
             }
         }
-        Err(e) => {
-            // route 切替失敗:旧を消すと route→消えた旧 で 502 になるため旧を **残す**
-            // (旧版が当面トラフィックを受ける。reconcile / 再 deploy が route を直す)。
-            tracing::error!(error = ?e, %service_id, "route 切替に失敗。旧版を温存(reconcile / 再 deploy で収束)");
+    };
+    if cutover {
+        // route が新を指した(private は公開 route 無し = 切替点は commit_success)。**内部リンクも
+        // 同一の瞬間に切替える**:この service を callee として注入している caller 群の私網へ、新コンテナを
+        // 別名で attach する。commit_success より後 = 旧版にしか繋がっていなかった内部呼び出しも、ここで
+        // 初めて新版へ向く(公開と内部のカットオーバーが揃う)。先に新を付けてから旧を消す(旧 endpoint は
+        // 旧コンテナ削除で自然消滅 = 別名は新へ収束。新を付ける前に旧を消すと一瞬 A→B が切れるため順序が肝心)。
+        crate::services::network::attach_as_callee(state, service_id, &spec.subdomain, &new_name)
+            .await;
+        // 旧を消してよい(失敗しても新は稼働中。reconcile が掃除)。
+        if let Err(e) = docker::remove_others(state, service_id, &new_name).await {
+            tracing::warn!(error = ?e, %service_id, "旧コンテナの掃除に失敗(新は稼働中。reconcile が後で掃除)");
         }
     }
 

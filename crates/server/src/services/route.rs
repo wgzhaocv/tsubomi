@@ -48,21 +48,30 @@ fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
 /// router + service を 1 ファイル原子的に書く(traefik が watch してホットリロード)。
 /// router/service 名 = `svc-<id>`(安定、ファイルは service ごと 1 枚)、**後端 = 渡された
 /// コンテナ名**。start-first swap では deploy ごとにコンテナ名が変わる(新旧が一瞬共存
-/// するため一意名)ので、後端 URL も deploy のたびに書き換わる。middleware は会社 IP 許可
-/// リスト(ipblock、`@file`)。値は全て平台生成なので YAML へそのまま埋めて安全。
+/// するため一意名)ので、後端 URL も deploy のたびに書き換わる。`ipallow` = 会社 IP 許可
+/// リスト middleware(ipblock、`@file`)を挂けるか — visibility の company(true)/
+/// public(false)。private はそもそもこの関数を呼ばない(ファイル自体を書かない)。
+/// 値は全て平台生成なので YAML へそのまま埋めて安全。
 pub fn write(
     state: &AppState,
     service_id: Uuid,
     subdomain: &str,
     container_name: &str,
     container_port: i32,
+    ipallow: bool,
 ) -> AppResult<()> {
     let name = format!("svc-{service_id}");
     let host = format!("{}.{}", subdomain, state.config.domain);
     let backend = format!("http://{container_name}:{container_port}");
-    let mw = crate::ipblock::TRAEFIK_MIDDLEWARE;
-    let tls = state.config.tls;
+    let doc = build_service_doc(&name, &host, &backend, ipallow, state.config.tls);
+    write_atomic(&route_path(state, service_id), &doc)
+}
 
+/// svc-<id>.yml の中身を組み立てる純粋関数(`write` の本体。`build_catchall_doc` と同型 =
+/// テスト可能に分離)。`ipallow=false`(public)は middlewares 行を丸ごと出さない —
+/// company と public の差はこの 1 行だけ(空許可リストは ipblock 側で fail-open なので、
+/// 挂けない = 全網公開はこの行の有無で決まる)。
+fn build_service_doc(name: &str, host: &str, backend: &str, ipallow: bool, tls: bool) -> String {
     let mut doc = String::new();
     doc.push_str("# 平台が自動生成(services/route.rs)。手で編集しない(deploy ごとに上書き)。\n");
     doc.push_str("http:\n");
@@ -71,15 +80,16 @@ pub fn write(
     doc.push_str(&format!("      rule: \"Host(`{host}`)\"\n"));
     doc.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(tls)));
     doc.push_str(&format!("      service: \"{name}\"\n"));
-    doc.push_str(&format!("      middlewares: [\"{mw}@file\"]\n"));
+    if ipallow {
+        doc.push_str(&format!("      middlewares: [\"{}\"]\n", ipallow_ref()));
+    }
     push_tls_block(&mut doc, tls);
     doc.push_str("  services:\n");
     doc.push_str(&format!("    {name}:\n"));
     doc.push_str("      loadBalancer:\n");
     doc.push_str("        servers:\n");
     doc.push_str(&format!("          - url: \"{backend}\"\n"));
-
-    write_atomic(&route_path(state, service_id), &doc)
+    doc
 }
 
 /// 動的設定ファイルを原子的に置換する(tmp + rename。traefik が半端な内容を読まないように)。
@@ -211,12 +221,29 @@ pub fn remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
     }
 }
 
-/// `svc-<id>.yml` の backend URL から容器名を取り出す(`- url: "http://<name>:<port>"` → `<name>`)。
-/// ファイル無し / 解析不可なら None。reconcile の route drift 収束が「route が実際に走っている容器を
-/// 指しているか」を確かめるのに使う(`write` の逆操作)。平台生成のフォーマットだけを前提に素朴に解析する。
-pub(crate) fn backend_container(state: &AppState, service_id: Uuid) -> Option<String> {
+/// ipallow middleware の `@file` 参照文字列。writer(`build_service_doc`)と reader
+/// (`parse_ipallow`)がここを共有 = 書く側と読む側の契約を 1 箇所に固定する。
+fn ipallow_ref() -> String {
+    format!("{}@file", crate::ipblock::TRAEFIK_MIDDLEWARE)
+}
+
+/// `svc-<id>.yml` の現実状態を読む:`(backend 容器名, ipallow 有無)`。ファイル無し / 解析不可は None。
+/// reconcile の drift 判定は組で使うので **1 回の読みで両方**返す(二重読みは同一ファイルの別版を
+/// 見得る + 無駄 I/O)。ipallow の不一致検出は public↔company の切替書込が失敗した fail-open
+/// ドリフトを塞ぐ(公開範囲設計 §0-F)。
+pub(crate) fn current(state: &AppState, service_id: Uuid) -> Option<(String, bool)> {
     let content = std::fs::read_to_string(route_path(state, service_id)).ok()?;
-    parse_backend_container(&content)
+    Some((parse_backend_container(&content)?, parse_ipallow(&content)))
+}
+
+/// route ファイルが存在するか(private の期望状態 =「不存在」の判定用。読まずに stat だけ)。
+pub(crate) fn exists(state: &AppState, service_id: Uuid) -> bool {
+    route_path(state, service_id).exists()
+}
+
+/// route 内容に ipallow middleware の `@file` 参照があるか(`build_service_doc` の middlewares 行の逆)。
+fn parse_ipallow(content: &str) -> bool {
+    content.contains(&ipallow_ref())
 }
 
 /// `- url: "http://<name>:<port>"` 行から `<name>` を取り出す純粋関数(`write` の loadBalancer
@@ -257,8 +284,40 @@ fn parse_route_filename(name: &str) -> Option<Uuid> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_catchall_doc, parse_backend_container, parse_route_filename};
+    use super::{
+        build_catchall_doc, build_service_doc, parse_backend_container, parse_ipallow,
+        parse_route_filename,
+    };
     use uuid::Uuid;
+
+    #[test]
+    fn service_doc_ipallow_is_the_only_visibility_difference() {
+        // company(ipallow=true)= middleware 行あり / public(false)= middlewares 行が丸ごと無い。
+        let company = build_service_doc("svc-x", "a.example.com", "http://c:8080", true, false);
+        assert!(company.contains("middlewares: [\"tsubomi-ipallow@file\"]"));
+        assert!(parse_ipallow(&company));
+        let public = build_service_doc("svc-x", "a.example.com", "http://c:8080", false, false);
+        assert!(!public.contains("middlewares:"));
+        assert!(!parse_ipallow(&public));
+        // 差分は middlewares 行 1 行だけ(entrypoint / rule / backend は不変)。
+        let diff: Vec<&str> = company.lines().filter(|l| !public.contains(l)).collect();
+        assert_eq!(diff, vec!["      middlewares: [\"tsubomi-ipallow@file\"]"]);
+        // parse_backend_container との往復(write フォーマット密結合の回帰)。
+        assert_eq!(parse_backend_container(&public).as_deref(), Some("c"));
+        // ipallow.yml など無関係な内容は false。
+        assert!(!parse_ipallow("http:\n  middlewares: {}\n"));
+    }
+
+    #[test]
+    fn service_doc_tls_branch_is_orthogonal_to_ipallow() {
+        // tls 分岐(websecure + certResolver)は ipallow と直交して効く。
+        let tls = build_service_doc("svc-x", "a.example.com", "http://c:8080", false, true);
+        assert!(tls.contains("entryPoints: [\"websecure\"]"));
+        assert!(tls.contains("certResolver: le"));
+        let http = build_service_doc("svc-x", "a.example.com", "http://c:8080", true, false);
+        assert!(http.contains("entryPoints: [\"web\"]"));
+        assert!(!http.contains("certResolver"));
+    }
 
     #[test]
     fn catchall_never_shadows_services_and_excludes_apex() {
