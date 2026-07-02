@@ -106,7 +106,12 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     }
 
     let target = state.config.traefik_dynamic_dir.join("registry.yml");
-    let doc = render(state.config.registry_host(), &users, state.config.tls);
+    let doc = render(
+        state.config.registry_host(),
+        state.config.registry_direct_host(),
+        &users,
+        state.config.tls,
+    );
     crate::services::route::write_atomic(&target, &doc)?;
     tracing::info!(accounts = users.len(), "registry の traefik 入口を同期した");
     Ok(())
@@ -115,11 +120,14 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
 /// traefik 動的設定(registry router + basicAuth middleware + service)を組み立てる。
 /// `push_host` = 公網の push ホスト(`registry_push`、例 registry.<域名>)。`tls`=true なら traefik 終端
 /// (websecure + LE)、false なら上流終端(web、HTTP。CF Tunnel / 逆代理の後ろ)。
+/// `direct_host` = CF を経由しない直連入口(任意。VPS sni-gate + frp 経由で届く。entrypoint
+/// `registrydirect` + LE **DNS-01**(`ledns`)で traefik が TLS 終端 — CF の 100MB 上限を回避する
+/// push 専用経路。compose.prod.registry-direct.yml とセット。doc/paas-registry-direct-design.md)。
 /// bcrypt ハッシュは `$`/`.`/`/` のみ(引用符・バックスラッシュ無し)なので二重引用符で安全に包める。
 /// file provider なので compose の `$$` 二重化は不要。
 /// **users 空(アカウント未作成)→ router を書かない**:push 入口は 404 = push 不可(fail-closed)。
 /// 空の basicAuth `users` が traefik で allow-all に倒れて push 入口が開く事故を避ける。
-fn render(push_host: &str, users: &[String], tls: bool) -> String {
+fn render(push_host: &str, direct_host: Option<&str>, users: &[String], tls: bool) -> String {
     use crate::services::route::{entrypoint, push_tls_block};
     let mut s = String::new();
     s.push_str("# 平台が自動生成(services/registry.rs)。手で編集しない。\n");
@@ -135,6 +143,17 @@ fn render(push_host: &str, users: &[String], tls: bool) -> String {
     s.push_str("      service: \"tsubomi-registry\"\n");
     s.push_str("      middlewares: [\"tsubomi-registry-auth@file\"]\n");
     push_tls_block(&mut s, tls);
+    if let Some(direct) = direct_host {
+        // 直連入口(CF 不経由)。traefik がここで TLS 終端(証明書は DNS-01 = 公網 :80 不要)。
+        // basicAuth は CF 入口と同じ middleware を共有(資格情報は 1 系統)。
+        s.push_str("    tsubomi-registry-direct:\n");
+        s.push_str(&format!("      rule: \"Host(`{direct}`)\"\n"));
+        s.push_str("      entryPoints: [\"registrydirect\"]\n");
+        s.push_str("      service: \"tsubomi-registry\"\n");
+        s.push_str("      middlewares: [\"tsubomi-registry-auth@file\"]\n");
+        s.push_str("      tls:\n");
+        s.push_str("        certResolver: ledns\n");
+    }
     s.push_str("  middlewares:\n");
     s.push_str("    tsubomi-registry-auth:\n");
     s.push_str("      basicAuth:\n");
@@ -322,7 +341,9 @@ async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds
         Some((user, password_enc)) => {
             let pass = state.crypto.decrypt(&password_enc)?;
             Ok(Some(RegistryCreds {
-                host: state.config.registry_push.clone(),
+                // CI へ配る push 先:直連入口(CF 100MB 上限を回避)があればそれを優先。
+                // 既存 service は gh variable `TSUBOMI_REGISTRY` を差し替えるだけで切替可能。
+                host: state.config.registry_ci_host().to_string(),
                 user,
                 pass,
             }))
@@ -340,7 +361,7 @@ mod tests {
     #[test]
     fn render_tls_uses_websecure_and_le() {
         // 直 VPS(tls=true):websecure + certResolver。Host は push ホストをそのまま。
-        let doc = render("registry.example.com", &[USER.to_string()], true);
+        let doc = render("registry.example.com", None, &[USER.to_string()], true);
         assert!(doc.contains("Host(`registry.example.com`)"));
         assert!(doc.contains("entryPoints: [\"websecure\"]"));
         assert!(doc.contains("certResolver: le"));
@@ -352,7 +373,7 @@ mod tests {
     #[test]
     fn render_no_tls_uses_web_and_no_certresolver() {
         // 上流終端(tls=false。CF Tunnel/逆代理):web エントリ・tls ブロック無し。basicAuth は付ける。
-        let doc = render("registry.example.com", &[USER.to_string()], false);
+        let doc = render("registry.example.com", None, &[USER.to_string()], false);
         assert!(doc.contains("entryPoints: [\"web\"]"));
         assert!(!doc.contains("certResolver"));
         assert!(!doc.contains("tls:"));
@@ -361,9 +382,28 @@ mod tests {
     }
 
     #[test]
+    fn render_direct_adds_second_router_with_dns01() {
+        // 直連入口:registrydirect entrypoint + DNS-01(ledns)終端の第 2 router。CF 入口と共存し、
+        // basicAuth middleware は共有。tunnel 部署(tls=false)でも直連側は常に TLS 終端。
+        let doc = render(
+            "registry.example.com",
+            Some("registry-direct.example.com"),
+            &[USER.to_string()],
+            false,
+        );
+        assert!(doc.contains("Host(`registry.example.com`)"));
+        assert!(doc.contains("Host(`registry-direct.example.com`)"));
+        assert!(doc.contains("entryPoints: [\"registrydirect\"]"));
+        assert!(doc.contains("certResolver: ledns"));
+        // middleware は 1 定義を両 router が参照。
+        assert_eq!(doc.matches("tsubomi-registry-auth@file").count(), 2);
+        assert_eq!(doc.matches("basicAuth").count(), 1);
+    }
+
+    #[test]
     fn render_empty_is_fail_closed() {
         // アカウント 0 → router も basicAuth も書かない(push 入口は 404 = push 不可)。tls 不問。
-        let doc = render("registry.example.com", &[], false);
+        let doc = render("registry.example.com", None, &[], false);
         assert!(!doc.contains("routers"));
         assert!(!doc.contains("basicAuth"));
         assert!(!doc.contains("Host("));

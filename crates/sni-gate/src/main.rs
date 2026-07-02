@@ -76,6 +76,18 @@ struct Args {
     #[arg(long, env = "SNI_GATE_REDIS_ALLOW_NO_SNI", default_value_t = false)]
     redis_allow_no_sni: bool,
 
+    /// **HTTPS**(TLS-on-connect)路径の後端(frps の registry proxy ポート等)。redis と同じ
+    /// passthrough(TLS 非終端・ClientHello replay)だが、**SNI 完全一致が必須**の別 route として
+    /// 持つ:registry push を CF 100MB 上限を通らずに受ける直連入口用(paas-registry-direct-design)。
+    /// 未指定なら HTTPS 路径は無し(既存配備は不変)。
+    #[arg(long, env = "SNI_GATE_HTTPS_BACKEND")]
+    https_backend: Option<SocketAddr>,
+
+    /// **HTTPS** 路径で許可する SNI(カンマ区切り複数可)。`https_backend` とセットで指定。
+    /// SNI 無しは常に拒否(素性の知れない TLS 扫描を frp より前で弾く)。
+    #[arg(long = "https-sni", env = "SNI_GATE_HTTPS_SNI", value_delimiter = ',')]
+    https_sni: Vec<String>,
+
     /// 前導(GSS/SSLRequest + ClientHello)読み取りと後端接続のタイムアウト秒。slowloris 対策。
     #[arg(long, env = "SNI_GATE_TIMEOUT", default_value_t = 10)]
     timeout: u64,
@@ -108,21 +120,33 @@ struct Stats {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Arc::new(Args::parse());
-    // route が 1 つも無いと無意味(全拒否)。pg(--sni)か redis(--redis-backend)のどちらかは要る。
-    if args.allowed_sni.is_empty() && args.redis_backend.is_none() {
-        bail!("route が未設定:--sni(pg)か --redis-backend(redis)のいずれかを指定してください");
+    // route が 1 つも無いと無意味(全拒否)。pg(--sni)/ redis / https のいずれかは要る。
+    if args.allowed_sni.is_empty() && args.redis_backend.is_none() && args.https_backend.is_none()
+    {
+        bail!(
+            "route が未設定:--sni(pg)/ --redis-backend(redis)/ --https-backend(https)のいずれかを指定してください"
+        );
     }
-    // redis-backend だけ指定して redis-sni が空だと、redis 路径は実行時に全拒否(無 SNI 許可でも
-    // 「route not configured」)になる。起動時に誤配置として弾く(オペレータへの早期フィードバック)。
+    // backend だけ指定して対の SNI が空だと、その路径は実行時に全拒否になる。
+    // 起動時に誤配置として弾く(オペレータへの早期フィードバック)。
     if args.redis_backend.is_some() && args.redis_sni.is_empty() {
         bail!("--redis-backend を指定したら --redis-sni も必須です(空だと redis 路径が全拒否になる)");
+    }
+    if args.https_backend.is_some() && args.https_sni.is_empty() {
+        bail!("--https-backend を指定したら --https-sni も必須です(空だと https 路径が全拒否になる)");
     }
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("bind {}", args.listen))?;
     eprintln!(
-        "tsubomi-sni-gate: listening {} | pg {} sni {:?} | redis {:?} sni {:?}",
-        args.listen, args.backend, args.allowed_sni, args.redis_backend, args.redis_sni
+        "tsubomi-sni-gate: listening {} | pg {} sni {:?} | redis {:?} sni {:?} | https {:?} sni {:?}",
+        args.listen,
+        args.backend,
+        args.allowed_sni,
+        args.redis_backend,
+        args.redis_sni,
+        args.https_backend,
+        args.https_sni
     );
 
     let sem = Arc::new(Semaphore::new(args.max_pending));
@@ -274,18 +298,37 @@ async fn read_phase(client: &mut TcpStream, args: &Args) -> Result<Routed> {
     client.read_exact(&mut first).await?;
 
     if first[0] == TLS_HANDSHAKE {
-        // redis。ルート未設定(pg のみ部署)なら ClientHello を読む前に拒否(扫描を安く弾く)。
-        let addr = match args.redis_backend {
-            Some(addr) if !args.redis_sni.is_empty() => addr,
-            _ => return Ok(Routed::Reject("redis route not configured".into())),
-        };
+        // TLS-on-connect(redis / https)。どちらの route も無ければ ClientHello を読む前に拒否
+        // (pg のみ部署で HTTPS 扫描を安く弾く)。
+        let redis_addr = args.redis_backend.filter(|_| !args.redis_sni.is_empty());
+        let https_addr = args.https_backend.filter(|_| !args.https_sni.is_empty());
+        if redis_addr.is_none() && https_addr.is_none() {
+            return Ok(Routed::Reject("tls route not configured".into()));
+        }
         // 先頭 `0x16` は読み済み = それを content_type に TLS record を組む(非 TLS / 畸形は read_tls_record が拒否)。
         let record = read_tls_record(client, TLS_HANDSHAKE).await?;
+        let parsed = sni::parse_sni(&record[5..]);
+        // 1) HTTPS route(registry 直連):SNI 完全一致のみ。redis より先に判定する
+        //    (SNI が違えば次の redis 判定へ落ちる = 共存可能)。
+        if let (Some(addr), Some(sni)) = (https_addr, parsed.as_deref())
+            && sni_allowed(&args.https_sni, sni)
+        {
+            return Ok(Routed::To {
+                proto: Proto::Redis, // TLS passthrough は redis と同一手順(前導なし・replay のみ)
+                addr,
+                record,
+                no_sni: false,
+            });
+        }
+        // 2) redis route。未配備なら拒否。
+        let Some(addr) = redis_addr else {
+            return Ok(Routed::Reject("redis route not configured".into()));
+        };
         // SNI 検証:有 → `--redis-sni` 一致必須(他ドメイン狙いの扫描を拒否)。
         // 無 → `--redis-allow-no-sni` on なら許可(専用 :8080 = Bun 原生など SNI 非送出 client 向け)、
         //      off なら拒否(pg と同居の :443 では SNI 無し = pg と区別不能のため)。
         // ※ 非 TLS / record framing 不正は read_tls_record が既に弾く(allow-no-sni でも基本拒否は維持)。
-        let no_sni = match sni::parse_sni(&record[5..]) {
+        let no_sni = match parsed {
             Some(sni) if sni_allowed(&args.redis_sni, &sni) => false,
             Some(sni) => return Ok(Routed::Reject(format!("redis SNI {sni:?} not allowed"))),
             None if args.redis_allow_no_sni => true,

@@ -120,6 +120,14 @@ pub struct Config {
     /// 返す DTO の `registry.host` に載る(digest 内容アドレスなので push/pull の host が
     /// 違っても問題ない — 決定 #3)。
     pub registry_push: String,
+    /// **CF を経由しない**registry 直連 push ホスト(`TSUBOMI_REGISTRY_DIRECT`、任意)。
+    /// CF proxy は request body ≈100MB 上限があり、イメージの大きな層の push が 413 で割れる
+    /// (単層 >100MB は経路として不成立)。設定すると:①traefik に直連入口 router
+    /// (entrypoint `registrydirect`、LE DNS-01 終端)を追記 ②CI へ配る push 先
+    /// (`RegistryCreds.host` = GitHub Variable `TSUBOMI_REGISTRY`)がこの host になる。
+    /// CF 経由の `registry_push` 入口も**共存**(pull / 小さい層はそのまま)。
+    /// 実装級は doc/paas-registry-direct-design.md。
+    pub registry_direct: Option<String>,
     /// build 対象の arch(GitHub Variable `TSUBOMI_PLATFORMS`)。§6.6 のデータ駆動:
     /// 将来 x86_64 host を足したら `linux/arm64,linux/amd64` に変えるだけ。
     pub platforms: String,
@@ -211,8 +219,10 @@ impl Config {
     /// 127.0.0.1:5000)と別ホスト = 公網の認証付き registry がある = prod、という自然な信号。
     /// dev は両者一致なので false(registry は無認証ループバック直結で入口を書かない)。
     /// TLS の有無(traefik 終端 / 上流終端)とは独立 — tunnel(tls=false)でも入口は要る。
+    /// **直連入口(`registry_direct`)だけ設定された部署でも true**:CI へ配る push 先が直連 host に
+    /// なるのに router が書かれず docker login が黙って割れる、を防ぐ(codex 監査)。
     pub fn registry_ingress(&self) -> bool {
-        self.registry_push != self.registry_pull
+        self.registry_push != self.registry_pull || self.registry_direct.is_some()
     }
 
     /// traefik の `Host(...)` ルール用の push ホスト名(`registry_push` から `:port` を落とす。
@@ -222,6 +232,19 @@ impl Config {
             .split(':')
             .next()
             .unwrap_or(&self.registry_push)
+    }
+
+    /// 直連入口の `Host(...)` 用ホスト名(`registry_direct` から `:port` を落とす)。未設定なら None。
+    pub fn registry_direct_host(&self) -> Option<&str> {
+        self.registry_direct
+            .as_deref()
+            .map(|d| d.split(':').next().unwrap_or(d))
+    }
+
+    /// CI(GitHub Secret/Variable)へ配る push 先。直連入口があればそれを優先
+    /// (大きな層が CF 100MB 上限で 413 にならない経路)。無ければ従来の CF 経由 push ホスト。
+    pub fn registry_ci_host(&self) -> &str {
+        self.registry_direct.as_deref().unwrap_or(&self.registry_push)
     }
 
     /// service の公開 URL(`<scheme>://<subdomain>.<domain>`)を組み立てる。
@@ -429,6 +452,19 @@ impl Config {
                 "TSUBOMI_REGISTRY_PUSH must be host[:port]([a-zA-Z0-9.:-] のみ、scheme/path 不可): {registry_push}"
             );
         }
+        // CF を通らない直連 push 入口(任意)。書式は registry_push と同じ host[:port]。
+        let registry_direct = std::env::var("TSUBOMI_REGISTRY_DIRECT")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if let Some(d) = &registry_direct
+            && !d
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+        {
+            anyhow::bail!(
+                "TSUBOMI_REGISTRY_DIRECT must be host[:port]([a-zA-Z0-9.:-] のみ、scheme/path 不可): {d}"
+            );
+        }
         let platforms =
             std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
         // M6 網隔離:per-service 私網の接頭辞 + 私網へ attach する infra コンテナ名。
@@ -528,6 +564,7 @@ impl Config {
             domain,
             registry_pull,
             registry_push,
+            registry_direct,
             platforms,
             svc_network_prefix,
             tenant_pool,

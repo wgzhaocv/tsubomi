@@ -1,16 +1,20 @@
-# tsubomi-sni-gate — 公網 DB(frp 中継)の VPS 辺縁 SNI 准入闸门(:443、**pg 専用**)。
-# 公網 :443 を受け、SNI == db.tsubomi-app.com(Postgres、SSLRequest 前導)だけを localhost frps の
-# pg proxy(127.0.0.1:6432)へ passthrough(TLS 非終端)。許可外 SNI・非対象前導は frp 資源を消費する前に弾く。
+# tsubomi-sni-gate — 公網 DB + registry 直連(frp 中継)の VPS 辺縁 SNI 准入闸门(:443)。
+# 公網 :443 を受け、次の 2 route だけを localhost frps へ passthrough(TLS 非終端)する:
+#   - SNI == db.tsubomi-app.com(Postgres、SSLRequest 前導)→ pg proxy(127.0.0.1:6432)
+#   - SNI == registry-direct.tsubomi-app.com(HTTPS、TLS-on-connect)→ registry proxy(127.0.0.1:6443)
+#     ※ registry push の CF 100MB 上限回避の直連入口(doc/paas-registry-direct-design.md)。
+#       TLS 終端は香橙派側 traefik :8443(LE DNS-01)。
+# 許可外 SNI・非対象前導は frp 資源を消費する前に弾く。
 # **cache は別ポート :8080 の tsubomi-cache-gate へ分離**(独立 frp 池・SNI 無しも許可 = deploy/cache-gate/)。
 # 配備は `just ship-sni-gate`(scripts/ship-sni-gate.sh、sni-gate と cache-gate を一緒に配る)。
 [Unit]
-Description=tsubomi SNI gate (Postgres-over-TLS SNI 准入闸门, frps 前置)
+Description=tsubomi SNI gate (Postgres/HTTPS-over-TLS SNI 准入闸门, frps 前置)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/tsubomi-sni-gate --listen 0.0.0.0:443 --backend 127.0.0.1:6432 --sni db.tsubomi-app.com
+ExecStart=/usr/local/bin/tsubomi-sni-gate --listen 0.0.0.0:443 --backend 127.0.0.1:6432 --sni db.tsubomi-app.com --https-backend 127.0.0.1:6443 --https-sni registry-direct.tsubomi-app.com
 Restart=on-failure
 RestartSec=2
 

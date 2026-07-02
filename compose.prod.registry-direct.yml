@@ -1,0 +1,56 @@
+# registry の **CF を経由しない直連 push 入口**(VPS sni-gate + frp 回源)の上書き。
+# CF proxy は request body ≈100MB 上限(Free/Pro)があり、イメージの大きな層の push が
+# 413 で必ず割れる(docker は層を分割 push できない)。この入口は CF を通らないので上限が無い。
+# pull / 小さい層の push は従来の CF 経由(registry.<域名>)と**共存**する。
+#
+# 経路(実装級は doc/paas-registry-direct-design.md):
+#   GHA runner --HTTPS--> registry-direct.<域名>(灰云 A → VPS)
+#     → VPS tsubomi-sni-gate :443(--https-sni で SNI 准入・TLS 非終端)
+#     → frps 127.0.0.1:6443 → frpc(本機)→ traefik :8443(ここで TLS 終端)→ registry
+#
+# 使い方(香橙派 / 本機側):
+#   .env.production:
+#     TSUBOMI_REGISTRY_DIRECT=registry-direct.<域名>   # server が registry.yml に直連 router を書く条件
+#     CF_DNS_API_TOKEN=<Cloudflare API Token(Zone:DNS:Edit)>  # LE DNS-01 用(公網 :80 不要)
+#     TSUBOMI_ACME_EMAIL=<メール>
+#   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.registry-direct.yml up -d traefik
+#
+# 地雷:
+#  * **`command`(リスト)は後勝ちで全置換**なので base(compose.prod.yml)の行も再掲する
+#    (compose.prod.db-public.yml と同じ扱い)。tls.yml / db-public.yml と同居するときは
+#    3 者の command を**一つに統合**すること。
+#  * ports は 127.0.0.1 bind:公網から :8443 へ直接は届かない(frpc 経由のみ)。
+#  * 証明書は **DNS-01**(cloudflare provider):この部署は CF Tunnel で traefik が公網 :80 を
+#    持たないため HTTP-01 は不成立。CF_DNS_API_TOKEN はゾーンの DNS 編集権限だけの token にする。
+#  * acme-dns.json は named volume に永続化(消えると再発行 = LE レート制限に当たり得る)。
+#  * traefik の basicAuth(registry.yml の tsubomi-registry-auth)は CF 入口と共有 —
+#    入口を守るのは TLS + basicAuth + sni-gate の SNI 准入(GHA runner の IP は不定なので
+#    IP 許可リストは適用しない。db-public との明確な違い)。
+services:
+  traefik:
+    command:
+      # ---- base(compose.prod.yml)の再掲 ----
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:80
+      - --experimental.localPlugins.cloudflared-source-ip.moduleName=github.com/kubitodev/traefik-cloudflared-source-ip
+      - --entrypoints.web.http.middlewares=cloudflared-source-ip@file
+      # ---- 直連入口(この override 固有)----
+      # 名前 `registrydirect` は registry.rs::render の entryPoints と一致させること。
+      - --entrypoints.registrydirect.address=:8443
+      # LE DNS-01(cloudflare)。resolver 名 `ledns` も registry.rs::render と一致させること。
+      - --certificatesresolvers.ledns.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.ledns.acme.email=${TSUBOMI_ACME_EMAIL}
+      - --certificatesresolvers.ledns.acme.storage=/letsencrypt/acme-dns.json
+    environment:
+      # DNS-01 の CF API token(Zone:DNS:Edit のみの最小権限で発行すること)。
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN}
+    ports:
+      # frpc からの回源のみ(loopback)。base の :80 は compose がマージで維持する。
+      - "127.0.0.1:8443:8443"
+    volumes:
+      # base の volumes に追記マージされる(dynamic / plugins は base 定義のまま生きる)。
+      - registry_direct_acme:/letsencrypt
+
+volumes:
+  registry_direct_acme:

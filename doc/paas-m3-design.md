@@ -760,7 +760,8 @@ TSUBOMI_DB_SSLMODE=require
    compose 内で multi-arch 索引 digest 固定済みなので動かさず、全 app の同時瞬断を避ける(`just ship` も同じ)。
 
 **⚠ CF の制約**:proxied トラフィックは **リクエスト body 上限**(無料/Pro ≈100MB)。`docker push` の大きな層は
-割れうる(小イメージ = node:alpine 等は通る)。回避は CF Enterprise / 層を小さく / 別 registry。
+割れうる(小イメージ = node:alpine 等は通る)。回避は CF Enterprise / 層を小さく / **CF を経由しない直連 push 入口**
+(`TSUBOMI_REGISTRY_DIRECT`。VPS sni-gate + frp 経由、実装級は `doc/paas-registry-direct-design.md`)。
 
 ### 13.B モード B:直 VPS(公網 IP + traefik LE)
 
