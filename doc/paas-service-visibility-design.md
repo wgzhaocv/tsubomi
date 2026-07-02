@@ -260,11 +260,14 @@ shared は `SetServiceVisibilityReq { visibility: String }` + `ServiceDto` に
    30s 以内に各々収束 + `route_drift` audit。
 6. `just check` 緑。
 
-**prod(香橙派)活体**:
+**prod(香橙派)活体** — **全項済み(2026-07-03、server v38)**:
 
-1. public = 社外 IP(スマホ LTE)から開く / company = 社外 NG・社内 OK(回帰)/ private = どの IP でも
-   302 `/noservice`。
-2. toggle が再デプロイ無しで数秒内に反映(traefik file watch)。
-3. **M6 × private(主用途)**:callee を private にして、caller コンテナから
-   `http://<callee-subdomain>:<port>` が実体を返す。未リンクの第三者からは不達のまま(隔離回帰)。
-4. `just ship` 後:migration 自動適用、既存 service(全 company)が無瞬断。
+1. ✅ private = どの IP からも 302 `/noservice`(ローカル + 社外 VPS 133.88.123.119 の両方で確認)。
+   public = 社外からも実体応答・yml に ipallow 行なし。company = 実体応答・ipallow 行あり。
+   ※「company = 社外 NG」は**現状検証不能**:本番の会社 IP 許可リストが空 = fail-open
+   (`ipallow.yml` が 0.0.0.0/0)で company≒public。これは既存の平台状態(owner が entries を
+   入れた時に差が立ち上がる)であり本機能の回帰ではない。
+2. ✅ toggle は再デプロイ無しで ~4 秒で反映(prod Linux の traefik file watch は正常)。
+3. ✅ **M6 × private(主用途)**:private callee(vis-e2e)への注入を持つ caller コンテナから
+   `wget http://vis-e2e:8080` が実体を返し、未リンクの service へは `bad address`(隔離回帰)。
+4. ✅ `just ship`(v38):migration 20260702000001 自動適用、既存 7 service(全 company)無瞬断。

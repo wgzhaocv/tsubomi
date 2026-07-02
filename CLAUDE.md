@@ -82,7 +82,11 @@ Host は `b:<port>`・IP 白名単/中間件なし)は受容済み。**本番 e2
 fail-open で残る穴を塞ぐ)。付随修理:`attach_callees` の callee 解決を route ファイル依存から
 `serving_container`(DB の直近成功 deploy + 実走確認)へ = **private callee への M6 リンクが主用途**。
 入口:`tbm service visibility`(status 表示 / verify は private 短絡)+ web 概要の Radio 3 択(URL バナーは
-灰化・温存)。実装級は **`doc/paas-service-visibility-design.md`**。
+灰化・温存)。**本番 e2e 済み**(2026-07-03、server v38 / tbm 1.0.17):private=どの IP からも 302
+/noservice(社外 VPS からも確認)・yml の ipallow 行が public で消え company で戻る・切替は traefik file
+watch で数秒反映・**private callee への M6 内部リンクが caller コンテナから実体を返し**、未リンクは
+`bad address`(隔離維持)。会社 IP 許可リストは現状**空 = fail-open**(company≒public。owner が
+entries を入れた時に差が立ち上がる)。実装級は **`doc/paas-service-visibility-design.md`**。
 
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
