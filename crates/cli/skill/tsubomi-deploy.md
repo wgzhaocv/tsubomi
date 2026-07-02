@@ -217,10 +217,10 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 - 再デプロイ:GitHub 経路は `git push`、ローカルは `tbm deploy --local`。
 - `tbm db rotate` / `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
-- **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切替(**即時反映・
+- **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切り替え(**即時反映・
   再デプロイ不要**)。`private` = 公開 URL 無効(監視・通知系 worker 向け。内部リンク /
-  logs / exec は従来どおり)/ `company` = 会社 IP のみ(既定)/ `public` = 全網公開(IP 制限
-  なし — アプリ側に認証が無ければ誰でも触れる)。
+  logs / exec は従来どおり)/ `company` = 会社の IP のみ(既定)/ `public` = 一般公開(IP 制限
+  なし — アプリ側に認証が無ければ誰でもアクセスできる)。
 - 秘密(接続文字列・deploy key)は **git に commit しない / 共有しない**。漏れたら rotate。
 
 ## 7. つまずきの早見表

@@ -90,7 +90,7 @@ pub enum ServiceCmd {
         /// 戻し先のデプロイ id
         deploy_id: String,
     },
-    /// 公開範囲を切替える(**即時反映・再デプロイ不要**。現在値は `tbm service status` で確認)
+    /// 公開範囲を切り替える(**即時反映・再デプロイ不要**。現在値は `tbm service status` で確認)
     Visibility {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
@@ -104,11 +104,11 @@ pub enum ServiceCmd {
 /// サーバ側の 400 検証が最終ガード。
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum VisibilityArg {
-    /// 公開 URL を無効化(公網から不可視。内部リンク / logs / exec は従来どおり)
+    /// 公開 URL を無効にする(外部からアクセス不可。内部リンク / logs / exec は従来どおり)
     Private,
-    /// 会社 IP 許可リストからのみアクセス可(既定)
+    /// 会社の IP 許可リストからのみアクセス可(既定)
     Company,
-    /// 全網公開(IP 制限なし。アプリ側の認証が無ければ誰でも触れる)
+    /// 一般公開(IP 制限なし。アプリ側に認証が無ければ誰でもアクセス可能)
     Public,
 }
 
@@ -275,10 +275,10 @@ pub async fn run(
                         "非公開にしました(即時反映)。公開 URL は無効になりますが、内部リンク・logs・exec は従来どおり使えます。"
                     ),
                     VisibilityArg::Company => println!(
-                        "社内公開にしました(即時反映)。会社 IP 許可リストからのみアクセスできます。"
+                        "社内限定にしました(即時反映)。会社の IP 許可リストからのみアクセスできます。"
                     ),
                     VisibilityArg::Public => println!(
-                        "全網公開にしました(即時反映)。IP 制限はありません — アプリ側の認証にご注意を。"
+                        "一般公開にしました(即時反映)。IP 制限はありません — アプリ側の認証にご注意ください。"
                     ),
                 }
             }

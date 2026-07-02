@@ -69,7 +69,7 @@ export default function ServiceOverview() {
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
             <span className="text-xs font-bold text-muted-foreground">
-              {isPrivate ? "公開 URL(非公開中 — 公網からは見えません)" : "公開 URL"}
+              {isPrivate ? "公開 URL(非公開中 — 外部からはアクセスできません)" : "公開 URL"}
             </span>
             {isPrivate ? (
               <span className="truncate text-base font-bold text-muted-foreground">{urlText}</span>
@@ -159,17 +159,17 @@ export default function ServiceOverview() {
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-bold text-foreground">公開範囲</h2>
         <p className="text-sm font-medium text-muted-foreground">
-          切替は即時反映(再デプロイ不要)。非公開にしても内部リンク・ログ・ターミナルは従来どおり使えます。全網公開は
-          IP 制限が外れます — アプリ側の認証にご注意を。
+          切り替えは即時反映(再デプロイ不要)。非公開にしても内部リンク・ログ・ターミナルは従来どおり使えます。一般公開は
+          IP 制限が外れます — アプリ側の認証にご注意ください。
         </p>
         <Radio
           aria-label="公開範囲"
           value={visibility}
           disabled={!svc || setVis.isPending}
           options={[
-            { label: "非公開(公網から不可視)", value: "private" },
-            { label: "社内のみ(会社 IP)", value: "company" },
-            { label: "全網公開(IP 制限なし)", value: "public" },
+            { label: "非公開(外部からアクセス不可)", value: "private" },
+            { label: "社内のみ(会社 IP のみ)", value: "company" },
+            { label: "一般公開(IP 制限なし)", value: "public" },
           ]}
           onChange={(v) => setVis.mutate(String(v))}
         />
