@@ -98,6 +98,10 @@ struct Args {
 #[derive(Default)]
 struct Stats {
     accepted: AtomicU64,
+    /// accepted のうち SNI 無しで通過した数(`--redis-allow-no-sni` の路径)。
+    /// no-SNI 許可ポートでは「TLS を喋る扫描器」も accepted に入るため、この内訳が無いと
+    /// 正規接続と扫描の区別がつかない(実運用フィードバック起因)。記録は計数のみ(軽量)。
+    no_sni: AtomicU64,
     rejected: AtomicU64,
 }
 
@@ -134,8 +138,9 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 eprintln!(
-                    "tsubomi-sni-gate: stats accepted={} rejected={}",
+                    "tsubomi-sni-gate: stats accepted={} (no_sni={}) rejected={}",
                     stats.accepted.load(Ordering::Relaxed),
+                    stats.no_sni.load(Ordering::Relaxed),
                     stats.rejected.load(Ordering::Relaxed),
                 );
             }
@@ -167,7 +172,7 @@ async fn main() -> Result<()> {
             };
             let mut client = client;
             match handshake(&mut client, &args).await {
-                Ok(Some(backend)) => {
+                Ok(Some((backend, no_sni))) => {
                     drop(permit);
                     // 成立済みセッションの上限。超過は新規を拒否(自身の fd 枯渇を防ぐ)。
                     let active_permit = match active_sem.try_acquire_owned() {
@@ -179,6 +184,9 @@ async fn main() -> Result<()> {
                         }
                     };
                     stats.accepted.fetch_add(1, Ordering::Relaxed);
+                    if no_sni {
+                        stats.no_sni.fetch_add(1, Ordering::Relaxed);
+                    }
                     splice(client, backend).await;
                     drop(active_permit);
                 }
@@ -210,6 +218,8 @@ enum Routed {
         proto: Proto,
         addr: SocketAddr,
         record: Vec<u8>,
+        /// SNI 無しで通過したか(`--redis-allow-no-sni` の路径のみ true。統計の内訳用)。
+        no_sni: bool,
     },
     Reject(String),
 }
@@ -223,8 +233,9 @@ enum Routed {
 ///   (B) 後端(frps)接続を別 timeout で。(A) の失敗 = 客户端側(無言拒否)、(B) の失敗 = 自インフラ
 ///       (Err として記録)、という住み分けを保つ。
 ///
-/// 戻り値:`Ok(Some)` = 許可(splice へ)/ `Ok(None)` = 客户端側の拒否 / `Err(_)` = 自インフラ不調。
-async fn handshake(client: &mut TcpStream, args: &Args) -> Result<Option<TcpStream>> {
+/// 戻り値:`Ok(Some((stream, no_sni)))` = 許可(splice へ。no_sni は統計の内訳用)/
+/// `Ok(None)` = 客户端側の拒否 / `Err(_)` = 自インフラ不調。
+async fn handshake(client: &mut TcpStream, args: &Args) -> Result<Option<(TcpStream, bool)>> {
     let dur = Duration::from_secs(args.timeout);
 
     // (A) 読み取り + 協議判定 + SNI 検証(まとめて 1 つの timeout)。
@@ -233,12 +244,13 @@ async fn handshake(client: &mut TcpStream, args: &Args) -> Result<Option<TcpStre
         Ok(Err(e)) => return Ok(reject(args, || format!("{e}"))), // 読み取り中の I/O エラー
         Err(_) => return Ok(reject(args, || "handshake read timeout".into())),
     };
-    let (proto, addr, record) = match routed {
+    let (proto, addr, record, no_sni) = match routed {
         Routed::To {
             proto,
             addr,
             record,
-        } => (proto, addr, record),
+            no_sni,
+        } => (proto, addr, record, no_sni),
         Routed::Reject(why) => return Ok(reject(args, move || why)),
     };
 
@@ -248,7 +260,7 @@ async fn handshake(client: &mut TcpStream, args: &Args) -> Result<Option<TcpStre
         Proto::Redis => tokio::time::timeout(dur, connect_redis_backend(addr, &record)).await,
     };
     match connected {
-        Ok(Ok(b)) => Ok(Some(b)),
+        Ok(Ok(b)) => Ok(Some((b, no_sni))),
         Ok(Err(e)) => Err(e),
         Err(_) => bail!("backend setup timeout ({addr})"),
     }
@@ -273,16 +285,17 @@ async fn read_phase(client: &mut TcpStream, args: &Args) -> Result<Routed> {
         // 無 → `--redis-allow-no-sni` on なら許可(専用 :8080 = Bun 原生など SNI 非送出 client 向け)、
         //      off なら拒否(pg と同居の :443 では SNI 無し = pg と区別不能のため)。
         // ※ 非 TLS / record framing 不正は read_tls_record が既に弾く(allow-no-sni でも基本拒否は維持)。
-        match sni::parse_sni(&record[5..]) {
-            Some(sni) if sni_allowed(&args.redis_sni, &sni) => {}
+        let no_sni = match sni::parse_sni(&record[5..]) {
+            Some(sni) if sni_allowed(&args.redis_sni, &sni) => false,
             Some(sni) => return Ok(Routed::Reject(format!("redis SNI {sni:?} not allowed"))),
-            None if args.redis_allow_no_sni => {}
+            None if args.redis_allow_no_sni => true,
             None => return Ok(Routed::Reject("no SNI in ClientHello (--redis-allow-no-sni off)".into())),
-        }
+        };
         Ok(Routed::To {
             proto: Proto::Redis,
             addr,
             record,
+            no_sni,
         })
     } else {
         // Postgres。先頭バイトを渡し前導(GSS/SSLRequest)を本地終結 → ClientHello を読む。
@@ -298,12 +311,13 @@ async fn read_phase(client: &mut TcpStream, args: &Args) -> Result<Routed> {
             proto: Proto::Pg,
             addr: args.backend,
             record,
+            no_sni: false,
         })
     }
 }
 
 /// 客户端側の拒否:既定で無言、`--log-rejects` 時のみ理由を出す。常に `None` を返す。
-fn reject(args: &Args, reason: impl FnOnce() -> String) -> Option<TcpStream> {
+fn reject<T>(args: &Args, reason: impl FnOnce() -> String) -> Option<T> {
     if args.log_rejects {
         eprintln!("reject(client): {}", reason());
     }
