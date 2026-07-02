@@ -72,6 +72,18 @@ Host は `b:<port>`・IP 白名単/中間件なし)は受容済み。**本番 e2
 リンクし、診断コンテナから `http://hanadayori:8080` が実体を返す一方、未リンクの sagi-ad-demo は `bad address`
 (隔離維持)を香橙派で実機確認。地雷・確定事項は **`doc/paas-service-link-design.md`**。
 
+**内部リンク後の追加(マイルストーン外):service 公開範囲(visibility)三態**。全 service に必ず公開 URL が
+生える前提を崩し、`service_details.visibility`(migration 1 本、`private`/`company`=既定/`public`)で
+**route ファイル(`svc-<id>.yml`)の生成を分岐**する:private=書かない(subdomain 温存・公網は catch-all →
+302 /noservice。監視系 worker 用)/ company=現状(ipallow middleware)/ public=middleware を挂けない
+(全網公開 — 当初 M3 で drop した `public` 列の意図の再来。本人裁量 + audit)。**切替は即時**
+(`POST /services/{id}/visibility` が deploy_lock 内で DB 先行 → route ファイル再生成/削除。env と違い
+再デプロイ不要)。reconcile の drift 判定は `(backend, ipallow)` の組に拡張(public→company の書込失敗が
+fail-open で残る穴を塞ぐ)。付随修理:`attach_callees` の callee 解決を route ファイル依存から
+`serving_container`(DB の直近成功 deploy + 実走確認)へ = **private callee への M6 リンクが主用途**。
+入口:`tbm service visibility`(status 表示 / verify は private 短絡)+ web 概要の Radio 3 択(URL バナーは
+灰化・温存)。実装級は **`doc/paas-service-visibility-design.md`**。
+
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
 本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =
