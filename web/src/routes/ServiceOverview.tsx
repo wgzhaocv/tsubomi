@@ -1,23 +1,27 @@
 import { useState } from "react";
-import { Check, Copy, ExternalLink, Globe, Play, Square, Trash2 } from "lucide-react";
+import { Check, Copy, ExternalLink, EyeOff, Globe, Play, Square, Trash2 } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
+import { Radio } from "@/components/ui/radio";
 import {
   desiredLabel,
   phaseLabel,
+  serviceVisibility,
   shortDigest,
   useDeleteService,
   useService,
+  useSetServiceVisibility,
   useStartService,
   useStopService,
 } from "@/lib/services";
 import { useCopied } from "@/lib/use-copied";
+import { cn } from "@/lib/utils";
 
-// 概要:状態 grid + 操作(開始 / 停止)+ 危険ゾーン(削除 = 名前入力確認)。
+// 概要:状態 grid + 操作(開始 / 停止)+ 公開範囲(Radio 3 択)+ 危険ゾーン(削除 = 名前入力確認)。
 // 操作は再デプロイ(start-first)を伴うので結果が返るまで loading。
 export default function ServiceOverview() {
   const { id = "" } = useParams();
@@ -26,34 +30,59 @@ export default function ServiceOverview() {
   const start = useStartService(id);
   const stop = useStopService(id);
   const del = useDeleteService(id);
+  const setVis = useSetServiceVisibility(id);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const { copied, copy } = useCopied();
   // url を局所定数に取り出して narrow する(onClick クロージャ内でも string 確定にする)。
   const url = svc?.url;
+  const urlText = url?.replace(/^https?:\/\//, "");
+  const visibility = serviceVisibility(svc);
+  const isPrivate = visibility === "private";
   const actionErr = start.error ?? stop.error;
   // svc 未取得 / どちらかの操作が進行中なら両ボタンを止める(未知状態への発火・start と stop の同時発火を防ぐ)。
   const busy = !svc || start.isPending || stop.isPending;
 
   return (
     <div className="flex flex-col gap-7">
-      {/* ===== 公開 URL(目立つ位置に独立表示。クリックで開く / コピー)===== */}
+      {/* ===== 公開 URL(目立つ位置に独立表示。クリックで開く / コピー)=====
+          private 中は**消さずに灰色化**して「非公開中」を明示 — subdomain は温存されており、
+          再公開すれば同じ URL で復活するため。URL 文字列とコピーは残し、「開く」は /noservice に
+          飛ぶだけなので出さない。 */}
       {url && (
-        <section className="flex flex-wrap items-center gap-3 rounded-2xl border-2 border-[#19c8b9]/35 bg-accent px-5 py-4">
-          <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-[#19c8b9]/15 text-[#11a89b]">
-            <Globe className="size-5.5" />
+        <section
+          className={cn(
+            "flex flex-wrap items-center gap-3 rounded-2xl border-2 px-5 py-4",
+            isPrivate ? "border-[#e8e2d6] bg-card" : "border-[#19c8b9]/35 bg-accent",
+          )}
+        >
+          <div
+            className={cn(
+              "grid size-11 shrink-0 place-items-center rounded-2xl",
+              isPrivate
+                ? "bg-[#e8e2d6]/60 text-muted-foreground"
+                : "bg-[#19c8b9]/15 text-[#11a89b]",
+            )}
+          >
+            {isPrivate ? <EyeOff className="size-5.5" /> : <Globe className="size-5.5" />}
           </div>
           <div className="flex min-w-0 flex-1 flex-col">
-            <span className="text-xs font-bold text-muted-foreground">公開 URL</span>
-            <a
-              href={url}
-              target="_blank"
-              rel="noreferrer"
-              className="truncate text-base font-bold text-[#11a89b] underline-offset-2 outline-none hover:underline focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
-            >
-              {url.replace(/^https?:\/\//, "")}
-            </a>
+            <span className="text-xs font-bold text-muted-foreground">
+              {isPrivate ? "公開 URL(非公開中 — 公網からは見えません)" : "公開 URL"}
+            </span>
+            {isPrivate ? (
+              <span className="truncate text-base font-bold text-muted-foreground">{urlText}</span>
+            ) : (
+              <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="truncate text-base font-bold text-[#11a89b] underline-offset-2 outline-none hover:underline focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
+              >
+                {urlText}
+              </a>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button
@@ -64,12 +93,14 @@ export default function ServiceOverview() {
             >
               {copied ? "コピー済み" : "コピー"}
             </Button>
-            <Button type="primary" size="small" asChild>
-              <a href={url} target="_blank" rel="noreferrer">
-                <ExternalLink className="size-4" />
-                開く
-              </a>
-            </Button>
+            {!isPrivate && (
+              <Button type="primary" size="small" asChild>
+                <a href={url} target="_blank" rel="noreferrer">
+                  <ExternalLink className="size-4" />
+                  開く
+                </a>
+              </Button>
+            )}
           </div>
         </section>
       )}
@@ -120,6 +151,31 @@ export default function ServiceOverview() {
           </Button>
         </div>
         {actionErr && <p className="text-sm font-semibold text-[#e05a5a]">{actionErr.message}</p>}
+      </section>
+
+      <Divider type="line-brown" />
+
+      {/* ===== 公開範囲(即時反映・再デプロイ不要)===== */}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-lg font-bold text-foreground">公開範囲</h2>
+        <p className="text-sm font-medium text-muted-foreground">
+          切替は即時反映(再デプロイ不要)。非公開にしても内部リンク・ログ・ターミナルは従来どおり使えます。全網公開は
+          IP 制限が外れます — アプリ側の認証にご注意を。
+        </p>
+        <Radio
+          aria-label="公開範囲"
+          value={visibility}
+          disabled={!svc || setVis.isPending}
+          options={[
+            { label: "非公開(公網から不可視)", value: "private" },
+            { label: "社内のみ(会社 IP)", value: "company" },
+            { label: "全網公開(IP 制限なし)", value: "public" },
+          ]}
+          onChange={(v) => setVis.mutate(String(v))}
+        />
+        {setVis.error && (
+          <p className="text-sm font-semibold text-[#e05a5a]">{setVis.error.message}</p>
+        )}
       </section>
 
       <Divider type="line-brown" />

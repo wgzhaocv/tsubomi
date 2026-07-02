@@ -229,6 +229,10 @@ shared は `SetServiceVisibilityReq { visibility: String }` + `ServiceDto` に
   本人裁量 + audit(§0-C)。
 - **dev(domain=localhost)には catchall が無い**:private は単に直アクセス不可。活体挙動(302)の
   確認は prod のみ(§11)。
+- **dev(OrbStack)では traefik の file watch が発火しない**:virtiofs 越しの bind mount に fsnotify が
+  届かず、切替の実効確認には traefik 再起動が要る(2026-07-02 の dev e2e で実測:再起動後は company=
+  実体応答 / private=404 と正しく反映)。prod Linux(原生 bind mount)は watch が効き即時 — M3 以来の
+  deploy 切替(route ファイル書換)が本番実証済みの同一経路。
 
 ---
 

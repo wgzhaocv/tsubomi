@@ -129,7 +129,8 @@ export default function ServiceEnv() {
       </div>
       <p className="text-sm font-medium text-muted-foreground">
         コンテナに渡す環境変数の全体像です。「注入」付きは database / volume / service
-        の注入由来で、接続情報・マウント先・別 app の内部 URL が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。
+        の注入由来で、接続情報・マウント先・別 app の内部 URL
+        が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。
         その他はここで追加した静的変数です(値は表示されません=上書きのみ)。
         <strong>反映には再デプロイ(または開始)が必要</strong>です。
       </p>

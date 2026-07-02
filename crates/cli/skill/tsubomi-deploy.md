@@ -191,9 +191,14 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 
 ## 5. 検証(ここを省かない)
 
-1. `tbm service status <service名>` で `phase=running`・最新 deploy が `succeeded` を確認。
+1. `tbm service status <service名>` で `phase=running`・最新 deploy が `succeeded` を確認
+   (`visibility` 行で公開範囲も見える)。
 2. **`tbm service verify <service名>`** を使う。根 HTML を取り、そこが参照する js/css 子リソースまで
    2xx かをまとめて確認する(`ok:true` で成功。NG なら exit 1 + どのリソースが落ちたか)。
+   **`visibility=private` のサービスは公開 URL 自体が無効**なので verify は明確な文言でスキップ +
+   非零終了する(接続失敗ではない = サーバ障害と誤読しない)。動作確認は `tbm service logs` /
+   `tbm service exec`、または内部リンク先の caller コンテナから
+   `tbm service exec <caller> -- wget -qO- http://<subdomain>:<port>` で行う。
    **これが重要な理由**:`status=succeeded` + 根 200 でも、`index.html` が参照する `/assets/*.js` が
    404 だと**画面は真っ白**になる。根への素の `curl` はこれを見逃す。verify は子リソースまで見る。
    - **`succeeded` なのに 502**(verify の root_status が 502)→ ほぼ「アプリが `container_port`
@@ -212,6 +217,10 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 - 再デプロイ:GitHub 経路は `git push`、ローカルは `tbm deploy --local`。
 - `tbm db rotate` / `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
+- **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切替(**即時反映・
+  再デプロイ不要**)。`private` = 公開 URL 無効(監視・通知系 worker 向け。内部リンク /
+  logs / exec は従来どおり)/ `company` = 会社 IP のみ(既定)/ `public` = 全網公開(IP 制限
+  なし — アプリ側に認証が無ければ誰でも触れる)。
 - 秘密(接続文字列・deploy key)は **git に commit しない / 共有しない**。漏れたら rotate。
 
 ## 7. つまずきの早見表
@@ -220,6 +229,7 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 | --- | --- | --- |
 | `succeeded` なのに画面が真っ白 | index.html は 200 だが `/assets/*.js` が 404 | `tbm service verify` で特定 → build 出力パス / base 設定を直す |
 | `succeeded` なのに 502 | アプリが 8080 で listen していない | ポート修正 → 再デプロイ |
+| URL が `/noservice` へ 302 する | `visibility=private`(または未デプロイ/停止) | `tbm service status` で確認 → 公開するなら `tbm service visibility <名前> company` |
 | push が 413 | 単層 >100MB(CF 経由)。直連入口があれば起きない | §「push が 413」。無ければ層を小さく |
 | Node/Next が起動直後 exit / DB で 502 | `pg` が `sslmode=require` を verify-full 扱い | §3.1(URL から sslmode を外し `ssl:{rejectUnauthorized:false}`)+ ioredis に `on("error")` |
 | Rust が起動直後 exit(DB 接続) | `NoTls` で `sslmode=require` に繋げない | §3.1(`postgres-native-tls` で TLS コネクタを渡す) |

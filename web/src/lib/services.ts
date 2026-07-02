@@ -23,6 +23,9 @@ export type Service = {
   // 公開 URL(`<scheme>://<subdomain>.<domain>`)。サーバが算出して返す。
   // 古いサーバ相手では欠ける可能性があるので任意扱い。
   url?: string;
+  // 公開範囲:private(route 無し = 公網不可視)/ company(既定 = 会社 IP のみ)/
+  // public(全網)。旧サーバ相手では欠ける = company 扱い。
+  visibility?: string;
 };
 
 export type RegistryCreds = { host: string; user: string; pass: string };
@@ -37,6 +40,14 @@ export type CreateServiceResult = Service & {
   // GitHub 連携の手順コマンド列。平台が単一真源として組み立てる(web は表示するだけ)。
   setup_commands: string[];
 };
+
+// 公開範囲の実効値。旧サーバのフィールド欠落・未知値はどちらも company へ倒す(サーバ側
+// Visibility::from_db と同じ防御方針。未知値を直通させると Radio がどの選択肢にも一致せず
+// 空選択で描画される)。wire 契約のフォールバックはここが単一真源。
+export function serviceVisibility(svc?: Pick<Service, "visibility">): string {
+  const v = svc?.visibility;
+  return v === "private" || v === "public" ? v : "company";
+}
 
 // `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。Overview / Deploys で共用。
 export function shortDigest(d: string): string {
@@ -242,6 +253,18 @@ export function useRollbackService(id: string) {
       url: `/api/services/${id}/rollback`,
       method: "POST",
       body: { deploy_id: deployId },
+    }),
+    () => serviceKeys.all,
+  );
+}
+
+// 公開範囲の切替(即時反映・再デプロイ不要)。値は private / company / public。
+export function useSetServiceVisibility(id: string) {
+  return useServiceAction<string>(
+    (visibility) => ({
+      url: `/api/services/${id}/visibility`,
+      method: "POST",
+      body: { visibility },
     }),
     () => serviceKeys.all,
   );
