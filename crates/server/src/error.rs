@@ -18,6 +18,12 @@ pub enum AppError {
     ForbiddenMsg(String),
     #[error("{0}")]
     BadRequest(String),
+    /// 503。**文案を通す 5xx**:恒久状態(DB)は更新済みで現実側の反映だけ一時失敗した、等の
+    /// 「次の一手」を載せたい半成功。通常の 5xx は情報漏洩防止で「内部エラー」に編校されるため、
+    /// 意図して書いた文案だけこの変体で通す(`ForbiddenMsg` と同じ作法の 5xx 版 — codex 監査
+    /// 2026-07-02:visibility 切替の収束失敗文案が編校で届かなかった)。
+    #[error("{0}")]
+    UnavailableMsg(String),
     /// 409。重複(同名リソースなど)。500 に潰さず、原因が分かる 4xx で返す。
     #[error("{0}")]
     Conflict(String),
@@ -43,6 +49,7 @@ impl AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden | Self::ForbiddenMsg(_) => StatusCode::FORBIDDEN,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::UnavailableMsg(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Sqlx(_)
             | Self::Reqwest(_)
@@ -57,7 +64,9 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = self.status();
-        if status.is_server_error() {
+        // 5xx は情報漏洩防止で本文を「内部エラー」に編校する。例外は UnavailableMsg —
+        // 意図して書いた文案(次の一手つき)なのでそのまま通す。
+        if status.is_server_error() && !matches!(self, Self::UnavailableMsg(_)) {
             tracing::error!(error = ?self, "internal error");
             (status, "内部エラー").into_response()
         } else {

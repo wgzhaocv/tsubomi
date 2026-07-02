@@ -7,7 +7,7 @@ use tsubomi_shared::{
     DatabaseDto,
     DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameVolumeReq, RollbackReq,
-    ServiceDto, SetEnvReq, SetEnvResp, TrashItemDto, VolumeDto,
+    ServiceDto, SetEnvReq, SetEnvResp, SetServiceVisibilityReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -766,6 +766,25 @@ pub async fn service_rollback(
             .bearer_auth(token)
             .json(&RollbackReq {
                 deploy_id: deploy_id.parse().context("invalid deploy id")?,
+            }),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 公開範囲の切替(POST /services/{id}/visibility)。値の検証はサーバ側(不正は 400)。
+pub async fn service_set_visibility(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    visibility: &str,
+) -> Result<()> {
+    send_ok(
+        c.post(format!("{server_url}/api/services/{id}/visibility"))
+            .bearer_auth(token)
+            .json(&SetServiceVisibilityReq {
+                visibility: visibility.to_string(),
             }),
     )
     .await?;

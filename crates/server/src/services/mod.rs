@@ -33,8 +33,8 @@ use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ExecReq,
-    ExecResult, InjectionDto, LogsResp, ResolvedEnvDto, RollbackReq, ServiceDto, SetEnvReq,
-    SetEnvResp,
+    ExecResult, InjectionDto, LogsResp, ResolvedEnvDto, RollbackReq, ServiceDto,
+    SetServiceVisibilityReq, SetEnvReq, SetEnvResp,
 };
 use uuid::Uuid;
 
@@ -59,9 +59,9 @@ impl Visibility {
     /// DB / API の文字列表現から。未知は None(API 側で 400 にする。DB は CHECK が保証)。
     pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
-            "private" => Some(Self::Private),
-            "company" => Some(Self::Company),
-            "public" => Some(Self::Public),
+            tsubomi_shared::VISIBILITY_PRIVATE => Some(Self::Private),
+            tsubomi_shared::VISIBILITY_COMPANY => Some(Self::Company),
+            tsubomi_shared::VISIBILITY_PUBLIC => Some(Self::Public),
             _ => None,
         }
     }
@@ -75,9 +75,9 @@ impl Visibility {
     /// `parse` の逆(DB / DTO へ書く文字列)。
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Private => "private",
-            Self::Company => "company",
-            Self::Public => "public",
+            Self::Private => tsubomi_shared::VISIBILITY_PRIVATE,
+            Self::Company => tsubomi_shared::VISIBILITY_COMPANY,
+            Self::Public => tsubomi_shared::VISIBILITY_PUBLIC,
         }
     }
 
@@ -97,6 +97,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/exec", post(exec))
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
+        .route("/services/{id}/visibility", post(set_visibility))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
         .route(
@@ -464,6 +465,83 @@ pub async fn stop(
         auth.client_ip.as_deref(),
     )
     .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/services/:id/visibility`:公開範囲の切替(所有者のみ。公開範囲設計 §7)。
+/// **即時反映** — route ファイルは DB の期望状態から再生成できるので、lock 内で DB を先に更新し
+/// (背骨:DB=期望状態)、現実(ファイル)をその場で収束させる。env 注入と違い再デプロイ不要。
+/// public(ipallow 無し = 全網公開)も**本人裁量 + audit 兜底**で owner 限定にしない(§0-C)。
+pub async fn set_visibility(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetServiceVisibilityReq>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?; // 404 ゲート(lock 外・安価)
+    let vis = Visibility::parse(&req.visibility).ok_or_else(|| {
+        AppError::BadRequest(
+            "visibility は private / company / public のいずれかにしてください".into(),
+        )
+    })?;
+
+    // deploy / start / stop / delete と同一 lock で直列化(route とコンテナ状態の競合防止)。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+
+    // DB 先(背骨:DB=期望状態)。lock 待ちの間に削除が完走したケースは rows=0 → 404。
+    let row: Option<(String, i32)> = sqlx::query_as(
+        "UPDATE service_details s SET visibility = $2
+           FROM resources r
+          WHERE s.resource_id = $1 AND r.id = s.resource_id AND r.deleted_at IS NULL
+        RETURNING s.subdomain, s.container_port",
+    )
+    .bind(id)
+    .bind(vis.as_str())
+    .fetch_optional(&state.db)
+    .await?;
+    let (subdomain, container_port) = row.ok_or(AppError::NotFound)?;
+
+    // 恒久的な状態変化(DB)の直後に監査 — 後段の収束が失敗しても監査は DB と一致する。
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.visibility",
+        id,
+        json!({ "visibility": vis.as_str() }),
+        auth.client_ip.as_deref(),
+    )
+    .await;
+
+    // 現実収束(lock 内)。失敗しても DB は更新済み = reconcile が ≤30s で収束させるので、
+    // 文案直通の 503(UnavailableMsg)で「次の一手」を返す(AI が自己修正できる — CLI 契約。
+    // 通常の 5xx は into_response が「内部エラー」に編校し文案が届かない)。生エラーは log のみ
+    // (クライアントへ内部詳細は出さない)。
+    let converge_err = |e: AppError| {
+        tracing::error!(error = ?e, %id, "visibility 切替の route 反映に失敗");
+        AppError::UnavailableMsg(
+            "公開範囲は保存しましたが route の反映に失敗しました。reconcile が 30 秒以内に収束させます(再実行も可能)".into(),
+        )
+    };
+    match vis {
+        Visibility::Private => route::remove(&state, id).map_err(converge_err)?,
+        Visibility::Company | Visibility::Public => {
+            // serving 中(直近成功 deploy の容器が実走)の時だけ route を書く。停止 / 未デプロイは
+            // 何も書かない —「停止 service に route ファイル無し」の不変条件を守り、次の
+            // start / deploy が新しい visibility で書く(§7)。
+            if let Some(container) = serving_container(&state, id).await {
+                route::write(
+                    &state,
+                    id,
+                    &subdomain,
+                    &container,
+                    container_port,
+                    vis.ipallow(),
+                )
+                .map_err(converge_err)?;
+            }
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

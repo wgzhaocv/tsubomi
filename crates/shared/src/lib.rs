@@ -30,6 +30,16 @@ pub const CLI_TOKEN_PREFIX: &str = "tbm_";
 /// サーバは setup_commands のコメントで参照、CLI は実ファイルの書き出し先に使う。
 pub const WORKFLOW_PATH: &str = ".github/workflows/tsubomi-deploy.yml";
 
+// ============ service 公開範囲(visibility)の wire 値 ============
+// DB の CHECK・API リクエスト・DTO で共通の文字列(サーバの enum と CLI の表示 / 比較が共有)。
+
+/// route ファイル無し = 公網不可視(subdomain は温存)。
+pub const VISIBILITY_PRIVATE: &str = "private";
+/// 既定:会社 IP 許可リストからのみ(従来挙動)。
+pub const VISIBILITY_COMPANY: &str = "company";
+/// ipallow middleware 無し = 全網公開。
+pub const VISIBILITY_PUBLIC: &str = "public";
+
 /// インストーラ(install.sh)がシェル rc に書く PATH ブロックの目印。
 /// `tbm uninstall` がこれを手がかりにブロックを丸ごと取り除く。
 /// ★ シェルスクリプトは Rust の const を import できないため、
@@ -543,6 +553,13 @@ pub struct LogsResp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackReq {
     pub deploy_id: Uuid,
+}
+
+/// `POST /api/services/:id/visibility` のリクエスト。公開範囲の切替(即時反映・再デプロイ不要)。
+/// 値は `private` / `company` / `public` のいずれか(それ以外はサーバが 400)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetServiceVisibilityReq {
+    pub visibility: String,
 }
 
 /// `POST /api/services/:id/exec` のリクエスト。稼働中コンテナ内で **1 コマンド**を

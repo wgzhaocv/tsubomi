@@ -9,7 +9,10 @@ use crate::commands::{
     OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
 };
 use crate::config;
-use tsubomi_shared::{CreateServiceResp, InjectionDto, ServiceDto, WORKFLOW_PATH};
+use tsubomi_shared::{
+    CreateServiceResp, InjectionDto, ServiceDto, VISIBILITY_COMPANY, VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC, WORKFLOW_PATH,
+};
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
 /// create だけは API の後にユーザ自身の `gh` で GitHub 連携を組み立てる(平台は GitHub に
@@ -87,6 +90,36 @@ pub enum ServiceCmd {
         /// 戻し先のデプロイ id
         deploy_id: String,
     },
+    /// 公開範囲を切替える(**即時反映・再デプロイ不要**。現在値は `tbm service status` で確認)
+    Visibility {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// 新しい公開範囲
+        #[arg(value_enum)]
+        visibility: VisibilityArg,
+    },
+}
+
+/// `tbm service visibility` の値(clap ValueEnum = 取値を help に列挙、綴りミスは exit 2)。
+/// サーバ側の 400 検証が最終ガード。
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum VisibilityArg {
+    /// 公開 URL を無効化(公網から不可視。内部リンク / logs / exec は従来どおり)
+    Private,
+    /// 会社 IP 許可リストからのみアクセス可(既定)
+    Company,
+    /// 全網公開(IP 制限なし。アプリ側の認証が無ければ誰でも触れる)
+    Public,
+}
+
+impl VisibilityArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => VISIBILITY_PRIVATE,
+            Self::Company => VISIBILITY_COMPANY,
+            Self::Public => VISIBILITY_PUBLIC,
+        }
+    }
 }
 
 pub async fn run(
@@ -180,6 +213,14 @@ pub async fn run(
         ServiceCmd::Verify { name } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
             let svc = api::service_get(&c, &server_url, &token, &id).await?;
+            // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
+            // 誤読させる(AI が無駄リトライする既知の実害パターン)ので、明確な文言で短絡する。
+            // 旧サーバ(visibility 空)は company 扱いで従来どおり探測する。
+            if svc.visibility == VISIBILITY_PRIVATE {
+                bail!(
+                    "このサービスは非公開(visibility=private)です。公開 URL は無効のため検証をスキップしました。公開するには `tbm service visibility {name} company`(または public)を実行してください"
+                );
+            }
             if svc.url.is_empty() {
                 bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
             }
@@ -220,6 +261,26 @@ pub async fn run(
                 print_json(&json!({ "status": "deleted", "recoverable_days": 3 }))?;
             } else {
                 println!("削除しました(ゴミ箱へ。3 日間は復元可能)。");
+            }
+        }
+        ServiceCmd::Visibility { name, visibility } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let v = visibility.as_str();
+            api::service_set_visibility(&c, &server_url, &token, &id, v).await?;
+            if json {
+                print_json(&json!({ "visibility": v }))?;
+            } else {
+                match visibility {
+                    VisibilityArg::Private => println!(
+                        "非公開にしました(即時反映)。公開 URL は無効になりますが、内部リンク・logs・exec は従来どおり使えます。"
+                    ),
+                    VisibilityArg::Company => println!(
+                        "社内公開にしました(即時反映)。会社 IP 許可リストからのみアクセスできます。"
+                    ),
+                    VisibilityArg::Public => println!(
+                        "全網公開にしました(即時反映)。IP 制限はありません — アプリ側の認証にご注意を。"
+                    ),
+                }
             }
         }
         ServiceCmd::Rollback { name, deploy_id } => {
@@ -317,7 +378,17 @@ fn print_status(
     );
     println!("  subdomain:   {}", svc.subdomain);
     if !svc.url.is_empty() {
-        println!("  url:         {}", svc.url);
+        // private でも URL 文字列は温存して表示する(再公開すれば同じ URL で復活する)。
+        let suffix = if svc.visibility == VISIBILITY_PRIVATE {
+            "(非公開のため無効)"
+        } else {
+            ""
+        };
+        println!("  url:         {}{suffix}", svc.url);
+    }
+    // 旧サーバ(フィールド無し = 空文字)は行ごと出さない。
+    if !svc.visibility.is_empty() {
+        println!("  visibility:  {}", svc.visibility);
     }
     if let Some(d) = &svc.image_digest {
         println!("  digest:      {}", short_digest(d));
