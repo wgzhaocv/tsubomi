@@ -840,6 +840,26 @@ pub async fn env_keys(
     resp.json().await.context("failed to parse env response")
 }
 
+/// `GET /api/services/:id/env/resolved`:注入を今この瞬間に解決した env 一覧(由来付き。
+/// URL パスワードはサーバ側で伏せ済み)。`tbm env list --resolved` 用。
+pub async fn env_resolved(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    service_id: &str,
+) -> Result<Vec<tsubomi_shared::ResolvedEnvDto>> {
+    let resp = send_ok(
+        c.get(format!(
+            "{server_url}/api/services/{service_id}/env/resolved"
+        ))
+        .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse resolved env response")
+}
+
 /// env を 1 件設定。サーバが注意喚起(値が公開 DB ホストを指す等)を返せばその文を `Some` で返す。
 pub async fn env_set(
     c: &reqwest::Client,

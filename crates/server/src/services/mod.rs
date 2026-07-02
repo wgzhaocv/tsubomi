@@ -33,7 +33,8 @@ use serde_json::json;
 use sqlx::PgPool;
 use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ExecReq,
-    ExecResult, InjectionDto, LogsResp, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp,
+    ExecResult, InjectionDto, LogsResp, ResolvedEnvDto, RollbackReq, ServiceDto, SetEnvReq,
+    SetEnvResp,
 };
 use uuid::Uuid;
 
@@ -61,6 +62,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/injections/{id}", delete(delete_injection))
         .route("/services/{id}/env", get(list_env).post(set_env))
+        .route("/services/{id}/env/resolved", get(list_env_resolved))
         .route("/services/{id}/env/{key}", delete(unset_env))
 }
 
@@ -726,6 +728,102 @@ pub async fn list_env(
     Ok(Json(rows.into_iter().map(|(k,)| k).collect()))
 }
 
+/// `GET /api/services/:id/env/resolved`:注入バインディングを**今この瞬間**に解決した env 一覧
+/// (由来付き)。コンテナの実値は起動の瞬間に解決される(決定 #5)ので、これは「次のデプロイで
+/// こうなる」プレビューでもある。「注入値が探针でしか確認できない」という実利用フィードバック #6
+/// への回答。伏せ方(codex 監査):
+/// - **静的 env の値は `***`**(`GET /env` の「key のみ = 値は秘密」契約と揃える。ユーザ自身が
+///   設定した値なので見せる意味も薄い)
+/// - 注入値は URL のパスワード部だけ `***`(知りたいのはホスト / 形 — フィードバックの本題)
+/// 重複キーは deploy と同じ **後勝ち**で畳んでから返す(コンテナに入る実際の 1 本と一致させる。
+/// deploy.rs::dedup_env_last と同じ規則 + ここでは表示順の安定のため出現順を保つ)。
+pub async fn list_env_resolved(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<axum::response::Response> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    // 由来の判定用:静的 env の key 集合と、注入の env_var → kind 対応。
+    let static_keys: Vec<(String,)> =
+        sqlx::query_as("SELECT key FROM service_env WHERE service_id = $1")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
+    let static_keys: std::collections::HashSet<String> =
+        static_keys.into_iter().map(|(k,)| k).collect();
+    let inj_kinds: Vec<(String, String)> = sqlx::query_as(
+        "SELECT i.env_var, r.kind FROM injections i JOIN resources r ON r.id = i.resource_id
+          WHERE i.service_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+    let inj_kinds: std::collections::HashMap<String, String> = inj_kinds.into_iter().collect();
+
+    // resolve は静的 env → 注入の順で並ぶ(inject.rs)。由来は**出現位置**で判定する:
+    // 同じキーの初出が静的 / 2 度目以降は注入(deploy の後勝ちで実際に効く方)。キーだけで
+    // 引くと static と注入が衝突したとき両方 static 扱いになり、後勝ちの実態と食い違う。
+    let (env, _binds) = inject::resolve(&state, id).await?;
+    let mut seen = std::collections::HashSet::new();
+    let labeled: Vec<ResolvedEnvDto> = env
+        .into_iter()
+        .map(|(key, value)| {
+            let first = seen.insert(key.clone());
+            let source = if first && static_keys.contains(&key) {
+                "static".to_string()
+            } else if let Some(kind) = inj_kinds.get(&key) {
+                kind.clone()
+            } else {
+                // 注入 env_var の対応表に無い = cache の派生キー(`_URL` と対で注入される
+                // `_KEY_PREFIX`。派生キーを生むのは今は inject.rs::key_prefix_env だけ —
+                // 新しい派生元を足すときはここの判定も更新すること)。
+                "cache".to_string()
+            };
+            let value = if source == "static" {
+                "***".to_string()
+            } else {
+                mask_url_password(&value)
+            };
+            ResolvedEnvDto { key, value, source }
+        })
+        .collect();
+    // 後勝ち dedup(出現順は保つ):後ろから見て初出だけ残す → 反転で元の順へ。
+    let mut kept_keys = std::collections::HashSet::new();
+    let mut list: Vec<ResolvedEnvDto> = labeled
+        .into_iter()
+        .rev()
+        .filter(|e| kept_keys.insert(e.key.clone()))
+        .collect();
+    list.reverse();
+    // 秘密(接続文字列の断片等)を含み得るので no-store(respond.rs の契約)。
+    Ok(crate::respond::no_store(list))
+}
+
+/// URL 形(`scheme://user:pass@host…`)の値のパスワード部だけを `***` に伏せる。
+/// URL でない値はそのまま(STORAGE_PATH / 前缀 / 静的 env は原文 — 暴露ティアは exec と同じで、
+/// これは事故防止のエチケット)。
+fn mask_url_password(value: &str) -> String {
+    // scheme:// と @ の間に `user:pass` があるときだけ pass を置換。素朴なパースで十分
+    // (自前生成の接続文字列が対象。誤検出しても「伏せすぎ」に倒れるだけ)。
+    let Some(scheme_end) = value.find("://") else {
+        return value.to_string();
+    };
+    let rest = &value[scheme_end + 3..];
+    let Some(at) = rest.find('@') else {
+        return value.to_string();
+    };
+    let userinfo = &rest[..at];
+    let Some(colon) = userinfo.find(':') else {
+        return value.to_string();
+    };
+    format!(
+        "{}{}:***{}",
+        &value[..scheme_end + 3],
+        &userinfo[..colon],
+        &rest[at..]
+    )
+}
+
 /// `POST /api/services/:id/env`:静的 env を 1 件 upsert(値は暗号化)。反映には再デプロイ。
 /// 値が公開 DB ホストを指す場合は非破壊の注意喚起(注入へ誘導)を `warning` に載せる(§7.2 footgun)。
 pub async fn set_env(
@@ -1157,5 +1255,25 @@ mod tests {
         assert!(validate_env_key("A\0B").is_err()); // NUL
         assert!(validate_env_key("A\x1b[31mB").is_err()); // ANSI エスケープ
         assert!(validate_env_key("A\nB").is_err()); // 改行
+    }
+
+    /// URL 形の値だけパスワード部を伏せる(それ以外は原文)。
+    #[test]
+    fn mask_url_password_cases() {
+        assert_eq!(
+            super::mask_url_password("postgres://app:secret@pgb:6432/db?sslmode=require"),
+            "postgres://app:***@pgb:6432/db?sslmode=require"
+        );
+        assert_eq!(
+            super::mask_url_password("redis://c_ab:pw@tsubomi-valkey:6379"),
+            "redis://c_ab:***@tsubomi-valkey:6379"
+        );
+        // パスワード無し / URL でない / userinfo 無しは原文のまま。
+        assert_eq!(
+            super::mask_url_password("http://api-backend:8080"),
+            "http://api-backend:8080"
+        );
+        assert_eq!(super::mask_url_password("/data"), "/data");
+        assert_eq!(super::mask_url_password("c_ab12:"), "c_ab12:");
     }
 }

@@ -473,6 +473,19 @@ pub struct DeployConfig {
     pub platforms: String,
 }
 
+/// `GET /api/services/:id/env/resolved` の各要素。**今この瞬間**に注入バインディングを解決した
+/// env(コンテナの実際の値は起動の瞬間に解決 — rotate 後は再デプロイで初めて変わる。決定 #5)。
+/// URL 形の値はパスワード部を `***` に伏せる(暴露ティアは exec/web SQL と同じ owner 限定だが、
+/// コピペ・ログ残留の事故を防ぐ)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedEnvDto {
+    pub key: String,
+    /// 解決済みの値(URL のパスワード部のみ `***`)。
+    pub value: String,
+    /// 由来:static / database / volume / cache / service(キー導出の `_KEY_PREFIX` は cache)。
+    pub source: String,
+}
+
 /// `GET /api/services/:id/injections` の各要素 / `POST` のレスポンス。注入の **バインディング**
 /// (値はコンテナ起動の瞬間に解決 — 決定 #5)。秘密(解決後の接続文字列)は含まない。
 #[derive(Debug, Clone, Serialize, Deserialize)]

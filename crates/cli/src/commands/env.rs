@@ -31,6 +31,10 @@ pub enum EnvCmd {
     List {
         /// サービスの表示名
         svc: String,
+        /// 注入を**今この瞬間**に解決した値も表示する(由来付き。URL のパスワードは伏せる)。
+        /// コンテナの実値は起動の瞬間に解決される — rotate 後は再デプロイで初めて変わる
+        #[arg(long)]
+        resolved: bool,
     },
 }
 
@@ -87,8 +91,23 @@ pub async fn run(
                 );
             }
         }
-        EnvCmd::List { svc } => {
+        EnvCmd::List { svc, resolved } => {
             let id = resolve_service_id(&c, &server_url, &token, &svc).await?;
+            if resolved {
+                let list = api::env_resolved(&c, &server_url, &token, &id).await?;
+                if json {
+                    // 共有 DTO をそのまま(key / value / source。URL パスワードはサーバ側で伏せ済み)。
+                    print_json(&list)?;
+                } else if list.is_empty() {
+                    println!("(env / 注入はありません)");
+                } else {
+                    eprintln!("(今この瞬間の解決値。コンテナの実値は起動時に解決 — rotate 後は再デプロイで反映)");
+                    for e in &list {
+                        println!("{}={}  [{}]", e.key, e.value, e.source);
+                    }
+                }
+                return Ok(());
+            }
             let keys = api::env_keys(&c, &server_url, &token, &id).await?;
             if json {
                 // 値は秘密。key のみ返す。
