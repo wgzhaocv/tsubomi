@@ -35,6 +35,9 @@ fn code_for(status: reqwest::StatusCode) -> &'static str {
         404 => "not_found",
         409 => "conflict",
         400 | 422 => "validation",
+        // registry / 上流(Cloudflare)の request body 上限超過。CF 経由 registry の単層 ≈100MB
+        // 制限が典型(deploy.rs が人話の対処も出す)。AI はこの code でリトライ無意味と判断できる。
+        413 => "payload_too_large",
         _ => "server_error",
     }
 }

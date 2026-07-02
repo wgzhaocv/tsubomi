@@ -62,6 +62,13 @@ pub enum ServiceCmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
+    /// コンテナ内のファイルを表示する(`exec -- cat <path>` の糖衣。線上の設定 / ログ確認用)
+    Cat {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// コンテナ内の絶対パス(例:/app/config.json)
+        path: String,
+    },
     /// 公開 URL の存活を検証:根 HTML とそこから参照される js/css 子リソースが全部 2xx か。
     /// deploy=succeeded + 根 200 でも assets が 404 で白画面、という取りこぼしを検出する
     Verify {
@@ -160,36 +167,15 @@ pub async fn run(
         ServiceCmd::Exec { name, command } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
             let result = api::service_exec(&c, &server_url, &token, &id, &command).await?;
-            if json {
-                // 共有 DTO をそのまま:{ stdout, stderr, exit_code, truncated, timed_out }。
-                // exit_code は **データ**(tbm 自身は 0 で終わる = リクエスト成功 ≠ 業務エラー。
-                // AI はこの値で分岐する)。
-                print_json(&result)?;
-            } else {
-                // text(端末)は ssh / docker exec 風:stdout は stdout・stderr は stderr へ
-                // 素通しし、コンテナ内コマンドの終了コードを tbm の終了コードへ伝播する
-                // (シェルの `&&` 連結のため)。
-                print!("{}", result.stdout);
-                eprint!("{}", result.stderr);
-                if result.truncated {
-                    eprintln!("(出力が上限を超えたため切り詰めました)");
-                }
-                if result.timed_out {
-                    eprintln!(
-                        "(タイムアウトで打ち切りました。長時間 / 対話は web のターミナルを使ってください)"
-                    );
-                }
-                // process::exit は main の version nudge をスキップするが、exec はスクリプト用途
-                // なのでクリーンな終了コードを優先する。終了コードは 0..=255 のみ素直に伝播し、
-                // 想定外の値 / 確定不能(timeout 等で None)は「成功と確認できない」= 1 に倒す。
-                std::io::stdout().flush().ok();
-                std::io::stderr().flush().ok();
-                let code = match result.exit_code {
-                    Some(c) if (0..=255).contains(&c) => c as i32,
-                    _ => 1,
-                };
-                std::process::exit(code);
-            }
+            emit_exec_result(&result, json)?;
+        }
+        ServiceCmd::Cat { name, path } => {
+            // `exec -- cat <path>` の糖衣(サーバ側は同じ /exec エンドポイント)。出力・終了
+            // コードの流儀も exec と完全に同じ:text はファイル内容を stdout へ素通し。
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let cmd = ["cat".to_string(), path];
+            let result = api::service_exec(&c, &server_url, &token, &id, &cmd).await?;
+            emit_exec_result(&result, json)?;
         }
         ServiceCmd::Verify { name } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
@@ -285,6 +271,37 @@ pub async fn run(
         }
     }
     Ok(())
+}
+
+/// exec / cat 共通の結果出力。
+/// json:共有 DTO をそのまま:{ stdout, stderr, exit_code, truncated, timed_out }。
+/// exit_code は **データ**(tbm 自身は 0 で終わる = リクエスト成功 ≠ 業務エラー。AI はこの値で分岐)。
+/// text:ssh / docker exec 風に stdout / stderr を素通しし、コンテナ内コマンドの終了コードを
+/// tbm の終了コードへ伝播する(シェルの `&&` 連結のため)。process::exit は main の version nudge を
+/// スキップするが、スクリプト用途なのでクリーンな終了コードを優先。0..=255 のみ素直に伝播し、
+/// 想定外 / 確定不能(timeout 等で None)は「成功と確認できない」= 1 に倒す。
+fn emit_exec_result(result: &tsubomi_shared::ExecResult, json: bool) -> Result<()> {
+    if json {
+        print_json(result)?;
+        return Ok(());
+    }
+    print!("{}", result.stdout);
+    eprint!("{}", result.stderr);
+    if result.truncated {
+        eprintln!("(出力が上限を超えたため切り詰めました)");
+    }
+    if result.timed_out {
+        eprintln!(
+            "(タイムアウトで打ち切りました。長時間 / 対話は web のターミナルを使ってください)"
+        );
+    }
+    std::io::stdout().flush().ok();
+    std::io::stderr().flush().ok();
+    let code = match result.exit_code {
+        Some(c) if (0..=255).contains(&c) => c as i32,
+        _ => 1,
+    };
+    std::process::exit(code);
 }
 
 /// status の text 表示(phase / desired / digest / 注入 / env keys / 直近のデプロイ履歴)。

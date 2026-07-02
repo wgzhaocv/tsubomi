@@ -150,6 +150,13 @@ repo 作成・secret / variable 設定・`.github/workflows/tsubomi-deploy.yml` 
   ログインは**対話的**でAIは代行できない。ユーザに次を打ってもらう:`! gh auth login --web --git-protocol https --clipboard`。
 - **`gh` の Actions 額度が切れた / billing・quota エラーで CI が回らない**(私有 repo の無料枠超過など)
   → 下の **`tbm deploy --local` 退路**に切り替える。
+- **既存コードのあるディレクトリで作る場合**:`--github` は「git repo でも空でもないディレクトリ」では
+  誤 push 防止のため拒否される。デプロイ対象なら先に `git init -b main` してから
+  `tbm service create <名前> --github` を実行する(空ディレクトリ / 既存 repo ならそのままでよい)。
+- **ビルドが遅い(数十分)場合**:CI のランナーは gh variable `TSUBOMI_RUNNER` で決まる。新規 service は
+  平台が自動設定するが、**古い service は未設定 = amd64 + QEMU で極端に遅い**。平台が arm64 なら
+  `gh variable set TSUBOMI_RUNNER --body ubuntu-24.04-arm` で原生 arm になり数分に縮む(yml 変更不要、
+  次の push から有効)。
 
 ### 退路:`tbm deploy --local`(GitHub 非依存。ローカルの Docker で build+push)
 
@@ -165,6 +172,19 @@ GitHub 額度切れ時の主たる代替でもある。要 Docker。
 - **Docker が無い / 起動していない**(`docker info` が失敗)→ ユーザに **Docker Desktop** の
   導入を案内する(https://www.docker.com/products/docker-desktop/ )。インストールと起動は
   GUI・対話なのでユーザにやってもらい、`docker info` が通ってから再実行する。
+- **Windows(git-bash / MSYS)で `--context` 等の絶対パスが化ける**(`/c/...` が `C:\...;` 混じりに
+  なる等)→ MSYS のパス変換が原因。`MSYS_NO_PATHCONV=1 tbm deploy --local ...` のように前置すると
+  変換を止められる。
+
+### push が 413(Payload Too Large)で失敗する — 単層 100MB 上限
+
+registry は Cloudflare 経由のため **イメージ 1 層あたり圧縮後 ≈100MB** が上限(CF の request body
+制限。registry 側では変えられない)。超えると `tbm deploy --local` でも GitHub Actions でも push が
+413 で落ちる。対処は**層を小さくする**一択:
+
+- 大きな `RUN` / `COPY` を分割して 1 層に詰め込みすぎない
+- slim / alpine 系の基底イメージにする
+- マルチステージビルドでビルド中間物(コンパイラ・キャッシュ)を最終イメージに持ち込まない
 
 ## 5. 検証(ここを省かない)
 

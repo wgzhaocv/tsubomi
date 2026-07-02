@@ -140,7 +140,10 @@ fn buildx_push(context: &str, platforms: &str, image_tag: &str) -> Result<String
         random_b64(8)
     ));
     eprintln!("$ docker buildx build --platform {platforms} --push -t {image_tag} {context}");
-    let status = Command::new("docker")
+    // stderr は**流しながら**読む(進捗はそのまま見せつつ、失敗原因を拾って人話に翻訳する)。
+    // 特に registry push の 413 は「Cloudflare 経由の単層上限」で、素の 413 だけでは原因に
+    // たどり着けず時間を溶かす(実利用フィードバック #3)。
+    let mut child = Command::new("docker")
         .args([
             "buildx",
             "build",
@@ -153,11 +156,33 @@ fn buildx_push(context: &str, platforms: &str, image_tag: &str) -> Result<String
         ])
         .arg(&meta)
         .arg(context)
-        .status()
+        .stderr(Stdio::piped())
+        .spawn()
         .context("docker buildx の実行に失敗しました(docker / buildx はありますか?)")?;
+    let mut saw_413 = false;
+    if let Some(stderr) = child.stderr.take() {
+        use std::io::BufRead;
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if line.contains("413") || line.contains("Payload Too Large") {
+                saw_413 = true;
+            }
+            eprintln!("{line}");
+        }
+    }
+    let status = child.wait().context("docker buildx の待機に失敗しました")?;
     if !status.success() {
         let _ = std::fs::remove_file(&meta);
-        bail!("docker buildx build が失敗しました");
+        if saw_413 {
+            bail!(
+                "registry への push が 413(Payload Too Large)で拒否されました。Cloudflare 経由の \
+                 registry は**イメージ 1 層あたり圧縮後 ≈100MB** が上限です(CF の request body 制限。\
+                 registry 側では変えられません)。対処:Dockerfile の大きな RUN/COPY を分割して層を \
+                 小さくする / slim・alpine 系の基底イメージにする / マルチステージビルドでビルド中間物を\
+                 落とす。GitHub Actions 経由の push で同じ 413 が出る場合も原因は同じです"
+            );
+        }
+        bail!("docker buildx build が失敗しました(上の docker 出力を確認してください)");
     }
     let text = std::fs::read_to_string(&meta).context("buildx メタデータを読めません")?;
     let _ = std::fs::remove_file(&meta);
