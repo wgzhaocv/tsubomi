@@ -62,6 +62,12 @@ pub enum ServiceCmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
+    /// 公開 URL の存活を検証:根 HTML とそこから参照される js/css 子リソースが全部 2xx か。
+    /// deploy=succeeded + 根 200 でも assets が 404 で白画面、という取りこぼしを検出する
+    Verify {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+    },
     /// サービスを削除(ゴミ箱へ。3 日間は復元可能)
     Delete {
         /// 対象サービスの表示名
@@ -183,6 +189,42 @@ pub async fn run(
                     _ => 1,
                 };
                 std::process::exit(code);
+            }
+        }
+        ServiceCmd::Verify { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let svc = api::service_get(&c, &server_url, &token, &id).await?;
+            if svc.url.is_empty() {
+                bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
+            }
+            let report = verify_url(&c, &svc.url).await?;
+            if json {
+                // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
+                // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
+                print_json(&report)?;
+                if !report.ok {
+                    std::io::stdout().flush().ok();
+                    std::process::exit(1);
+                }
+            } else {
+                let mark = |s: u16| if (200..300).contains(&s) { "✓" } else { "✗" };
+                println!("{} {} (根 HTML)", mark(report.root_status), svc.url);
+                for r in &report.resources {
+                    println!("  {} {} {}", mark(r.status), r.status, r.url);
+                }
+                if report.ok {
+                    println!(
+                        "OK:根 + 子リソース {} 件すべて 2xx。",
+                        report.resources.len()
+                    );
+                } else {
+                    // 白画面の典型原因と次の一手(AI / 人間の自己修正用)。
+                    println!(
+                        "NG:2xx でないリソースがあります。assets 404 は build 出力パス / base 設定 / 直近デプロイの失敗が典型です(`tbm service status {name}` でデプロイ履歴を確認)。"
+                    );
+                    std::io::stdout().flush().ok();
+                    std::process::exit(1);
+                }
             }
         }
         ServiceCmd::Delete { name } => {
@@ -608,4 +650,206 @@ fn gh_secret(repo: &str, name: &str, value: &str) -> Result<()> {
 /// variable を設定する(非機密なので --body でよい)。
 fn gh_variable(repo: &str, name: &str, value: &str) -> Result<()> {
     run_gh(&["variable", "set", name, "-R", repo, "--body", value])
+}
+
+// ===== verify(公開 URL の存活検証) =====
+
+/// `tbm service verify` の結果(JSON はこの DTO をそのまま serde)。
+#[derive(serde::Serialize)]
+struct VerifyReport {
+    /// 根 + 全子リソースが 2xx か(AI はこれで分岐)。
+    ok: bool,
+    url: String,
+    root_status: u16,
+    /// 根 HTML が参照する js / css 子リソースの検証結果。
+    resources: Vec<VerifyResource>,
+}
+
+#[derive(serde::Serialize)]
+struct VerifyResource {
+    url: String,
+    /// HTTP ステータス(接続自体の失敗は 0)。
+    status: u16,
+}
+
+/// 根 HTML を取り、参照する子リソース(script src / link href)を並行検証する。
+/// deploy 成功 + 根 200 でも assets 404 で白画面、を検出するのが目的(実利用フィードバック起因)。
+/// ネットワーク到達不能などリクエスト自体の失敗だけ Err、業務上の NG(4xx/5xx)は報告に載せる。
+async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
+    let resp = c
+        .get(root)
+        .send()
+        .await
+        .with_context(|| format!("{root} に接続できません(DNS / ネットワークを確認)"))?;
+    let root_status = resp.status().as_u16();
+    // リダイレクト後の最終 URL を基準に相対パスを解決する(`/assets/x.js` の解決先を实体に揃える)。
+    let base = url::Url::parse(resp.url().as_str())?;
+    let body = resp.text().await.unwrap_or_default();
+
+    // HTML でなければ根の 2xx だけで判定(API サービスなど)。雑な判定で十分:
+    // 抽出器はタグが無ければ空を返すので、誤検出しても「子リソース 0 件」に落ちるだけ。
+    let refs = extract_subresources(&body);
+    // 上限 50:実 SPA の参照は数件〜十数件で、これは病的な HTML(数千タグ)で無制限に
+    // 並行接続を張らないための安全弁。50 件を超える分は検証しない(実ページでは起きない)。
+    let checks = refs.iter().take(50).filter_map(|r| {
+        // data: / mailto: 等は join で弾かれるか非 http になるので除外。
+        let u = base.join(r).ok()?;
+        matches!(u.scheme(), "http" | "https").then_some(u)
+    });
+    let results = futures_util::future::join_all(checks.map(|u| {
+        let c = c.clone();
+        async move {
+            let status = match c.get(u.as_str()).send().await {
+                Ok(r) => r.status().as_u16(),
+                Err(_) => 0, // 接続不能 = 0(NG 扱い)。
+            };
+            VerifyResource {
+                url: u.to_string(),
+                status,
+            }
+        }
+    }))
+    .await;
+
+    let ok = (200..300).contains(&root_status)
+        && results.iter().all(|r| (200..300).contains(&r.status));
+    Ok(VerifyReport {
+        ok,
+        url: root.to_string(),
+        root_status,
+        resources: results,
+    })
+}
+
+/// HTML から `<script src=…>` / `<link href=…>` の参照先を抜く。正規表現 crate を足すほどでは
+/// ないので素朴な走査:タグ開始を大文字小文字無視で探し、タグ内(`>` まで)の属性値を読む。
+/// SPA の白画面検出が目的なので js / css が取れれば十分(srcset や動的 import までは追わない)。
+/// `<link>` は rel でフィルタ:stylesheet / preload / modulepreload だけが描画に効く。
+/// canonical / preconnect / icon 等を検証すると健全な app を誤 NG にする(codex 監査)。
+fn extract_subresources(html: &str) -> Vec<String> {
+    // **ASCII** 小文字化:`to_lowercase()` は非 ASCII でバイト長が変わり得て、lower 側の
+    // オフセットで原文をスライスすると境界 panic になる。ASCII 変換は長さ不変(codex 監査)。
+    let lower = html.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (tag, attr) in [("<script", "src"), ("<link", "href")] {
+        let mut pos = 0;
+        while let Some(i) = lower[pos..].find(tag) {
+            let tag_start = pos + i;
+            // タグ終端(無ければ以降を諦める — 壊れた HTML で無限ループしない)。
+            let Some(end_rel) = lower[tag_start..].find('>') else {
+                break;
+            };
+            let tag_end = tag_start + end_rel;
+            let (orig_tag, lower_tag) = (&html[tag_start..tag_end], &lower[tag_start..tag_end]);
+            let rendering_link = attr == "href"
+                && matches!(
+                    attr_value(orig_tag, lower_tag, "rel"),
+                    Some("stylesheet" | "preload" | "modulepreload")
+                );
+            if (attr == "src" || rendering_link)
+                && let Some(v) = attr_value(orig_tag, lower_tag, attr)
+                && !v.is_empty()
+            {
+                out.push(v.to_string());
+            }
+            pos = tag_end + 1;
+        }
+    }
+    out
+}
+
+/// タグ文字列から `attr="値"` / `attr='値'` の値を返す(属性名は小文字化済み lower 側で探し、
+/// 値は原文 orig 側から切り出す = 大文字小文字とパーセントエンコードを保存)。
+fn attr_value<'a>(orig: &'a str, lower: &str, attr: &str) -> Option<&'a str> {
+    let needle = format!("{attr}=");
+    let mut search = 0;
+    loop {
+        let i = lower[search..].find(&needle)? + search;
+        // 属性名の途中一致(`data-src=` の `src=` 等)を除外:直前が英数/ハイフンなら別属性。
+        if i > 0
+            && lower
+                .as_bytes()
+                .get(i - 1)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        {
+            search = i + needle.len();
+            continue;
+        }
+        let rest = &orig[i + needle.len()..];
+        let quote = rest.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            // 引用符なし属性は追わない(vite / 各種 bundler の出力は必ず引用符付き)。
+            search = i + needle.len();
+            continue;
+        }
+        let inner = &rest[1..];
+        return inner.find(quote).map(|end| &inner[..end]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{attr_value, extract_subresources};
+
+    #[test]
+    fn extracts_script_and_link() {
+        let html = r#"<!doctype html><html><head>
+            <link rel="stylesheet" href="/assets/index-abc.css">
+            <script type="module" src="/assets/index-def.js"></script>
+            <link rel="modulepreload" href="/assets/vendor.js">
+        </head><body></body></html>"#;
+        let refs = extract_subresources(html);
+        assert_eq!(
+            refs,
+            vec![
+                "/assets/index-def.js",
+                "/assets/index-abc.css",
+                "/assets/vendor.js"
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_non_rendering_links() {
+        // canonical / preconnect / icon / manifest は描画に効かない = 検証対象外
+        // (外部 origin や無い favicon で健全な app を誤 NG にしない)。
+        let html = r#"<link rel="canonical" href="https://example.com/">
+            <link rel="preconnect" href="https://fonts.gstatic.com">
+            <link rel="icon" href="/favicon.ico">
+            <link rel="manifest" href="/manifest.json">
+            <link href="/no-rel.css">"#;
+        assert!(extract_subresources(html).is_empty());
+    }
+
+    #[test]
+    fn non_ascii_before_tag_keeps_offsets() {
+        // 非 ASCII(全角)がタグ前にあってもオフセットがずれない(ASCII 小文字化は長さ不変)。
+        let html = "<p>日本語テキストİ</p><script src=\"/app.js\"></script>";
+        assert_eq!(extract_subresources(html), vec!["/app.js"]);
+    }
+
+    #[test]
+    fn ignores_data_src_and_unquoted() {
+        // data-src は src ではない / 引用符なしは追わない。
+        let html = r#"<script data-src="/x.js"></script><link href=/y.css>"#;
+        assert!(extract_subresources(html).is_empty());
+    }
+
+    #[test]
+    fn case_insensitive_tags() {
+        let html = r#"<SCRIPT SRC="/A.js"></SCRIPT>"#;
+        assert_eq!(extract_subresources(html), vec!["/A.js"]);
+    }
+
+    #[test]
+    fn attr_value_basics() {
+        assert_eq!(attr_value(r#"<script src="/a.js""#, r#"<script src="/a.js""#, "src"), Some("/a.js"));
+        assert_eq!(attr_value("<script>", "<script>", "src"), None);
+    }
+
+    #[test]
+    fn broken_html_terminates() {
+        // タグ終端が無い壊れた HTML でも無限ループしない。
+        assert!(extract_subresources("<script src=\"/a.js\"").is_empty());
+    }
 }
