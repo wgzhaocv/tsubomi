@@ -241,23 +241,22 @@ env.push((format!("{base}_PORT"), port.to_string()));            // 追加
   既存 workaround service(DB を stateless で走らせている人)が現れたら。
 - **compose_spec 多容器**(tech-design M6):同生死 sidecar/worker の需要が立ってから。
 - **§10-E registry GC の keep-set 欠陥(既存バグ・本設計とは独立。S2 の dev e2e で発見 →
-  2026-07-03 修正済み)**:日次 GC の `--delete-untagged` は「tag に参照されない manifest」を
-  消すが、**同じ tag への再 push(同一 commit の deploy 再実行 — build は非再現なので digest は
-  毎回変わる)でも旧 digest は失参照になる**。後続 deploy が失敗すると「現に serving 中 = 直近
-  成功 deploy の digest」が回収され、start / reconcile 復活 / rollback の pull が 404 で全滅して
-  いた(dev で実証)。**修正**(`registry::protect_and_expire_manifests`、gc.rs の日次 tick で
-  `garbage_collect` の直前):(1)keep 集合 = 現役 `image_digest` ∪ 直近 **5** 成功版に保護 tag
-  `keep-<digest 先頭12hex>` を付与(`--delete-untagged` は残す — multi-arch index の子 manifest
-  回収はこれが担う。tag 付き index の子は参照済み扱いで守られる)。(2)terminal な deploys 由来の
-  distinct digest のうち keep 外を manifest DELETE(tag ごと消える = 陳腐 keep tag も自然に掃く。
-  in-flight な digest と tag-only の digest は触らない = deploy 中のレース回避)。**併行加固**
-  (codex review 2026-07-03):(a)**deploy 成功の瞬間にも keep tag を付ける**(`ensure_keep_tag_for`、
-  commit_success 直後の best-effort)—「succeeded ⇒ keep tag 有り」が出生時から成立し、保護 pass と
-  stock GC の間の同 tag 再 push 窓を閉じる;(b)期限切れ候補を**先に**・keep 集合を**後に**読む
-  (候補 = 古い快照の部分集合 / 保護 = 新しい快照の超集合 — 並行 commit_success が割り込んでも
-  新現役を消さない);(c)直近 N distinct は SQL(`GROUP BY + MAX(created_at)`)で取る(LIMIT 先取りの
-  distinct 痩せ対策)。**受容した取引**:rollback の実効窓 = 直近 5 成功版(それより古い版は pull 404 —
-  ディスクとの交換)/ 回収済み digest への再 DELETE(404 冪等)は日次 + loopback なので放置 /
-  stock GC **走行中**に成功した deploy の残余レースは distribution 上流の既知併行制約(read-only 運用
-  推奨)に帰着 = 受容。dev e2e:同 tag 6 連 deploy + 失敗 deploy 後の GC で keep 5 版温存・窓外/失敗版
-  回収・`service start` 成功;deploy 直後に keep tag が即時に存在。
+  2026-07-03 修正済み・v42)**:従来の日次 GC `--delete-untagged` は「tag 失参照 = ゴミ」と見なすが、
+  (a)**同じ tag への再 push**(同一 commit の deploy 再実行 — build 非再現で digest は毎回変わる)
+  でも旧 digest は失参照になり、後続 deploy が失敗すると**現に serving 中の digest が回収**され
+  start / reconcile 復活 / rollback の pull が 404 で全滅(dev で実証)、さらに(b)**tag 付き index の
+  子 manifest まで食う**(distribution の既知欠陥 — 本番の既存 index で子欠損を実証。multi-arch の
+  別アーキ・attestation が静かに欠けていた。当初試みた「keep 保護 tag」方式はこの子欠損 index に
+  PUT 400 で適用不能 = 本番で発覚し方式転換)。**最終形**(`registry::protect_and_expire_manifests`、
+  gc.rs 日次 tick で `garbage_collect` の直前):**`--delete-untagged` を廃止**し、manifest を消す
+  判断は平台の keep 窓だけが行う —(1)keep 集合 = 現役 `image_digest` ∪ 直近 **5** distinct 成功版
+  (SQL `GROUP BY + MAX(created_at)` — LIMIT 先取りの distinct 痩せ対策)。(2)terminal な deploys
+  由来 digest のうち keep 外を「**index → その子 manifests**」の順に明示 DELETE。子は keep ∪
+  in-flight の index が参照する分を除外(**buildx キャッシュは別 index 間で同一の子を共有し得る** —
+  dev e2e で実証:注釈だけ違う 6 build が同一 arm64 子を共有し、防護が正しく温存した)。(3)stock GC
+  は blob 掃除のみ。期限切れ候補は**先に**・keep は**後に**読む(快照方向で並行 commit_success を
+  安全化 — codex)。in-flight / tag-only digest は不触(deploy レース回避)。**受容**:rollback 実効窓 =
+  直近 5 成功版 / 失敗 push の孤児 manifest は purge の delete_repo まで残る小さな漏れ / 回収済みへの
+  再 DELETE(404 冪等)は日次 + loopback で放置。**既存の子欠損は治らない**(旧 GC の既遂 — 新しい
+  deploy で置き換わり次第自然治癒。現役 index の頂点は全 service 200 を確認済み)。dev e2e:同 tag
+  6+1 deploy → GC 後、無 tag の現役が存活・窓外 index+子回収・共有子温存・stop→start 成功。
