@@ -233,6 +233,12 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    (`visibility` 行で公開範囲も見える)。
 2. **`tbm service verify <service名>`** を使う。根 HTML を取り、そこが参照する js/css 子リソースまで
    2xx かをまとめて確認する(`ok:true` で成功。NG なら exit 1 + どのリソースが落ちたか)。
+   **デプロイ直後は `--wait` を付ける**(`tbm service verify <service名> --wait`):進行中の
+   デプロイの完走を待ってから検証する(deploy 送信〜切替は非同期で数秒〜数十秒かかる。
+   `--wait` 無しで即叩くと旧版や 502 を見る。デプロイが failed ならその error を出して非零終了 =
+   status の手動輪詢は不要)。上限は `--timeout <秒>`(既定 180)。注意:GitHub 経路で CI が
+   まだビルド中(hook 未達)の間は「最新デプロイ=旧版の succeeded」なので待たずに検証して
+   しまう — その場合は Actions の完了を待ってから実行する。
    **`visibility=private` のサービスは公開 URL 自体が無効**なので verify は明確な文言でスキップ +
    非零終了する(接続失敗ではない = サーバ障害と誤読しない)。動作確認は `tbm service logs` /
    `tbm service exec`、または内部リンク先の caller コンテナから
@@ -246,9 +252,13 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
      直近デプロイの失敗が典型。
    - `tbm service cat <service名> <パス>` でコンテナ内のファイル(ビルド成果物・設定)を直接確認できる
      (`exec -- cat` の糖衣)。`tbm service exec <service名> -- <cmd>` で任意コマンドも。
-3. DB / volume / cache を使うなら、実際に「書き込み → 読み戻し」で永続と隔離を確かめる。注入した値が
-   何に解決されるかは **`tbm env list <service名> --resolved`**(由来付き・秘密は伏せる)で確認できる
-   — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので rotate 後は要再デプロイ。
+3. DB / volume / cache を使うなら、実際に「書き込み → 読み戻し」で永続と隔離を確かめる。DB 側の
+   読み戻しは **`tbm db query <db名> "<SQL>" --tsv`** が速い(psql 不要。`--tsv` = 行だけの
+   タブ区切り・列名なし・NULL は空 — スカラーなら `$(…)` で一発捕获。構造が要るときは `-o json` の
+   `results[].rows`。結果は 1 文あたり最大 1000 行で切り詰め — 大結果はアプリのドライバで)。
+   注入した値が何に解決されるかは **`tbm env list <service名> --resolved`**(由来付き・秘密は伏せる)
+   で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので
+   rotate 後は要再デプロイ。
 
 ## 6. ライフサイクルと後始末
 

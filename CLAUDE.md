@@ -114,6 +114,19 @@ distinct 成功版)外の terminal 旧版を「index → 子」の順に明示 D
 共有する分を除外 — buildx キャッシュの同一子共有を dev で実証)。rollback 実効窓 = 5 版に確定。
 実装級・受容・残余は **`doc/paas-service-stateful-design.md` §10-E**。
 
+**stateful 後の追加(マイルストーン外):CLI の AI フレンドリ改善(tbm 1.0.20)**。AI 利用の
+フィードバック起点の CLI 純粋な磨き込み(server はほぼ不変)。(1)**`tbm db query --tsv`**:
+JSON の `results[0].rows[0][0]` を毎回 jq/node で剥く手間を無くす行だけのタブ区切り出力
+(tuples-only・NULL は空・`\`/タブ/改行はエスケープで「1 行=1 レコード」保証。`count=$(tbm db
+query db "select count(*)…" --tsv)` を一発に)。(2)**`tbm service verify --wait [--timeout]`**:
+`tbm deploy` は送信即戻り・切替は非同期(数秒の滾動遅延)なので、これまで status を手で輪詢
+していたのを、最新デプロイ(created_at DESC)を 2s 輪詢して succeeded まで待ってから検証する
+(failed は error + 次の一手で非零終了 / succeeded 直後は traefik file-watch 反映を 15s 窓で吸収)。
+既知の限界:GitHub 経路で CI ビルド中(hook 未達)は最新=旧版のため待たずに検証。(3)`tbm
+--help` トップ概要を実サブコマンド面に同期(db に query/info 等が欠けていた — AI の第一発見面)+
+`parent_about_lists_all_subcommands` テストでドリフト機械封じ。(4)`tbm whoami` の JSON から
+avatar_url(長大 URL = AI 捕捉の雑音)除去(`WhoamiOut` を明示ビュー化。shared 契約は不変)。
+
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
 本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =
