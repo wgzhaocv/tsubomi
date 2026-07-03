@@ -7,10 +7,10 @@
 > しかし監視・通知系の worker は **HTTP 入口そのものが不要**で、URL が在ること自体が余計な露出になる。
 > 逆に、当初 M3 の DDL に居て一度も配線されず drop した `service_details.public` 列
 > (migration 20260622。意図 =「ipAllowList を app 単位で豁免する」)が示すとおり、
-> **全網公開したい**需要も設計当時から在った。この 2 つは同じ軸の両端なので、三態 1 列に畳む。
+> **インターネット全体に公開したい**需要も設計当時から在った。この 2 つは同じ軸の両端なので、三態 1 列に畳む。
 >
 > 背骨を一言で:**`svc-<id>.yml`(traefik route ファイル)は DB の期望状態から生成される** — だから
-> 「公開範囲」は列を 1 本足して「書く/書かない/middleware を挂けない」を分岐するだけで実現でき、
+> 「公開範囲」は列を 1 本足して「書く/書かない/middleware を掛けない」を分岐するだけで実現でき、
 > **切替は即時**(ファイル再生成のみ。env 注入と違いコンテナ起動時に固化される値ではない = 再デプロイ不要)。
 >
 > 完了判定:香橙派(prod)で public=社外 IP から開く / company=社内のみ(回帰)/ private=どの IP でも
@@ -24,8 +24,8 @@
 出すもの:
 
 - **`service_details.visibility` 三態**:`private`(route ファイル無し。subdomain は DB に温存、
-  公網アクセスは既存 catch-all → 302 `/noservice`)/ `company`(現状 = 既定。route + `tsubomi-ipallow@file`)/
-  `public`(route はあるが ipallow middleware を挂けない = 全網可達)。
+  外部からのアクセスは既存 catch-all → 302 `/noservice`)/ `company`(現状 = 既定。route + `tsubomi-ipallow@file`)/
+  `public`(route はあるが ipallow middleware を掛けない = どこからでも到達可能)。
 - **切替入口**:`POST /api/services/{id}/visibility`(web / CLI 同一ハンドラ)+ `tbm service visibility`
   + web 概要ページの Radio 3 択。即時反映・audit 記録。
 - **収束**:deploy 切替点と reconcile が visibility を尊重。reconcile の drift 判定は
@@ -45,18 +45,18 @@
   新表なし。既存行は DEFAULT で全部 `company` = 挙動不変。boolean 2 本(ingress 有無 × ipallow 豁免)は
   「無 ingress × 豁免」という無意味な組合せを生むので採らない。
 - **§0-B private の意味論 = 「route ファイルが存在しない」**。subdomain は解放しない(URL 文字列は
-  DTO に残り続ける — 再公開したとき同じ URL で復活するのが要点)。公網からは catch-all(priority 1)に
+  DTO に残り続ける — 再公開したとき同じ URL で復活するのが要点)。外部からは catch-all(priority 1)に
   落ちて 302 `/noservice` = 「未デプロイの子域」と区別が付かない見え方(意図どおりの不可視)。
-- **§0-C public = ipallow middleware を挂けない、それだけ**。entrypoint / tls / certResolver は不変。
+- **§0-C public = ipallow middleware を掛けない、それだけ**。entrypoint / tls / certResolver は不変。
   設定は**本人裁量 + audit 兜底**(owner 限定にしない):平台哲学「能力は平台が提供し、使うかは
-  ユーザ裁量」どおり。自分の app を全網に出すのは自分の爆発半径内。監査は `service.visibility` で残る。
+  ユーザ裁量」どおり。自分の app をインターネット全体に出すのは自分の爆発半径内。監査は `service.visibility` で残る。
 - **§0-D 切替は即時**:route ファイルは DB から再生成できるので、toggle ハンドラが lock 内で
   書換え/削除する(再デプロイ不要)。rotate(値がコンテナに固化される)と作法が違うことを明示する。
 - **§0-E serving 容器の真源は DB**:`container_name(id, latest_succeeded_deploy_id)` + 実走確認
   (reconcile が既にこの規約)。`attach_callees` もこれに揃え、route ファイル(private では不存在)を
   読む経路を廃す。
 - **§0-F middleware ドリフトは受容しない**:`public→company` の切替でファイル書込だけ失敗すると
-  「DB は社内限定・現実は全網公開」が黙って残る(fail-open のセキュリティドリフト)。reconcile の
+  「DB は社内限定・現実は一般公開」が黙って残る(fail-open のセキュリティドリフト)。reconcile の
   drift 判定を `(backend, ipallow)` の組にして ≤30s で収束させる。受容するのは「≤30s の窓」だけ(§9)。
 
 ---
@@ -151,7 +151,7 @@ route::backend_container(state, callee_id)  →  serving_container(state, callee
 - `private`:`route::write` の代わりに `route::remove`(冪等。旧 visibility の残骸掃き)。
   **`attach_as_callee` + `remove_others` は必ず進める**(内部の切替点は commit_success)。
   `remove` 失敗時**も**旧掃除を進めるのは意図した **fail-closed**:陳腐ファイルは消えた backend を指し
-  公網は最悪 502(= 内容不可達)で、旧掃除を止めて旧版が公網に**出続ける**方より安全側。error で記録し、
+  外部は最悪 502(= 内容不可達)で、旧掃除を止めて旧版が外部に**公開され続ける**方より安全側。error で記録し、
   reconcile の private 分岐が ≤30s でファイルを回収して /noservice に収束する(codex 監査 2026-07-02)。
 - `company` / `public`:従来どおり `route::write(.., ipallow)`。Ok → attach + 旧掃除 / Err → 旧温存。
 
@@ -219,13 +219,13 @@ shared は `SetServiceVisibilityReq { visibility: String }` + `ServiceDto` に
 
 - **≤30s の収束窓**:toggle の書込失敗(5xx 返却後)や deploy の route 書込/削除失敗時、現実が DB に
   追い付くまで最大 1 reconcile tick。恒久ドリフトは §0-F で排除済み、受容するのは窓だけ。private の
-  deploy で `route::remove` だけ失敗した窓は公網が 502(fail-closed。§6)。
+  deploy で `route::remove` だけ失敗した窓は外部が 502(fail-closed。§6)。
 - **attach の切替点前倒し**(§5):route 書込時 → commit_success 時。双方とも健全な版を指すため実害なし。
   route 書込失敗窓では内部リンクが公開より先に新版を指し得る(§5。健全版どうし・収束方向同一で受容)。
 - **per-callee の docker 照会コスト増**(attach_callees がファイル読みから presence 照会へ)。単機規模で許容。
 - **private は「認証」ではない**:HTTP 入口を消すだけ。M6 リンク経由・`tbm service exec`・web terminal
   からは従来どおり届く(いずれも所有者鉴权済みの経路)。
-- **public は文字通り全網公開**:ipallow を外すので、アプリ側に認証が無ければ誰でも触れる。
+- **public は文字通りの一般公開**:ipallow を外すので、アプリ側に認証が無ければ誰でも触れる。
   本人裁量 + audit(§0-C)。
 - **dev(domain=localhost)には catchall が無い**:private は単に直アクセス不可。活体挙動(302)の
   確認は prod のみ(§11)。
@@ -271,3 +271,6 @@ shared は `SetServiceVisibilityReq { visibility: String }` + `ServiceDto` に
 3. ✅ **M6 × private(主用途)**:private callee(vis-e2e)への注入を持つ caller コンテナから
    `wget http://vis-e2e:8080` が実体を返し、未リンクの service へは `bad address`(隔離回帰)。
 4. ✅ `just ship`(v38):migration 20260702000001 自動適用、既存 7 service(全 company)無瞬断。
+
+その後 **server v39 / tbm 1.0.18**(2026-07-03)でユーザ可視ラベルの文言修正のみ
+(公網/全網公開 → 外部/一般公開 等。機能変更なし)。

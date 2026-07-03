@@ -59,9 +59,9 @@ JSON 契約に合わないので web 専用**、一発 exec は捕獲出力 = AI
 最大セッション timeout・出力 cap 厳守)は **`doc/paas-terminal-design.md`** に集約。
 
 **M6 後の追加(マイルストーン外):service↔service 内部リンク**。app A が app B を呼ぶのに公開 URL
-(Cloudflare 往復 = 公網)しか無かったのを、**注入で内部直連**できるようにした(新表・migration なし)。
+(Cloudflare 往復 = インターネット経由)しか無かったのを、**注入で内部直連**できるようにした(新表・migration なし)。
 `tbm inject B --into A` で A に `B_URL=http://<B-subdomain>:<B-port>` を注入し、**B の serving コンテナを
-A の per-service 私網へ docker 網別名 = B の subdomain で客人 attach** → A は docker DNS で B へ直連(公網
+A の per-service 私網へ docker 網別名 = B の subdomain で客人 attach** → A は docker DNS で B へ直連(インターネット
 不経由)。M6 の真の境界=租户なので **同一 owner 限定**(注入作成時に自動担保 + 自注入禁止)。egress は
 同 subnet RETURN で素通り=不変。実装:`inject.rs` の service 分支(値解決)+ `network.rs`(別名 connect /
 `attach_callees`=caller 側が callee の route 後端を attach / `attach_as_callee`=callee の deploy 直後 / 
@@ -74,15 +74,15 @@ Host は `b:<port>`・IP 白名単/中間件なし)は受容済み。**本番 e2
 
 **内部リンク後の追加(マイルストーン外):service 公開範囲(visibility)三態**。全 service に必ず公開 URL が
 生える前提を崩し、`service_details.visibility`(migration 1 本、`private`/`company`=既定/`public`)で
-**route ファイル(`svc-<id>.yml`)の生成を分岐**する:private=書かない(subdomain 温存・公網は catch-all →
-302 /noservice。監視系 worker 用)/ company=現状(ipallow middleware)/ public=middleware を挂けない
-(全網公開 — 当初 M3 で drop した `public` 列の意図の再来。本人裁量 + audit)。**切替は即時**
+**route ファイル(`svc-<id>.yml`)の生成を分岐**する:private=書かない(subdomain 温存・外部からは catch-all →
+302 /noservice。監視系 worker 用)/ company=現状(ipallow middleware)/ public=middleware を掛けない
+(一般公開 — 当初 M3 で drop した `public` 列の意図の再来。本人裁量 + audit)。**切替は即時**
 (`POST /services/{id}/visibility` が deploy_lock 内で DB 先行 → route ファイル再生成/削除。env と違い
 再デプロイ不要)。reconcile の drift 判定は `(backend, ipallow)` の組に拡張(public→company の書込失敗が
 fail-open で残る穴を塞ぐ)。付随修理:`attach_callees` の callee 解決を route ファイル依存から
 `serving_container`(DB の直近成功 deploy + 実走確認)へ = **private callee への M6 リンクが主用途**。
 入口:`tbm service visibility`(status 表示 / verify は private 短絡)+ web 概要の Radio 3 択(URL バナーは
-灰化・温存)。**本番 e2e 済み**(2026-07-03、server v38 / tbm 1.0.17):private=どの IP からも 302
+灰化・温存)。**本番 e2e 済み**(2026-07-03、server v39 / tbm 1.0.18):private=どの IP からも 302
 /noservice(社外 VPS からも確認)・yml の ipallow 行が public で消え company で戻る・切替は traefik file
 watch で数秒反映・**private callee への M6 内部リンクが caller コンテナから実体を返し**、未リンクは
 `bad address`(隔離維持)。会社 IP 許可リストは現状**空 = fail-open**(company≒public。owner が
@@ -101,8 +101,8 @@ M1 で入ったもの:`resources` スーパーテーブル + `database_details`/
 暗号化(crypto.rs、XChaCha20-Poly1305);`tbm db` サブコマンド。**双 role**:app
 (内部、M3 で service に注入)+ human(外部、rotate 可)— 詳細は §2/§5。
 **外部接続文字列は部署トポロジで開閉**(`TSUBOMI_DB_PUBLIC_ENABLED`、既定 false):CF Tunnel など
-公網 TCP 入口を持たない部署では web が接続文字列カードを隠し `/url`・`/rotate` も後端で拒否
-(`require_db_public`。届かない LAN IP の誤誘導を断つ)。公網 IP の VPS でのみ true。web SQL タブと
+公開 TCP 入口を持たない部署では web が接続文字列カードを隠し `/url`・`/rotate` も後端で拒否
+(`require_db_public`。届かない LAN IP の誤誘導を断つ)。グローバル IP の VPS でのみ true。web SQL タブと
 human role 自体はこのフラグと無関係で常に動く(web SQL は tenant_admin_url 経由 = 公開ホスト不使用)。
 AuthInfo(`/auth/info`)に `db_public_enabled` を載せ前端が判定。**公開 DB の ipblock も実装済み**:
 有効時 `ipblock::sync_traefik` が `db-tcp.yml`(Traefik **TCP** router + ipAllowList + service=
