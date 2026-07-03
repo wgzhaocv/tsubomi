@@ -30,6 +30,10 @@ const MAX_NAME_LEN: usize = 64;
 /// web SQL が返す最大行数(超過は truncated=true で切り詰め)。CLI の `tbm db query` の
 /// help(crates/cli/src/commands/db.rs)にこの値が写してある — 変えるときは両方揃える。
 const MAX_QUERY_ROWS: usize = 1000;
+/// `tbm db query --param` の 1 リクエストあたり最大パラメータ数(暴走入力だけ弾く)。
+const MAX_QUERY_PARAMS: usize = 100;
+/// 1 パラメータの最大バイト長。
+const MAX_QUERY_PARAM_LEN: usize = 8192;
 /// 1 ロールあたりの既定接続上限。DB 列 `database_roles.conn_limit` と Postgres 役割の
 /// CONNECTION LIMIT の単一真源(本轮は固定。owner 調整は後相)。利用者は少数想定なので
 /// 偶の重利用を縛らない様あえて高め(噪声邻居は pgbouncer の max_user_connections + idle 超時で抑える)。
@@ -552,6 +556,24 @@ pub async fn query(
     Path(id): Path<Uuid>,
     Json(req): Json<QueryReq>,
 ) -> AppResult<Json<QueryResp>> {
+    // パラメータの護柵(exec の MAX_EXEC_ARGS と同趣旨。暴走入力だけ弾く)。
+    if req.params.len() > MAX_QUERY_PARAMS {
+        return Err(AppError::BadRequest(format!(
+            "パラメータが多すぎます(最大 {MAX_QUERY_PARAMS} 個)"
+        )));
+    }
+    if let Some(p) = req
+        .params
+        .iter()
+        .flatten()
+        .find(|p| p.len() > MAX_QUERY_PARAM_LEN)
+    {
+        return Err(AppError::BadRequest(format!(
+            "パラメータが長すぎます(最大 {MAX_QUERY_PARAM_LEN} バイト、実際 {} バイト)",
+            p.len()
+        )));
+    }
+
     let (dbname, role, enc) = fetch_human(&state.db, auth.user_id, id).await?;
     let pw = state.crypto.decrypt(&enc)?;
 
@@ -563,12 +585,28 @@ pub async fn query(
     // 接続を落とす = クエリも中断)。
     conn.execute("SET statement_timeout = '10s'").await?;
 
-    // raw_sql:単純クエリプロトコル(複数文 OK、値は text)。これは web SQL —
-    // 任意 SQL の実行が目的なので AssertSqlSafe で包む(安全は L1/L2/L3 認証が担保)。
-    // fetch_many で「行(Right)/ 文完了(Left)」を流し、文ごとに 1 集合へまとめる
-    // (fetch_all だと全文の行が混ざり、別 SELECT の値が違う列に並んでしまう)。
+    // params 空:raw_sql(単純クエリプロトコル、複数文 OK、値は text)。web SQL / `tbm db query`。
+    // params 非空:query() + bind(拡張プロトコル、単一文・$1..$n 束縛。複数文は PG が弾く → 400)。
+    // どちらも AssertSqlSafe で包む(安全は L1/L2/L3 認証が担保)。両者の fetch_many は同型の
+    // ストリーム(Either<PgQueryResult 完了 / PgRow 行>)なので、収集ループは 1 つで共有する。
     let collect = async {
-        let stream = sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql.as_str())).fetch_many(&mut conn);
+        // Query::fetch_many は「複数文は SQLite だけ」という理由で弃用マークされているが、
+        // params 経路は **bind による単一文**(拡張プロトコルが複数文を弾く)なので、その落とし穴に
+        // 当たらない正当な単一文用法。かつ非 SELECT(bind した UPDATE 等)の rows_affected を得るには
+        // fetch_many が要る(`fetch()` は行のみ)。raw_sql 経路の fetch_many は非弃用(推奨経路)。
+        #[allow(deprecated)]
+        let stream = if req.params.is_empty() {
+            sqlx::raw_sql(sqlx::AssertSqlSafe(req.sql.as_str())).fetch_many(&mut conn)
+        } else {
+            // 全て TEXT で bind(None は SQL NULL)。入力側の型は SQL で `$1::int` 等と明示、
+            // 出力側の特殊型は `col::text` を推奨(拡張プロトコルは BINARY 返却 = col_to_string の
+            // binary 分岐で対応済み)。TEXT bind が int 列比較で PG エラーになるのは既定の 400。
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(req.sql.as_str()));
+            for p in &req.params {
+                q = q.bind(p.as_deref());
+            }
+            q.fetch_many(&mut conn)
+        };
         futures_util::pin_mut!(stream);
 
         let mut results: Vec<QueryResultSet> = Vec::new();

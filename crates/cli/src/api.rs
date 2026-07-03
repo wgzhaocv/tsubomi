@@ -228,12 +228,14 @@ pub async fn db_query(
     token: &str,
     id: &str,
     sql: &str,
+    params: Vec<Option<String>>,
 ) -> Result<QueryResp> {
     let resp = send_ok(
         c.post(format!("{server_url}/api/databases/{id}/query"))
             .bearer_auth(token)
             .json(&QueryReq {
                 sql: sql.to_owned(),
+                params,
             }),
     )
     .await?;

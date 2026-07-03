@@ -175,7 +175,7 @@ pub async fn run(
         DbCmd::Query { name, sql, tsv } => {
             let sql = read_sql_arg(&sql)?;
             let id = resolve_id(&c, &server_url, &token, &name).await?;
-            let resp = api::db_query(&c, &server_url, &token, &id, &sql).await?;
+            let resp = api::db_query(&c, &server_url, &token, &id, &sql, Vec::new()).await?;
             if tsv {
                 // TSV は「行データだけを機械可読で」— シェル / AI のスカラー捕获用。
                 // 出力形式そのものの指定なので `-o` より優先する。警告は stderr(stdout を汚さない)。

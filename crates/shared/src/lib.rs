@@ -255,10 +255,16 @@ pub struct CacheDetailDto {
     pub key_count: Option<i64>,
 }
 
-/// `POST /api/databases/:id/query`(web SQL)のリクエスト。
+/// `POST /api/databases/:id/query`(web SQL / `tbm db query`)のリクエスト。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryReq {
     pub sql: String,
+    /// 位置パラメータ($1..$n)の束(`tbm db query --param`)。空 = 従来どおり
+    /// 単純クエリプロトコル(複数文可)。非空 = 拡張プロトコル(単一文・bind)。
+    /// `Option<String>` の None は SQL NULL を束縛する。旧クライアント互換のため
+    /// `serde(default)`(web の `{sql}` ボディはそのまま通る)。
+    #[serde(default)]
+    pub params: Vec<Option<String>>,
 }
 
 /// web SQL の 1 文ぶんの結果。SELECT 系は columns/rows、それ以外(INSERT/UPDATE/
@@ -569,6 +575,37 @@ pub struct SetEnvResp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsResp {
     pub logs: String,
+}
+
+/// `GET /api/services/:id/metrics` のレスポンス。稼働中コンテナの 1 サンプル指標 +
+/// inspect 由来のライフサイクル情報。停止 / 未デプロイでも 200(running=false + 各 None)で
+/// 返す — 「なぜ落ちているか」を見るのが主用途なので、不在を答えとして扱う。全フィールドは
+/// 取得不能時 None(旧クライアント / 停止コンテナで欠落しても壊れないよう `serde(default)`)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceMetricsDto {
+    /// コンテナが今 running か(inspect の State.Running)。
+    pub running: bool,
+    /// CPU 使用率(%)。算出には 2 サンプル要るので停止中 / 取得不能は None。
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    /// メモリ使用量(bytes)。
+    #[serde(default)]
+    pub mem_bytes: Option<i64>,
+    /// メモリ硬上限(bytes、`--memory`)。無制限なら宿主機 RAM だが tsubomi は必ず設定する。
+    #[serde(default)]
+    pub mem_limit_bytes: Option<i64>,
+    /// 起動以来の再起動回数(inspect の RestartCount)。OOM / クラッシュループの手がかり。
+    #[serde(default)]
+    pub restart_count: Option<i64>,
+    /// 現コンテナの起動時刻(RFC3339)。
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// 起動からの経過秒(サーバが started_at から算出)。
+    #[serde(default)]
+    pub uptime_secs: Option<i64>,
+    /// 直近の終了が OOM だったか(inspect の State.OOMKilled)。
+    #[serde(default)]
+    pub oom_killed: Option<bool>,
 }
 
 /// `POST /api/services/:id/rollback` のリクエスト。`deploys` 履歴の戻し先。

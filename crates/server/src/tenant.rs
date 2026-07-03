@@ -425,6 +425,10 @@ pub fn col_to_string(row: &PgRow, i: usize) -> Option<String> {
         "FLOAT8" => try_decode!(f64),
         "TEXT" | "VARCHAR" | "BPCHAR" | "NAME" | "CHAR" | "\"char\"" => try_decode!(String),
         "UUID" => try_decode!(uuid::Uuid),
+        // NUMERIC は text/binary 両形式で decode できるよう明示扱い(params 経路=拡張プロトコル
+        // では BINARY 返却のため、下の text 専用フォールバックだと `(NUMERIC)` に化ける。金額 /
+        // 小数は最頻出なので取りこぼさない)。BigDecimal の Display はそのままの十進表記。
+        "NUMERIC" => try_decode!(sqlx::types::BigDecimal),
         "TIMESTAMPTZ" => try_decode!(chrono::DateTime<chrono::Utc>),
         "TIMESTAMP" => try_decode!(chrono::NaiveDateTime),
         "DATE" => try_decode!(chrono::NaiveDate),
@@ -435,12 +439,22 @@ pub fn col_to_string(row: &PgRow, i: usize) -> Option<String> {
         }
         _ => {}
     }
-    // フォールバック:未対応型(numeric / interval / 配列 / 独自型 …)は raw text を
-    // **unchecked** で読む。raw_sql は単純クエリプロトコル = 値が text 形式なので、
-    // 型チェックを飛ばして String(= UTF-8 text)に decode すれば素直に文字列化できる。
-    match row.try_get_unchecked::<Option<String>, _>(i) {
-        Ok(v) => v,
-        Err(_) => Some(format!("({ty})")),
+    // フォールバック:未対応型(numeric / interval / 配列 / 独自型 …)。
+    // **プロトコルで形式が違う**:単純クエリ(raw_sql=params 無し)は値が TEXT 形式なので
+    // unchecked で String に decode できる。拡張プロトコル(query+bind=params 有り)は
+    // 値が BINARY 形式で来るため String decode は化ける — その場合は型名プレースホルダに倒す
+    // (利用側は `col::text` で明示キャストすれば TEXT 形式で受けられる)。
+    use sqlx::ValueRef;
+    let placeholder = || Some(format!("({ty})"));
+    match row.try_get_raw(i) {
+        // NULL は形式に関わらず None。
+        Ok(raw) if raw.is_null() => None,
+        Ok(raw) if raw.format() == sqlx::postgres::PgValueFormat::Text => {
+            row.try_get_unchecked::<Option<String>, _>(i)
+                .unwrap_or_else(|_| placeholder())
+        }
+        // BINARY(拡張プロトコル)の未対応型 / raw 取得失敗:型名で示す。
+        _ => placeholder(),
     }
 }
 
