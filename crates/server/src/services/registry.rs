@@ -28,6 +28,17 @@ const PASSWORD_BYTES: usize = 24;
 /// 三者まとめて「固定された配備形」として const に置く(片方だけ env 可変にしない)。
 const REGISTRY_CONTAINER: &str = "tsubomi-registry";
 
+/// GC が service ごとに温存する成功版の数(現役 digest は別枠で常に温存)。rollback の実効窓 =
+/// この数(それより古い版の manifest は回収済み = rollback は pull 404。ディスクとの取引)。
+const KEEP_SUCCEEDED_DEPLOYS: usize = 5;
+
+/// buildx は multi-arch で OCI image index を push し得る。schema2 / OCI の両系統を Accept して
+/// 頂点 manifest(index か単一 manifest)を扱う(delete_repo / GC 保護の共有)。
+const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json, \
+     application/vnd.docker.distribution.manifest.list.v2+json, \
+     application/vnd.oci.image.manifest.v1+json, \
+     application/vnd.oci.image.index.v1+json";
+
 /// ユーザの registry アカウントを取得、無ければ作る(冪等)。返すのは host を含む
 /// 完全な creds(password は平文)。同時 create にも強い:`ON CONFLICT DO NOTHING`
 /// で 2 重挿入を避け、最後に確定行を読み直してから復号する。
@@ -180,16 +191,32 @@ fn render(push_host: &str, direct_host: Option<&str>, users: &[String], tls: boo
 /// (削除済み service の repo まるごとが対象)。repo が既に無い(404)なら冪等に `Ok`。
 /// loopback の pull registry(`registry_pull`、無認証)へ `state.http` で直結する。
 pub async fn delete_repo(state: &AppState, service_id: Uuid) -> AppResult<()> {
-    let base = format!("http://{}/v2/{}", state.config.registry_pull, service_id);
-
-    // buildx は multi-arch で OCI image index を push し得る。schema2 / OCI の両系統を Accept
-    // して、tagged な頂点 manifest(index か単一 manifest)の digest を引く。
-    const MANIFEST_ACCEPT: &str = "application/vnd.docker.distribution.manifest.v2+json, \
-         application/vnd.docker.distribution.manifest.list.v2+json, \
-         application/vnd.oci.image.manifest.v1+json, \
-         application/vnd.oci.image.index.v1+json";
+    let base = repo_base(state, service_id);
 
     // 1) tag 一覧。404 = repo が無い(既に綺麗)= 冪等に成功扱い。
+    let Some(tags) = list_tags(state, &base).await? else {
+        return Ok(());
+    };
+
+    // 2) tag ごとに digest を引いて manifest を DELETE。None は静かにスキップ —
+    //    同一 digest を指す tag が複数あると 2 回目以降の解決が 404 になる(1 回目の DELETE が
+    //    manifest ごと全 tag を消す)= 期待どおりの冪等(ヘッダ欠落の異常系は manifest_digest が warn)。
+    for tag in tags {
+        let Some(digest) = manifest_digest(state, &base, &tag).await? else {
+            continue;
+        };
+        delete_manifest(state, &base, &digest).await?;
+    }
+    Ok(())
+}
+
+/// service の repo の registry API ベース URL(loopback の pull 入口、無認証)。
+fn repo_base(state: &AppState, service_id: Uuid) -> String {
+    format!("http://{}/v2/{}", state.config.registry_pull, service_id)
+}
+
+/// repo の tag 一覧。repo 不在(404)は None(呼び出し側が「既に綺麗」に倒す)。
+async fn list_tags(state: &AppState, base: &str) -> AppResult<Option<Vec<String>>> {
     let resp = state
         .http
         .get(format!("{base}/tags/list"))
@@ -197,7 +224,7 @@ pub async fn delete_repo(state: &AppState, service_id: Uuid) -> AppResult<()> {
         .await
         .context("registry tags/list 取得に失敗")?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(());
+        return Ok(None);
     }
     if !resp.status().is_success() {
         return Err(AppError::Other(anyhow!(
@@ -209,50 +236,247 @@ pub async fn delete_repo(state: &AppState, service_id: Uuid) -> AppResult<()> {
     struct TagsList {
         tags: Option<Vec<String>>,
     }
-    let tags = resp
-        .json::<TagsList>()
-        .await
-        .context("registry tags/list の解析に失敗")?
-        .tags
-        .unwrap_or_default();
+    Ok(Some(
+        resp.json::<TagsList>()
+            .await
+            .context("registry tags/list の解析に失敗")?
+            .tags
+            .unwrap_or_default(),
+    ))
+}
 
-    // 2) tag ごとに digest を引いて manifest を DELETE(同一 digest を指す tag が複数でも、
-    //    2 回目は 404 = 冪等に許容)。
-    for tag in tags {
-        let head = state
-            .http
-            .get(format!("{base}/manifests/{tag}"))
-            .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
-            .send()
-            .await
-            .context("registry manifest 取得に失敗")?;
-        if head.status() == reqwest::StatusCode::NOT_FOUND {
-            continue;
-        }
-        let Some(digest) = head
-            .headers()
-            .get("Docker-Content-Digest")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-        else {
-            tracing::warn!(%service_id, tag, "registry: Docker-Content-Digest 無し — manifest を削除できない");
-            continue;
-        };
-        let del = state
-            .http
-            .delete(format!("{base}/manifests/{digest}"))
-            .send()
-            .await
-            .context("registry manifest 削除に失敗")?;
-        // 202 Accepted = 受理。404 = 既に消えている(冪等)。それ以外は失敗。
-        if !del.status().is_success() && del.status() != reqwest::StatusCode::NOT_FOUND {
-            return Err(AppError::Other(anyhow!(
-                "registry manifest DELETE が {} を返しました",
-                del.status()
-            )));
+/// 参照(tag or digest)の頂点 manifest digest を引く。不在(404)は None(冪等パスの正常系 =
+/// 呼び出し側は静かにスキップしてよい)。200 なのにヘッダが無い異常系はここで warn して None。
+async fn manifest_digest(state: &AppState, base: &str, reference: &str) -> AppResult<Option<String>> {
+    let resp = state
+        .http
+        .get(format!("{base}/manifests/{reference}"))
+        .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
+        .send()
+        .await
+        .context("registry manifest 取得に失敗")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let digest = resp
+        .headers()
+        .get("Docker-Content-Digest")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if digest.is_none() {
+        tracing::warn!(base, reference, "registry: Docker-Content-Digest ヘッダ無し");
+    }
+    Ok(digest)
+}
+
+/// manifest を digest 指定で削除(その manifest を指す**全 tag も一緒に消える** — distribution v2
+/// に tag 単体の削除は無い)。202 = 受理、404 = 既に無い(冪等)。
+async fn delete_manifest(state: &AppState, base: &str, digest: &str) -> AppResult<()> {
+    let del = state
+        .http
+        .delete(format!("{base}/manifests/{digest}"))
+        .send()
+        .await
+        .context("registry manifest 削除に失敗")?;
+    if !del.status().is_success() && del.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(AppError::Other(anyhow!(
+            "registry manifest DELETE が {} を返しました",
+            del.status()
+        )));
+    }
+    Ok(())
+}
+
+/// GC の前段:**生存 service の現役 + 直近成功版を保護 tag で守り、窓の外の旧版 manifest を
+/// 平台が明示削除する**(stateful 設計 §10-E の修正)。
+///
+/// 背景のバグ:`garbage_collect` の `--delete-untagged` は「tag に参照されない manifest」を消すが、
+/// **同じ tag への再 push(同一 commit の deploy 再実行 — build は非再現なので digest は毎回変わる)
+/// でも旧 digest は失参照になる**。後続 deploy が失敗すると「現に serving 中 = 直近成功 deploy の
+/// digest」が回収され、start / reconcile 復活 / rollback の pull が 404 で全滅していた。
+///
+/// 対策の形(`--delete-untagged` は**残す** — multi-arch index の子 manifest 回収はこれが担う):
+/// 1. **保護**:keep 集合(現役 `image_digest` ∪ 直近 [`KEEP_SUCCEEDED_DEPLOYS`] 成功版)の
+///    manifest に `keep-<digest 先頭 12hex>` tag を付ける(tag 付き = `--delete-untagged` の対象外。
+///    tag 付き index の子 manifest も参照済み扱いで守られる)。
+/// 2. **期限切れ**:deploys 由来の **terminal な**(succeeded/failed のみ = in-flight を触らない)
+///    distinct digest のうち keep 外を manifest DELETE(tag ごと消える = 陳腐な keep tag も
+///    これで自然に掃かれる)。tag-only の digest(push 済み・hook 未達)は触らない(deploy 中の
+///    レースを避ける。失参照になれば従来どおり `--delete-untagged` が回収する — served していない
+///    ので損失なし)。
+///
+/// 全体 best-effort(per-service / per-manifest で warn、他を止めない)。呼び出しは gc.rs の
+/// 日次 tick で `garbage_collect` の**直前**(保護が先、掃除が後 — 順序が命)。
+pub async fn protect_and_expire_manifests(state: &AppState) -> AppResult<()> {
+    let services: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT r.id, s.image_digest
+           FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.kind = 'service' AND r.deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    for (sid, current) in services {
+        if let Err(e) = protect_and_expire_one(state, sid, current.as_deref()).await {
+            tracing::warn!(error = ?e, %sid, "registry GC 前処理:manifest の保護 / 期限切れに失敗(次回 tick で再試行)");
         }
     }
     Ok(())
+}
+
+/// 1 service ぶんの保護 + 期限切れ(本体は [`protect_and_expire_manifests`] のドキュメント参照)。
+///
+/// **クエリの順序が命**(codex review 2026-07-03 #1):期限切れ候補(expendable)を**先に**、
+/// keep 集合を**後に**読む。並行 deploy の commit_success が両クエリの間に割り込んでも、
+/// 「候補 = 古い現実の部分集合、保護 = 新しい現実の超集合」なので、新しく成功した現役 digest は
+/// 候補に居らず(古い快照)、逆に候補にいる旧 digest が current 化した場合は keep(新しい快照)が
+/// 拾って除外する。逆順だと「keep に無いが候補にある新現役」を消し得る。
+async fn protect_and_expire_one(
+    state: &AppState,
+    service_id: Uuid,
+    current: Option<&str>,
+) -> AppResult<()> {
+    // 1) 期限切れ候補(古い快照):terminal な deploys の distinct digest。
+    //    非 terminal 行(received/pulling/starting)を 1 つでも持つ digest は in-flight = 触らない。
+    let expendable: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT d.image_digest FROM deploys d
+          WHERE d.service_id = $1 AND d.status IN ('succeeded','failed')
+            AND NOT EXISTS (
+              SELECT 1 FROM deploys x
+               WHERE x.service_id = d.service_id AND x.image_digest = d.image_digest
+                 AND x.status NOT IN ('succeeded','failed'))",
+    )
+    .bind(service_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    // 2) keep 集合(新しい快照):現役 ∪ distinct 直近 N 成功版。distinct は SQL 側で取る
+    //    (同一 digest の連続 deploy が多いと LIMIT 先取りで distinct が痩せる — codex #3)。
+    let succeeded: Vec<(String,)> = sqlx::query_as(
+        "SELECT image_digest FROM deploys
+          WHERE service_id = $1 AND status = 'succeeded'
+          GROUP BY image_digest
+          ORDER BY MAX(created_at) DESC
+          LIMIT $2",
+    )
+    .bind(service_id)
+    .bind(KEEP_SUCCEEDED_DEPLOYS as i64)
+    .fetch_all(&state.db)
+    .await?;
+    let succeeded: Vec<String> = succeeded.into_iter().map(|(d,)| d).collect();
+    let keep = keep_window(&succeeded, current, KEEP_SUCCEEDED_DEPLOYS);
+
+    let base = repo_base(state, service_id);
+    // 3) 保護:keep の各 digest に keep tag(冪等。deploy 成功時にも付けている
+    //    [`ensure_keep_tag_for`] ので、ここは取りこぼしの対账)。
+    for digest in &keep {
+        if let Err(e) = ensure_keep_tag(state, &base, digest).await {
+            tracing::warn!(error = ?e, %service_id, digest, "registry GC 前処理:keep tag 付与に失敗");
+        }
+    }
+
+    // 4) 期限切れ:候補のうち keep 外を削除(既に消えた分は 404 = 冪等。回収済み digest への
+    //    再 DELETE は日次 + loopback なので受容 — efficiency review)。
+    for (digest,) in expendable {
+        if keep.contains(&digest) {
+            continue;
+        }
+        if let Err(e) = delete_manifest(state, &base, &digest).await {
+            tracing::warn!(error = ?e, %service_id, digest, "registry GC 前処理:旧版 manifest の削除に失敗");
+        }
+    }
+    Ok(())
+}
+
+/// deploy 成功の瞬間に現役 digest へ保護 tag を付ける(best-effort。deploy.rs の commit_success
+/// 直後から呼ぶ)。これで「succeeded ⇒ keep tag 有り」が**出生時から**成立し、日次の保護 pass と
+/// stock GC(`--delete-untagged`)の間に同 tag 再 push が割り込んでも現役が食われない(codex #2)。
+/// 失敗は warn のみ — 日次 pass(対账)が拾い直す。残余リスクは「stock GC の走行中に成功した
+/// deploy」だけで、これは distribution 上流が read-only 運用を推奨する既知の併行制約(受容)。
+pub async fn ensure_keep_tag_for(state: &AppState, service_id: Uuid, digest: &str) {
+    let base = repo_base(state, service_id);
+    if let Err(e) = ensure_keep_tag(state, &base, digest).await {
+        tracing::warn!(error = ?e, %service_id, digest, "deploy 直後の keep tag 付与に失敗(日次 GC 前処理が対账)");
+    }
+}
+
+/// keep 集合(純関数):現役 digest ∪ 成功 digest 列(新しい順・重複あり)の distinct 先頭 n 個。
+fn keep_window(
+    succeeded_desc: &[String],
+    current: Option<&str>,
+    n: usize,
+) -> std::collections::HashSet<String> {
+    let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(c) = current {
+        keep.insert(c.to_string());
+    }
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for d in succeeded_desc {
+        if seen.len() >= n {
+            break;
+        }
+        if seen.insert(d.as_str()) {
+            keep.insert(d.clone());
+        }
+    }
+    keep
+}
+
+/// digest の manifest に保護 tag `keep-<先頭12hex>` を付ける(冪等)。
+/// manifest 本体が既に無い(旧バグの犠牲 / 手動削除)場合は warn せず静かにスキップ —
+/// ここで守れるものは何も残っていない(pull は既に 404 = 既知の状態)。
+async fn ensure_keep_tag(state: &AppState, base: &str, digest: &str) -> AppResult<()> {
+    let tag = keep_tag(digest);
+    // 既に正しい digest を指しているなら何もしない(PUT の churn を避ける)。
+    if manifest_digest(state, base, &tag).await?.as_deref() == Some(digest) {
+        return Ok(());
+    }
+    // manifest 本体を取り(Content-Type ごと)、同じ内容を keep tag へ PUT する
+    // (registry は内容から digest を再計算するので、同一 manifest に tag が増えるだけ)。
+    let resp = state
+        .http
+        .get(format!("{base}/manifests/{digest}"))
+        .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT)
+        .send()
+        .await
+        .context("registry manifest 取得に失敗(keep tag 用)")?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(()); // 既に失われている(旧バグの犠牲等)— 守るものが無い
+    }
+    if !resp.status().is_success() {
+        return Err(AppError::Other(anyhow!(
+            "registry manifest GET が {} を返しました",
+            resp.status()
+        )));
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/vnd.oci.image.index.v1+json")
+        .to_owned();
+    let body = resp.bytes().await.context("registry manifest 本文の取得に失敗")?;
+    let put = state
+        .http
+        .put(format!("{base}/manifests/{tag}"))
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(body)
+        .send()
+        .await
+        .context("registry keep tag の PUT に失敗")?;
+    if !put.status().is_success() {
+        return Err(AppError::Other(anyhow!(
+            "registry keep tag PUT が {} を返しました",
+            put.status()
+        )));
+    }
+    Ok(())
+}
+
+/// 保護 tag 名:`keep-<digest 先頭 12hex>`(`sha256:` を剥いだ先頭 12 桁。tag 文字集合に安全)。
+fn keep_tag(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("keep-{}", &hex[..hex.len().min(12)])
 }
 
 /// 日次:registry の未参照 blob を回収する(`registry garbage-collect`)。manifest が消えた後
@@ -355,8 +579,31 @@ async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds
 #[cfg(test)]
 mod tests {
     use super::render;
+    use super::{keep_tag, keep_window};
 
     const USER: &str = "u-abc:$2b$12$hashhashhash";
+
+    #[test]
+    fn keep_window_keeps_current_and_recent_distinct() {
+        let s = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // 新しい順・重複あり(同じ digest の再 deploy)。distinct で 2 個まで + 現役。
+        let succ = s(&["d3", "d3", "d2", "d1"]);
+        let keep = keep_window(&succ, Some("d9"), 2);
+        assert!(keep.contains("d9")); // 現役は成功列に無くても常に温存
+        assert!(keep.contains("d3") && keep.contains("d2"));
+        assert!(!keep.contains("d1")); // 窓の外 = 期限切れ候補
+        // 現役が窓内と重複しても集合なので二重にならない。成功ゼロでも現役だけは守る。
+        assert_eq!(keep_window(&[], Some("d1"), 5).len(), 1);
+        assert!(keep_window(&[], None, 5).is_empty());
+    }
+
+    #[test]
+    fn keep_tag_is_short_and_tag_safe() {
+        let t = keep_tag("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        assert_eq!(t, "keep-0123456789ab");
+        // 前缀無し / 短い入力でも panic しない(防御的)。
+        assert_eq!(keep_tag("abc"), "keep-abc");
+    }
 
     #[test]
     fn render_tls_uses_websecure_and_le() {

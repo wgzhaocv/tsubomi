@@ -240,11 +240,24 @@ env.push((format!("{base}_PORT"), port.to_string()));            // 追加
 - **§10-D stateful の後から変更入口**(false→true 片方向、visibility 同型の専用 POST):
   既存 workaround service(DB を stateless で走らせている人)が現れたら。
 - **compose_spec 多容器**(tech-design M6):同生死 sidecar/worker の需要が立ってから。
-- **§10-E registry GC の keep-set 欠陥(既存バグ・本設計とは独立。S2 の dev e2e で発見)**:
-  日次 GC(`registry::garbage_collect` = stock registry の未参照回収)は「tag に参照されない
-  manifest」を消すが、**同じ tag への再 push(同一 commit の deploy --local 再実行 / GH Action
-  の re-run — build は非再現なので digest は毎回変わる)でも旧 digest は失参照になる**。後続
-  deploy が失敗した場合、「現に serving 中 = 直近成功 deploy の digest」が GC に食われ、
-  start / reconcile 復活 / rollback の digest pull が 404 で全滅する(dev で実証:GC 直後の
-  `service start` が 500)。修正案:GC 前に各 service の `image_digest`(+ rollback 用の直近
-  成功 N 版)を保護 tag として付け直す、等。stateful(DB)は復活不能の実害が大きいので優先度中。
+- **§10-E registry GC の keep-set 欠陥(既存バグ・本設計とは独立。S2 の dev e2e で発見 →
+  2026-07-03 修正済み)**:日次 GC の `--delete-untagged` は「tag に参照されない manifest」を
+  消すが、**同じ tag への再 push(同一 commit の deploy 再実行 — build は非再現なので digest は
+  毎回変わる)でも旧 digest は失参照になる**。後続 deploy が失敗すると「現に serving 中 = 直近
+  成功 deploy の digest」が回収され、start / reconcile 復活 / rollback の pull が 404 で全滅して
+  いた(dev で実証)。**修正**(`registry::protect_and_expire_manifests`、gc.rs の日次 tick で
+  `garbage_collect` の直前):(1)keep 集合 = 現役 `image_digest` ∪ 直近 **5** 成功版に保護 tag
+  `keep-<digest 先頭12hex>` を付与(`--delete-untagged` は残す — multi-arch index の子 manifest
+  回収はこれが担う。tag 付き index の子は参照済み扱いで守られる)。(2)terminal な deploys 由来の
+  distinct digest のうち keep 外を manifest DELETE(tag ごと消える = 陳腐 keep tag も自然に掃く。
+  in-flight な digest と tag-only の digest は触らない = deploy 中のレース回避)。**併行加固**
+  (codex review 2026-07-03):(a)**deploy 成功の瞬間にも keep tag を付ける**(`ensure_keep_tag_for`、
+  commit_success 直後の best-effort)—「succeeded ⇒ keep tag 有り」が出生時から成立し、保護 pass と
+  stock GC の間の同 tag 再 push 窓を閉じる;(b)期限切れ候補を**先に**・keep 集合を**後に**読む
+  (候補 = 古い快照の部分集合 / 保護 = 新しい快照の超集合 — 並行 commit_success が割り込んでも
+  新現役を消さない);(c)直近 N distinct は SQL(`GROUP BY + MAX(created_at)`)で取る(LIMIT 先取りの
+  distinct 痩せ対策)。**受容した取引**:rollback の実効窓 = 直近 5 成功版(それより古い版は pull 404 —
+  ディスクとの交換)/ 回収済み digest への再 DELETE(404 冪等)は日次 + loopback なので放置 /
+  stock GC **走行中**に成功した deploy の残余レースは distribution 上流の既知併行制約(read-only 運用
+  推奨)に帰着 = 受容。dev e2e:同 tag 6 連 deploy + 失敗 deploy 後の GC で keep 5 版温存・窓外/失敗版
+  回収・`service start` 成功;deploy 直後に keep tag が即時に存在。

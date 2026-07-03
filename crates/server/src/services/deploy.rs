@@ -357,6 +357,10 @@ async fn run_digest_inner(
         return Err(e);
     }
 
+    // 成功確定と同時に現役 digest へ registry の保護 tag を付ける(best-effort)。同 tag への
+    // 再 push で失参照になっても、日次 GC(--delete-untagged)が現役を食わない(§10-E / codex #2)。
+    crate::services::registry::ensure_keep_tag_for(state, service_id, image_digest).await;
+
     // ★ ここから先は「成功確定」点を越えている(DB 上 new が正、新コンテナは起動済み)。route
     //   切替・旧削除の失敗は **致命にしない**:failed と誤記録すると「実際は成功した deploy」を
     //   巻き戻すことになる。不整合は reconcile(S8)/ 再 deploy が収束させる。

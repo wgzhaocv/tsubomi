@@ -267,6 +267,11 @@ fn spawn_registry_gc(state: AppState) {
         let mut tick = tokio::time::interval(REGISTRY_GC_INTERVAL);
         loop {
             tick.tick().await;
+            // 保護(keep tag)+ 旧版の明示削除を**先に**、blob 回収を後に(順序が命 —
+            // 逆だと --delete-untagged が「tag 上書きで失参照になった現役 digest」を食う。§10-E)。
+            if let Err(e) = crate::services::registry::protect_and_expire_manifests(&state).await {
+                tracing::warn!(error = ?e, "gc: registry manifest 保護/期限切れ failed");
+            }
             if let Err(e) = crate::services::registry::garbage_collect(&state).await {
                 tracing::warn!(error = ?e, "gc: registry garbage-collect failed");
             }
