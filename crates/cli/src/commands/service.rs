@@ -10,8 +10,8 @@ use crate::commands::{
 };
 use crate::config;
 use tsubomi_shared::{
-    CreateServiceResp, InjectionDto, ServiceDto, VISIBILITY_COMPANY, VISIBILITY_PRIVATE,
-    VISIBILITY_PUBLIC, WORKFLOW_PATH,
+    CreateServiceResp, InjectionDto, ServiceDto, ServiceMetricsDto, VISIBILITY_COMPANY,
+    VISIBILITY_PRIVATE, VISIBILITY_PUBLIC, WORKFLOW_PATH,
 };
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
@@ -61,13 +61,35 @@ pub enum ServiceCmd {
         /// 対象サービスの表示名
         name: String,
     },
-    /// コンテナの直近ログを表示
+    /// コンテナのログを表示(既定は直近スナップショット。`--follow` で実時 tail)
     Logs {
         /// 対象サービスの表示名
         name: String,
         /// 取得する行数(既定 200)
         #[arg(long)]
         tail: Option<usize>,
+        /// 実時に tail し続ける(Ctrl-C で終了。CF Tunnel の無音切断は自動再接続)。
+        /// サーバ v43+ が必要(旧サーバでは明確なエラー)
+        #[arg(long)]
+        follow: bool,
+        /// この時刻以降のみ(`5m` / `2h` / `1d` の相対、または unix 秒)。スナップショット / follow 共通
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// 稼働指標(CPU / メモリ(上限比)/ 再起動回数 / uptime / OOM)。サーバ v43+ が必要
+    Metrics {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+    },
+    /// デプロイ履歴(id / sha / 状態 / 時刻)。rollback の戻し先選びに使う
+    Deploys {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+    },
+    /// 公開 URL をブラウザで開く(private / 未公開はエラー)
+    Open {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
     },
     /// コンテナ内で 1 コマンドを実行(非対話。`docker exec` 相当 = 線上診断 / スクリプト用。
     /// 対話シェルは web のターミナルを使う)。例:`tbm service exec myapp -- ps aux`
@@ -214,15 +236,72 @@ pub async fn run(
                 println!("停止しました。");
             }
         }
-        ServiceCmd::Logs { name, tail } => {
+        ServiceCmd::Logs {
+            name,
+            tail,
+            follow,
+            since,
+        } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
-            let logs = api::service_logs(&c, &server_url, &token, &id, tail).await?;
-            if json {
-                print_json(&json!({ "logs": logs }))?;
-            } else if logs.is_empty() {
-                println!("(ログがありません。コンテナが走っていない可能性があります)");
+            // `--since` は相対(5m/2h/1d)or unix 秒を受けて unix 秒へ。快照 / follow 共通。
+            let since = since.as_deref().map(parse_since).transpose()?;
+            if follow {
+                // 実時 tail。CF Tunnel の無音切断は since を進めて自動再接続(C3 の責務)。
+                // Ctrl-C まで戻らない。旧サーバ(v43 未満)は content-type 不一致で明確にエラー。
+                follow_logs(&c, &server_url, &token, &id, tail, since).await?;
             } else {
-                print!("{logs}");
+                let logs = api::service_logs(&c, &server_url, &token, &id, tail, since).await?;
+                if json {
+                    print_json(&json!({ "logs": logs }))?;
+                } else if logs.is_empty() {
+                    println!("(ログがありません。コンテナが走っていない可能性があります)");
+                } else {
+                    print!("{logs}");
+                }
+            }
+        }
+        ServiceCmd::Metrics { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let m = api::service_metrics(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&m)?;
+            } else {
+                print_metrics(&name, &m);
+            }
+        }
+        ServiceCmd::Deploys { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let deploys = api::service_deploys(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&deploys)?;
+            } else if deploys.is_empty() {
+                println!("(デプロイ履歴がありません)");
+            } else {
+                for d in &deploys {
+                    println!(
+                        "{}  {:<10} {}  {}",
+                        short_deploy_id(&d.id.to_string()),
+                        d.status,
+                        short_sha(&d.git_sha),
+                        d.created_at.format("%Y-%m-%d %H:%M")
+                    );
+                }
+            }
+        }
+        ServiceCmd::Open { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let svc = api::service_get(&c, &server_url, &token, &id).await?;
+            if svc.visibility == VISIBILITY_PRIVATE || svc.url.is_empty() {
+                bail!(
+                    "このサービスには公開 URL がありません(visibility=private / 未デプロイ)。`tbm service status {name}` で確認、公開するなら `tbm service visibility {name} company`"
+                );
+            }
+            if json {
+                print_json(&json!({ "url": svc.url }))?;
+            } else if webbrowser::open(&svc.url).is_err() {
+                // headless 等で開けない:URL を出す(login の fallback と同款)。
+                eprintln!("ブラウザを開けませんでした。以下を開いてください:");
+                println!("{}", svc.url);
             }
         }
         ServiceCmd::Exec { name, command } => {
@@ -762,6 +841,154 @@ fn gh_secret(repo: &str, name: &str, value: &str) -> Result<()> {
 /// variable を設定する(非機密なので --body でよい)。
 fn gh_variable(repo: &str, name: &str, value: &str) -> Result<()> {
     run_gh(&["variable", "set", name, "-R", repo, "--body", value])
+}
+
+// ===== logs / metrics / deploys(観測) =====
+
+/// `--since` を unix 秒へ。相対(`30s`/`5m`/`2h`/`1d`)or 生の unix 秒を受ける。
+fn parse_since(s: &str) -> Result<i64> {
+    // 純数字は unix 秒とみなす。
+    if let Ok(n) = s.parse::<i64>() {
+        return Ok(n);
+    }
+    // 末尾の単位文字で分ける(char 境界で切る = 多字節入力でも panic しない)。
+    let unit = s.chars().last();
+    let num = &s[..s.len() - unit.map_or(0, char::len_utf8)];
+    let n: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("--since の形式が不正です:'{s}'(例:30s / 5m / 2h / 1d / unix 秒)"))?;
+    if n < 0 {
+        bail!("--since の相対値は 0 以上にしてください:'{s}'");
+    }
+    let mult = match unit {
+        Some('s') => 1,
+        Some('m') => 60,
+        Some('h') => 3600,
+        Some('d') => 86400,
+        _ => bail!("--since の単位は s / m / h / d のいずれかです(または unix 秒):'{s}'"),
+    };
+    // 極端な値でも panic / wrap しない(checked。溢れたら不正入力として弾く)。
+    n.checked_mul(mult)
+        .and_then(|secs| crate::commands::now_unix().checked_sub(secs))
+        .ok_or_else(|| anyhow::anyhow!("--since の値が大きすぎます:'{s}'"))
+}
+
+/// 再接続カーソルを実時刻より少し過去へずらす余裕(秒)。CLI(利用者機)とサーバ(Pi)の
+/// 時計はズレ得るし、サーバの `since` は**ログのタイムスタンプ**で絞る一方こちらは受信の壁時計を
+/// 使うため、境界で**取りこぼす**リスクがある。診断ツールでは取りこぼしより重複の方が安全なので、
+/// 再接続時に窓を少し広げて重複側へ倒す(数秒の重複はあり得る = 仕様。厳密再開は将来 docker
+/// timestamps を使う余地)。
+const FOLLOW_RECONNECT_SLACK: i64 = 3;
+
+/// `--follow`:ログを実時に tail する。CF Tunnel は無音 ~100s で接続を切るので、予期せぬ EOF は
+/// 自動再接続する(Ctrl-C / パイプ切断まで戻らない = `tail -f` 相当)。再接続カーソルは受信の
+/// 壁時計を `FOLLOW_RECONNECT_SLACK` 秒戻した値(時計ズレでの取りこぼしを避け重複側へ倒す)。
+/// 旧サーバ(v43 未満)は端点が無く SPA fallback の text/html を返すので、**本文を流す前に
+/// content-type を検査**して明確に断る(HTML をログとして垂れ流さない)。初回は tail 分の遡り、
+/// 再接続後は since のみ(backlog を二重に出さない)。
+async fn follow_logs(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    tail: Option<usize>,
+    since: Option<i64>,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    let mut tail = tail;
+    let mut since = since;
+    let mut stdout = std::io::stdout();
+    loop {
+        let resp = api::service_logs_stream(c, server_url, token, id, tail, since).await?;
+        // content-type ガード:text/plain 以外(= 旧サーバの SPA fallback HTML)は流さない。
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !ct.starts_with("text/plain") {
+            bail!(
+                "このサーバは logs --follow に未対応です(サーバ更新が必要 — v43 以降)。--follow 無しの `tbm service logs <名前> --tail 200` でスナップショットは取得できます"
+            );
+        }
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.context("ログストリームの受信に失敗しました")?;
+            // 出力先が閉じた(例:`… --follow | head`)= BrokenPipe なら静かに終える。
+            // Rust は既定で SIGPIPE を無視するので write が Err を返す — これを拾わないと
+            // 消費者が消えても永遠にネットワークを読み続けてしまう。
+            if let Err(e) = stdout.write_all(&bytes).and_then(|_| stdout.flush()) {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e).context("標準出力への書き込みに失敗しました");
+            }
+        }
+        // ストリームが終わった(CF の無音切断 / サーバの 30 分上限 / コンテナ停止)。
+        // 再接続:遡りは不要なので tail=0、since は「今 − slack」(取りこぼし回避で重複側へ)。
+        tail = Some(0);
+        since = Some(crate::commands::now_unix() - FOLLOW_RECONNECT_SLACK);
+        // 軽い待機を挟んで再接続(切断直後の連打を避ける)。
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// metrics の text 表示(json は DTO 素通し)。
+fn print_metrics(name: &str, m: &ServiceMetricsDto) {
+    if !m.running {
+        println!("{name}: 停止中(running=false)");
+        if let Some(rc) = m.restart_count {
+            println!("  再起動回数: {rc}");
+        }
+        if m.oom_killed == Some(true) {
+            println!("  ⚠ 直近の終了は OOM(メモリ不足)でした");
+        }
+        return;
+    }
+    let cpu = m
+        .cpu_pct
+        .map(|v| format!("{v:.1}%"))
+        .unwrap_or_else(|| "—".into());
+    // メモリは MiB + 上限比(%)で。
+    let mem = match (m.mem_bytes, m.mem_limit_bytes) {
+        (Some(u), Some(l)) if l > 0 => format!(
+            "{:.0} MiB / {:.0} MiB ({:.0}%)",
+            u as f64 / 1_048_576.0,
+            l as f64 / 1_048_576.0,
+            u as f64 / l as f64 * 100.0
+        ),
+        (Some(u), _) => format!("{:.0} MiB", u as f64 / 1_048_576.0),
+        _ => "—".into(),
+    };
+    println!("{name}: 稼働中");
+    println!("  CPU:      {cpu}");
+    println!("  メモリ:   {mem}");
+    if let Some(secs) = m.uptime_secs {
+        println!("  稼働時間: {}", fmt_uptime(secs));
+    }
+    if let Some(rc) = m.restart_count {
+        println!("  再起動:   {rc} 回{}", if rc > 0 { "(クラッシュ / 再起動の疑い)" } else { "" });
+    }
+    if m.oom_killed == Some(true) {
+        println!("  ⚠ 直近の終了は OOM でした(`--memory` を上げるか使用量を減らす)");
+    }
+}
+
+/// 秒を人間可読な稼働時間に(d/h/m)。
+fn fmt_uptime(secs: i64) -> String {
+    let (d, h, m) = (secs / 86400, secs % 86400 / 3600, secs % 3600 / 60);
+    if d > 0 {
+        format!("{d}d {h}h {m}m")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
+/// deploy id の短縮(コンテナ命名と同じ 8 桁)。
+fn short_deploy_id(s: &str) -> String {
+    s.chars().take(8).collect()
 }
 
 // ===== verify(公開 URL の存活検証) =====

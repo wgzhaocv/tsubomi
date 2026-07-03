@@ -64,6 +64,15 @@ pub enum DbCmd {
         /// スカラー取得用:`count=$(tbm db query mydb "select count(*) from t" --tsv)`
         #[arg(long)]
         tsv: bool,
+        /// 結果を CSV(RFC4180、**列名ヘッダ付き**)で出す(表計算 / エクスポート用。`-o` より優先。
+        /// `--tsv` とは排他)
+        #[arg(long, conflicts_with = "tsv")]
+        csv: bool,
+        /// 位置パラメータを束縛する($1..$n。安全なバインドで手動エスケープ不要。複数指定可)。
+        /// 指定すると単一文のみ(拡張プロトコル)。型は SQL 側で明示:`--param 42` に対し
+        /// `where id = $1::int`。例:`tbm db query db "select * from t where id=$1::int" --param 42`
+        #[arg(long = "param", value_name = "VALUE")]
+        params: Vec<String>,
     },
 }
 
@@ -172,20 +181,35 @@ pub async fn run(
                 connect_psql(&url)?;
             }
         }
-        DbCmd::Query { name, sql, tsv } => {
+        DbCmd::Query {
+            name,
+            sql,
+            tsv,
+            csv,
+            params,
+        } => {
             let sql = read_sql_arg(&sql)?;
             let id = resolve_id(&c, &server_url, &token, &name).await?;
-            let resp = api::db_query(&c, &server_url, &token, &id, &sql, Vec::new()).await?;
-            if tsv {
-                // TSV は「行データだけを機械可読で」— シェル / AI のスカラー捕获用。
-                // 出力形式そのものの指定なので `-o` より優先する。警告は stderr(stdout を汚さない)。
+            // CLI の --param は非 NULL 値のみ(NULL は SQL 側で `NULL` / `NULLIF` を書く)。
+            // wire は Option<String> なので値は Some で包む。
+            let wire_params: Vec<Option<String>> = params.into_iter().map(Some).collect();
+            let resp = api::db_query(&c, &server_url, &token, &id, &sql, wire_params).await?;
+            // 切り詰め警告は stdout を汚さない stderr(TSV / CSV / text 共通)。
+            let truncation_warn = || {
                 if let Some(rs) = resp.results.iter().find(|r| r.truncated) {
                     eprintln!(
                         "⚠ 結果は上限 {} 行で切り詰められました。全量はアプリのドライバか `tbm db connect` で。",
                         rs.row_count
                     );
                 }
+            };
+            // TSV / CSV は「出力形式そのもの」の指定なので `-o` より優先する。
+            if tsv {
+                truncation_warn();
                 print!("{}", render_tsv(&resp));
+            } else if csv {
+                truncation_warn();
+                print!("{}", render_csv(&resp));
             } else if json {
                 // 共有 DTO(QueryResp)をそのまま出す:{ "results": [ { columns, rows,
                 // row_count, truncated, rows_affected }, ... ] }。jq で拾える。
@@ -267,6 +291,40 @@ fn escape_tsv_cell(s: &str) -> String {
         .replace('\t', "\\t")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+/// `--csv` の描画(RFC4180、**列名ヘッダ付き**)。表計算 / エクスポート向け(`--tsv` が
+/// 機械スカラー捕获なのに対し、こちらは人 / ツールが開く前提でヘッダを出す)。列を持たない
+/// 結果集合(INSERT/DDL 等)はスキップ、複数文は各集合を順に連結(TSV と同方針)。
+fn render_csv(resp: &QueryResp) -> String {
+    let mut out = String::new();
+    for rs in &resp.results {
+        if rs.columns.is_empty() {
+            continue;
+        }
+        let header: Vec<String> = rs.columns.iter().map(|c| escape_csv_cell(c)).collect();
+        out.push_str(&header.join(","));
+        out.push_str("\r\n"); // RFC4180 は CRLF 行区切り。
+        for row in &rs.rows {
+            let line: Vec<String> = row
+                .iter()
+                .map(|c| escape_csv_cell(c.as_deref().unwrap_or("")))
+                .collect();
+            out.push_str(&line.join(","));
+            out.push_str("\r\n");
+        }
+    }
+    out
+}
+
+/// CSV セルのエスケープ(RFC4180):`,` / `"` / 改行 / CR を含むセルは全体を `"` で囲み、
+/// 内部の `"` は `""` に倍化。含まないセルはそのまま。NULL は呼び出し側で空文字にしてある。
+fn escape_csv_cell(s: &str) -> String {
+    if s.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 /// 簡易な整列テーブル(NULL は `NULL` 表示)。幅は char 数で揃える
@@ -405,5 +463,33 @@ mod tests {
     #[test]
     fn tsv_empty_result_is_empty() {
         assert_eq!(render_tsv(&QueryResp { results: vec![] }), "");
+    }
+
+    #[test]
+    fn csv_has_header_and_rfc4180_quoting() {
+        let resp = QueryResp {
+            results: vec![set(
+                &["id", "note"],
+                vec![
+                    vec![Some("1"), Some("plain")],
+                    vec![Some("2"), Some("has,comma")],
+                    vec![Some("3"), Some("has\"quote")],
+                    vec![Some("4"), None],
+                ],
+            )],
+        };
+        assert_eq!(
+            render_csv(&resp),
+            "id,note\r\n1,plain\r\n2,\"has,comma\"\r\n3,\"has\"\"quote\"\r\n4,\r\n"
+        );
+    }
+
+    #[test]
+    fn csv_skips_non_select() {
+        // 列なし(非 SELECT)集合はヘッダも行も出さない。
+        let resp = QueryResp {
+            results: vec![set(&[], vec![]), set(&["n"], vec![vec![Some("7")]])],
+        };
+        assert_eq!(render_csv(&resp), "n\r\n7\r\n");
     }
 }

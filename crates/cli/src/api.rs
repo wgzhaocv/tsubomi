@@ -726,15 +726,81 @@ pub async fn service_logs(
     token: &str,
     id: &str,
     tail: Option<usize>,
+    since: Option<i64>,
 ) -> Result<String> {
-    // この最小ビルドの reqwest は .query() が無効なので URL に直接組む。
-    let url = match tail {
-        Some(n) => format!("{server_url}/api/services/{id}/logs?tail={n}"),
-        None => format!("{server_url}/api/services/{id}/logs"),
-    };
+    let url = format!(
+        "{server_url}/api/services/{id}/logs{}",
+        logs_query(tail, since)
+    );
     let resp = send_ok(c.get(url).bearer_auth(token)).await?;
     let r: LogsResp = resp.json().await.context("failed to parse logs response")?;
     Ok(r.logs)
+}
+
+/// `?tail=N&since=TS` を組む(この最小ビルドの reqwest は .query() が無効なので手組み)。
+/// logs / logs/stream が共有。
+fn logs_query(tail: Option<usize>, since: Option<i64>) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(n) = tail {
+        parts.push(format!("tail={n}"));
+    }
+    if let Some(s) = since {
+        parts.push(format!("since={s}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// ログの follow ストリームを開く(生 Response を返す — 呼び出し側が content-type を確認して
+/// から本文を bytes_stream で消費する)。**404 等は send_ok がエラーに変換**。旧サーバ(v43 未満)は
+/// この端点が無く SPA fallback で 200 + text/html を返すので、呼び出し側は content-type を検査する。
+pub async fn service_logs_stream(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    tail: Option<usize>,
+    since: Option<i64>,
+) -> Result<reqwest::Response> {
+    let url = format!(
+        "{server_url}/api/services/{id}/logs/stream{}",
+        logs_query(tail, since)
+    );
+    send_ok(c.get(url).bearer_auth(token)).await
+}
+
+/// 1 発の稼働指標(`tbm service metrics`)。旧サーバ(v43 未満)は端点が無く SPA fallback の
+/// HTML を 200 で返すので、**content-type を見て**未対応を判定する(logs --follow と同じ機構)。
+/// これで「JSON だがパース失敗(schema drift 等)」を「サーバ未対応」と誤診しない。
+pub async fn service_metrics(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<tsubomi_shared::ServiceMetricsDto> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/metrics"))
+            .bearer_auth(token),
+    )
+    .await?;
+    let is_json = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/json"));
+    if !is_json {
+        return Err(ApiError {
+            code: "not_found",
+            message: "このサーバは metrics に未対応です(サーバ更新が必要 — v43 以降)".to_owned(),
+        }
+        .into());
+    }
+    resp.json()
+        .await
+        .context("failed to parse metrics response")
 }
 
 /// 稼働中コンテナ内で 1 コマンドを **非対話**に実行し、stdout/stderr/exit_code を捕獲して返す

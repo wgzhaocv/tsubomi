@@ -81,6 +81,14 @@ pub fn resolve_token_from(over: Option<String>, cfg: Option<Config>) -> Result<S
         .context("not logged in (run: tbm login)")
 }
 
+/// 現在の unix 秒(deploy hook の ts / logs --follow の再接続カーソルが共有)。
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// 手元 repo の HEAD の full sha(40 桁)。`verify --for-sha HEAD` が使う(将来の
 /// `deploy --watch` も同じ解決を想定)。
 pub fn git_head_sha() -> Result<String> {
