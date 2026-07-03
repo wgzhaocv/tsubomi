@@ -360,29 +360,58 @@ pub async fn restart_stopped(state: &AppState, names: &[String]) {
 /// `logs` の出力バイト上限(行数 tail に加えた第二の安全弁。概算 1 MiB)。超えたら打ち切る。
 const LOGS_OUTPUT_CAP: usize = 1024 * 1024;
 
-/// 指定 service の(現行)コンテナの直近ログを text で返す(stdout+stderr、tail 行)。
-/// コンテナが無い(stopped / 未デプロイ)→ 空文字。stream を行ごとに集約する(follow はしない)。
+/// `logs_stream`(follow)の最大継続時間。CF Tunnel 等の逆プロキシ越しでは接続が
+/// 半開きになり得る(terminal 設計と同じ地雷)ので、client が正常に切れなくても
+/// server 側のストリームを必ず終わらせる backstop。EXEC_TIMEOUT / TERMINAL_MAX_SESSION と
+/// 同じく **この層で強制**する(呼び出し側は上限なしの流を手にできない)。
+const LOG_STREAM_MAX: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// `logs` / `logs_stream` 共用のオプション組み立て。tail 政策(既定 200、最大 2000 —
+/// 巨大 tail で docker ログ全量をメモリに載せない)と since の単位換算をここ 1 箇所に。
+/// bollard の since は i32(unix 秒)— wire は i64 のまま境界で飽和させる(Y2038)。
+fn logs_opts(tail: Option<usize>, since: Option<i64>, follow: bool) -> bollard::query_parameters::LogsOptions {
+    let mut b = LogsOptionsBuilder::default()
+        .stdout(true)
+        .stderr(true)
+        .follow(follow)
+        .tail(&tail.unwrap_or(200).min(2000).to_string());
+    if let Some(s) = since {
+        b = b.since(s.clamp(0, i32::MAX as i64) as i32);
+    }
+    b.build()
+}
+
+/// service の **任意状態**コンテナ名を返す(start-first 後は通常 1 つ)。不在は None。
+/// `logs` / `logs_stream` が共有する解決 — RUNNING 限定の `running_container_name` とは別契約で、
+/// 停止直前 / crash-loop 中のコンテナも観察対象にする(不在時の扱い = 空文字 / 400 は呼び出し側)。
+async fn any_container_name(state: &AppState, service_id: Uuid) -> AppResult<Option<String>> {
+    Ok(list_by_service(state, service_id)
+        .await?
+        .into_iter()
+        .find_map(|c| c.id))
+}
+
+/// 指定 service の(現行)コンテナの直近ログを text で返す(stdout+stderr、tail 行、
+/// `since` 以降のみ)。コンテナが無い(stopped / 未デプロイ)→ 空文字(完結した答え。
+/// 流式の `logs_stream` は逆に不在を 400 で断る — 空**流**は曖昧なため、理由はそちら)。
+/// stream を行ごとに集約する(follow はしない)。
 /// 注:`logs_by_name` とループが似るが **意図的に分離**する — こちらは API エンドポイント
 /// (`GET /services/:id/logs`)で Docker エラーを Err として表に出す契約。`logs_by_name` は
 /// 失敗 deploy 診断用の best-effort で取得失敗を握りつぶす = エラー契約が逆なので共有しない。
-pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> AppResult<String> {
+pub async fn logs(
+    state: &AppState,
+    service_id: Uuid,
+    tail: Option<usize>,
+    since: Option<i64>,
+) -> AppResult<String> {
     // service のコンテナ(start-first 後は通常 1 つ)。無ければ空。
-    let Some(name) = list_by_service(state, service_id)
-        .await?
-        .into_iter()
-        .find_map(|c| c.id)
-    else {
+    let Some(name) = any_container_name(state, service_id).await? else {
         return Ok(String::new());
     };
 
-    // tail に上限(既定 200、最大 2000)。巨大 tail で docker ログ全量をメモリに載せない。
-    let tail_s = tail.unwrap_or(200).min(2000).to_string();
-    let opts = LogsOptionsBuilder::default()
-        .stdout(true)
-        .stderr(true)
-        .tail(&tail_s)
-        .build();
-    let mut stream = state.docker.logs(&name, Some(opts));
+    let mut stream = state
+        .docker
+        .logs(&name, Some(logs_opts(tail, since, false)));
     let mut out = String::new();
     let mut truncated = false;
     while let Some(item) = stream.next().await {
@@ -407,17 +436,41 @@ pub async fn logs(state: &AppState, service_id: Uuid, tail: Option<usize>) -> Ap
     Ok(out)
 }
 
+/// 指定 service のログを **follow で流す**(stdout+stderr、tail 行から、`since` 以降。
+/// LOG_STREAM_MAX で必ず終わる)。快照 `logs` と同じ any-state 解析 — crash-loop 中も
+/// `restart=unless-stopped` で dockerd が follow を保つので観察に使える。フレームは
+/// `into_bytes`(生バイト、lossy 変換なし。到着順 = daemon の多重化順で快照と同じ)。
+/// コンテナ不在は 400 — 流式で静かな空流は「動いているが無言」と区別できず AI が
+/// 誤読するため、次の一手付きで明確に断る(404 は ensure_owned の領分)。
+pub async fn logs_stream(
+    state: &AppState,
+    service_id: Uuid,
+    tail: Option<usize>,
+    since: Option<i64>,
+) -> AppResult<futures_util::stream::BoxStream<'static, Result<bytes::Bytes, bollard::errors::Error>>>
+{
+    let Some(name) = any_container_name(state, service_id).await? else {
+        return Err(AppError::BadRequest(
+            "コンテナがありません(未デプロイ、または実体が削除済み)。先に `tbm deploy` でデプロイしてください".into(),
+        ));
+    };
+    // bollard の返す stream は transport の clone を所有する('static)— client 切断で
+    // hyper が body を drop すればこの stream ごと落ち、docker.sock への要求も取り消される。
+    let stream = state.docker.logs(&name, Some(logs_opts(tail, since, true)));
+    Ok(Box::pin(
+        stream
+            .map(|r| r.map(|line| line.into_bytes()))
+            .take_until(tokio::time::sleep(LOG_STREAM_MAX)),
+    ))
+}
+
 /// 指定した **名前**のコンテナの直近ログ(stdout+stderr、tail 行)。ベストエフォート
 /// (取得失敗・コンテナ不在は空文字)。失敗 deploy で掃除される前の死にかけコンテナから、
 /// クラッシュ原因をエラーに載せるために使う(`logs` は現行コンテナを service_id で引く別経路)。
 pub async fn logs_by_name(state: &AppState, name: &str, tail: usize) -> String {
-    let tail_s = tail.min(2000).to_string();
-    let opts = LogsOptionsBuilder::default()
-        .stdout(true)
-        .stderr(true)
-        .tail(&tail_s)
-        .build();
-    let mut stream = state.docker.logs(name, Some(opts));
+    let mut stream = state
+        .docker
+        .logs(name, Some(logs_opts(Some(tail), None, false)));
     let mut out = String::new();
     while let Some(item) = stream.next().await {
         match item {

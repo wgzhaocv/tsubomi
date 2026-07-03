@@ -43,7 +43,11 @@ pub fn build_router(state: AppState) -> Router {
         ));
 
     Router::new()
-        .nest("/api", public.merge(protected))
+        // /api 配下の未マッチはここで 404 に確定させる。これが無いと外側の SPA fallback に
+        // 落ちて **200 + index.html** が返り、新しい CLI が古いサーバの「未対応エンドポイント」を
+        // 機械判別できない(JSON を期待して HTML を掴む)。認証層の外で良い — 存在しない
+        // パスに秘密は無く、未ログインでも 404 が正しい答え。
+        .nest("/api", public.merge(protected).fallback(api_not_found))
         // インストールスクリプト(curl | sh で叩く短い URL)。配信時に
         // サーバがドメインを注入する(cli_release::serve_script)。
         .route("/install.sh", get(cli_release::install_sh))
@@ -62,4 +66,14 @@ async fn health() -> Json<Health> {
         status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
     })
+}
+
+/// `/api` 配下の未マッチ路径。本文は AppError と同じ**素の text**(サーバは JSON エラー体を
+/// 出さない契約 — CLI は本文を message にそのまま載せ、code は HTTP 404 から導く。
+/// JSON にすると CLI 出力に JSON-in-string の二重包みが出る)。
+async fn api_not_found() -> (axum::http::StatusCode, &'static str) {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        "この API パスはこのサーバにありません(サーバが古い可能性。プラットフォーム管理者にサーバ更新を確認してください)",
+    )
 }

@@ -25,7 +25,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use chrono::{DateTime, Utc};
@@ -115,6 +115,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/start", post(start))
         .route("/services/{id}/stop", post(stop))
         .route("/services/{id}/logs", get(logs))
+        .route("/services/{id}/logs/stream", get(logs_stream))
         .route("/services/{id}/exec", post(exec))
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
@@ -570,13 +571,14 @@ pub async fn set_visibility(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `?tail=N`。
+/// `?tail=N&since=TS`(since = unix 秒。快照 / 流式で共用)。
 #[derive(serde::Deserialize)]
 pub struct LogsQuery {
     tail: Option<usize>,
+    since: Option<i64>,
 }
 
-/// `GET /api/services/:id/logs?tail=N`:走っているコンテナの直近ログ(stdout+stderr)。
+/// `GET /api/services/:id/logs?tail=N&since=TS`:走っているコンテナの直近ログ(stdout+stderr)。
 pub async fn logs(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -584,8 +586,33 @@ pub async fn logs(
     Query(q): Query<LogsQuery>,
 ) -> AppResult<Json<LogsResp>> {
     ensure_owned(&state, auth.user_id, id).await?;
-    let logs = docker::logs(&state, id, q.tail).await?;
+    let logs = docker::logs(&state, id, q.tail, q.since).await?;
     Ok(Json(LogsResp { logs }))
+}
+
+/// `GET /api/services/:id/logs/stream?tail=N&since=TS`:ログを follow で流す(chunked、
+/// text/plain)。Bearer / session 両対応 — CSWSH は cookie 自動付与の問題なので、terminal と
+/// 違い `is_session` は要求しない(exec と同じ CLI 主用途の判断。§terminal 設計)。
+/// 半開き接続の打ち切りは docker.rs 側(LOG_STREAM_MAX)が担保済み。CF Tunnel は
+/// さらに手前の無音 ~100s で切ることがある — 再接続(since 引き継ぎ)は CLI 側の責務。
+pub async fn logs_stream(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<LogsQuery>,
+) -> AppResult<impl axum::response::IntoResponse> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let stream = docker::logs_stream(&state, id, q.tail, q.since).await?;
+    let body = axum::body::Body::from_stream(stream);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            // 動的な私有データ:中間キャッシュ禁止。nosniff は text/plain の誤 sniff 防止。
+            (header::CACHE_CONTROL, "no-store, private"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        body,
+    ))
 }
 
 /// exec の argv 制限(暴走入力だけ弾く。表示名と同じ感覚の素直な上限)。
