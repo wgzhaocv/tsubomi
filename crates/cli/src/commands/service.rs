@@ -29,6 +29,20 @@ pub enum ServiceCmd {
         /// `gh` が無い / 未ログインなら setup_commands を返すだけ(手動 fallback)。
         #[arg(long)]
         github: bool,
+        /// app が容器内で listen する port(省略 = 8080)。8080 以外を指定すると公開範囲の
+        /// 既定が private になる(自帯 DB 等の非 HTTP コンテナ想定。`--visibility` で上書き可)
+        #[arg(long)]
+        port: Option<i32>,
+        /// 公開範囲(省略 = port から自動:8080 → company / それ以外 → private)
+        #[arg(long, value_enum)]
+        visibility: Option<VisibilityArg>,
+        /// 有状態コンテナとして作成する(自帯 DB 等)。デプロイが stop-first(数秒の瞬断)になり、
+        /// 新旧コンテナが同じデータ目録を同時に開く事故を防ぐ。volume 注入をデータ目録に使うこと
+        #[arg(long)]
+        stateful: bool,
+        /// メモリ硬上限 MiB(省略 = 1024。範囲 128〜4096)
+        #[arg(long)]
+        memory: Option<i32>,
     },
     /// サービス一覧
     List,
@@ -292,7 +306,14 @@ pub async fn run(
                 println!("ロールバックしました(running)。");
             }
         }
-        ServiceCmd::Create { name, github } => {
+        ServiceCmd::Create {
+            name,
+            github,
+            port,
+            visibility,
+            stateful,
+            memory,
+        } => {
             // GitHub 連携(`gh repo create --source=.` と後の `git push`)は **カレントを git
             // リポジトリとして** GitHub に繋ぐので、repo でなければ service 作成(= サーバ側の
             // 副作用)の **前** に `git init` して半端な状態(service だけ出来て連携が失敗)を防ぐ。
@@ -306,7 +327,15 @@ pub async fn run(
             // 「remote add 失敗後に半端な状態が残る」という実利用フィードバックへの対処。
             // service 作成 **後** の gh 失敗は巻き戻さない(repo は再開に必要。orchestrate_json の
             // fallback = setup_commands で完遂できる)。
-            let resp = api::service_create(&c, &server_url, &token, &name)
+            // 任意フィールドは None を素通し(既定と visibility 推導の単一真源はサーバ)。
+            let req = tsubomi_shared::CreateServiceReq {
+                name,
+                container_port: port,
+                visibility: visibility.map(|v| v.as_str().to_owned()),
+                stateful: stateful.then_some(true),
+                memory_mb: memory,
+            };
+            let resp = api::service_create(&c, &server_url, &token, &req)
                 .await
                 .inspect_err(|_| {
                     if created_git {
@@ -314,6 +343,22 @@ pub async fn run(
                         eprintln!("(初期化した .git は削除しました — 再実行はクリーンな状態から)");
                     }
                 })?;
+            // 旧サーバは未知フィールドを serde 既定で黙って無視する — 「--port 5432 のつもりが
+            // 8080/company の service が出来る」静默降级を、作成結果の回显と突き合わせて確実に
+            // エラー化する。作成自体は完了しているので、次の一手(削除 → サーバ更新 → 再作成)を
+            // 文案に含める(AI フレンドリ規約)。
+            let svc = &resp.service;
+            let ignored = port.is_some_and(|p| svc.container_port != p)
+                || visibility.is_some_and(|v| svc.visibility != v.as_str())
+                || (stateful && !svc.stateful)
+                || memory.is_some_and(|m| svc.memory_mb != m);
+            if ignored {
+                bail!(
+                    "サーバがこの作成パラメータ(--port / --visibility / --stateful / --memory)に未対応です(サーバの更新が必要)。\
+                     サービス '{0}' は既定値で作成済みです — `tbm service delete \"{0}\"` で削除し、サーバ更新後に再作成してください",
+                    req.name
+                );
+            }
             if json {
                 if github {
                     // AI 経路でも GitHub 連携を Rust 側で組み立てる(setup_commands の bash 文字列を

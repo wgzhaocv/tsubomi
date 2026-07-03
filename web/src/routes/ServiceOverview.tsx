@@ -17,6 +17,7 @@ import {
   useSetServiceVisibility,
   useStartService,
   useStopService,
+  VISIBILITY_OPTIONS,
 } from "@/lib/services";
 import { useCopied } from "@/lib/use-copied";
 import { cn } from "@/lib/utils";
@@ -166,11 +167,7 @@ export default function ServiceOverview() {
           aria-label="公開範囲"
           value={visibility}
           disabled={!svc || setVis.isPending}
-          options={[
-            { label: "非公開(外部からアクセス不可)", value: "private" },
-            { label: "社内のみ(会社 IP のみ)", value: "company" },
-            { label: "一般公開(IP 制限なし)", value: "public" },
-          ]}
+          options={[...VISIBILITY_OPTIONS]}
           onChange={(v) => setVis.mutate(String(v))}
         />
         {setVis.error && (

@@ -401,12 +401,34 @@ pub struct ServiceDto {
     /// public(全網)。旧サーバ相手は default(空文字)= company 扱い。
     #[serde(default)]
     pub visibility: String,
+    /// true = 有状態(deploy は stop-first:数秒瞬断と引き換えにデータ目録を単独占有。
+    /// 自帯 DB 等)。false(既定)= start-first swap(無瞬断)。旧サーバ相手は default(false)。
+    #[serde(default)]
+    pub stateful: bool,
+    /// メモリ硬上限 MiB。旧サーバ相手は default(0 = 不明)— CLI の作成回显検証が
+    /// 「指定値が反映されていない」を正しく検出できる値にしておく。
+    #[serde(default)]
+    pub memory_mb: i32,
 }
 
-/// `POST /api/services` のリクエストボディ。
+/// `POST /api/services` のリクエストボディ。name 以外は任意 — 省略時の既定
+/// (port 8080 / visibility は port から推導 / stateful false / memory 1024)は
+/// **サーバが単一真源**として決める(CLI / web は None を素通しする)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServiceReq {
     pub name: String,
+    /// app が容器内で listen する port(省略 = 8080)。
+    #[serde(default)]
+    pub container_port: Option<i32>,
+    /// 公開範囲(省略 = port から推導:8080 → company / それ以外 → private)。
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// true = 有状態コンテナとして作成(deploy が stop-first になる)。省略 = false。
+    #[serde(default)]
+    pub stateful: Option<bool>,
+    /// メモリ硬上限 MiB(省略 = 1024)。
+    #[serde(default)]
+    pub memory_mb: Option<i32>,
 }
 
 /// service の registry 資格情報(GitHub Actions が docker login + push に使う)。

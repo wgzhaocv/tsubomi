@@ -96,7 +96,7 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         cpu_shares: Some(spec.cpu_shares as i64),
         // 容器加固(背骨「隔離は仕組みで守る」。memory 硬上限の隣に並べる宿主機保護):
         //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾で宿主機の PID を食い潰させない。
-        //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定 512MB と整合)。
+        //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定は 1024MB — migration 20260620)。
         pids_limit: Some(512),
         //  - log_config:json-file をローテート(10MB×3=最大 30MB/コンテナ)。無制限ログで
         //    宿主機ディスクを埋めさせない(平台のログ取得は引き続き docker logs = json-file)。

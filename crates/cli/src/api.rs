@@ -606,18 +606,18 @@ pub async fn service_list(
 
 /// service を作成し、GitHub 連携に必要な全値(deploy_key / registry creds / workflow など)を
 /// 受け取る。deploy_key / registry.pass はこの 1 回しか平文で返らない。
+/// 任意フィールド(port / visibility / stateful / memory)の既定はサーバが決める —
+/// CLI は None をそのまま送る(推導の単一真源はサーバ)。
 pub async fn service_create(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
-    name: &str,
+    req: &CreateServiceReq,
 ) -> Result<CreateServiceResp> {
     let resp = send_ok(
         c.post(format!("{server_url}/api/services"))
             .bearer_auth(token)
-            .json(&CreateServiceReq {
-                name: name.to_owned(),
-            }),
+            .json(req),
     )
     .await?;
     resp.json()

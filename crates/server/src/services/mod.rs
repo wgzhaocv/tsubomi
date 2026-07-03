@@ -43,6 +43,15 @@ const MAX_NAME_LEN: usize = 64;
 const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "api"];
 /// deploy_key の乱数バイト数(base64url で ≈43 字)。HMAC の鍵そのもの。
 const DEPLOY_KEY_BYTES: usize = 32;
+/// 平台の HTTP 契約港(PORT env の既定 = workflow / traefik の想定)。visibility 推導の基準。
+/// INSERT が常に列を明示するので実効真源はこの定数 — DDL の DEFAULT 8080 と一致させること。
+const DEFAULT_CONTAINER_PORT: i32 = 8080;
+const CONTAINER_PORT_RANGE: std::ops::RangeInclusive<i32> = 1..=65535;
+/// メモリ硬上限の既定 / 範囲(MiB)。既定 **1024** = migration 20260620 が OOM 対策で
+/// 512→1024 へ引き上げた DDL DEFAULT と一致させる(512 に戻すと是正の逆行)。
+/// 下限は最小級の app、上限は 16GB 共有ホストの節度。
+const DEFAULT_MEMORY_MB: i32 = 1024;
+const MEMORY_MB_RANGE: std::ops::RangeInclusive<i32> = 128..=4096;
 
 /// 公開範囲(`service_details.visibility`)。DB の CHECK と対を成す単一真源 —
 /// API 入力検証(不正値は 400)と route 分岐(ipallow 有無)をここに集約する。
@@ -87,6 +96,18 @@ impl Visibility {
     }
 }
 
+/// visibility 省略時の既定を port から推導する(stateful 設計 §0-B。推導は create のこの一度きり —
+/// 以後 port と visibility は独立)。8080 = 平台の HTTP 契約港 → 従来どおり company。それ以外 =
+/// 非 HTTP ソフト(自帯 DB 等)の想定 → private(traefik は HTTP しか話せないので route が
+/// 在っても乱码/502 の噪音にしかならない。公開したい非 8080 の HTTP 工具は明示指定で開ける)。
+fn default_visibility(container_port: i32) -> Visibility {
+    if container_port == DEFAULT_CONTAINER_PORT {
+        Visibility::Company
+    } else {
+        Visibility::Private
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/services", get(list).post(create))
@@ -123,6 +144,8 @@ type ServiceRow = (
     Option<String>,        // image_digest
     Option<DateTime<Utc>>, // last_deploy_at
     String,                // visibility
+    bool,                  // stateful
+    i32,                   // memory_mb
 );
 
 fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
@@ -141,6 +164,8 @@ fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
         last_deploy_at: r.9,
         url,
         visibility: r.10,
+        stateful: r.11,
+        memory_mb: r.12,
     }
 }
 
@@ -152,7 +177,7 @@ pub async fn list(
     let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
-                s.visibility
+                s.visibility, s.stateful, s.memory_mb
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.user_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL
           ORDER BY r.anon_seq",
@@ -176,7 +201,7 @@ pub async fn get_one(
     let row: Option<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
-                s.visibility
+                s.visibility, s.stateful, s.memory_mb
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
@@ -1123,6 +1148,34 @@ pub async fn create(
 ) -> AppResult<axum::response::Response> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
 
+    // 任意パラメータの確定(検証 + 既定)。既定の単一真源はここ — CLI / web は None を素通しする。
+    let container_port = req.container_port.unwrap_or(DEFAULT_CONTAINER_PORT);
+    if !CONTAINER_PORT_RANGE.contains(&container_port) {
+        return Err(AppError::BadRequest(format!(
+            "container_port は {}〜{} にしてください",
+            CONTAINER_PORT_RANGE.start(),
+            CONTAINER_PORT_RANGE.end()
+        )));
+    }
+    let memory_mb = req.memory_mb.unwrap_or(DEFAULT_MEMORY_MB);
+    if !MEMORY_MB_RANGE.contains(&memory_mb) {
+        return Err(AppError::BadRequest(format!(
+            "memory_mb は {}〜{} にしてください",
+            MEMORY_MB_RANGE.start(),
+            MEMORY_MB_RANGE.end()
+        )));
+    }
+    // visibility:明示指定 > port からの推導(§0-B。8080 → company / それ以外 → private)。
+    let visibility = match req.visibility.as_deref() {
+        Some(s) => Visibility::parse(s).ok_or_else(|| {
+            AppError::BadRequest(
+                "visibility は private / company / public のいずれかにしてください".into(),
+            )
+        })?,
+        None => default_visibility(container_port),
+    };
+    let stateful = req.stateful.unwrap_or(false);
+
     // 同名チェック(ゴミ箱内含む)。UNIQUE が最終ガードだが、先に弾いて分かりやすく。
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id=$1 AND kind='service' AND display_name=$2)",
@@ -1146,6 +1199,15 @@ pub async fn create(
     let deploy_key = tsubomi_shared::random_b64(DEPLOY_KEY_BYTES);
     let deploy_key_enc = state.crypto.encrypt(&deploy_key)?;
 
+    let new = NewService {
+        display_name: &display_name,
+        deploy_key_enc: &deploy_key_enc,
+        container_port,
+        visibility,
+        stateful,
+        memory_mb,
+    };
+
     // subdomain は display_name の slug を第一候補に、衝突 / 予約語なら乱数語を付けて再試行
     // (UNIQUE が最終ガード)。slug が空になる名前(記号だけ等)は "app" にフォールバック。
     let base = {
@@ -1162,16 +1224,7 @@ pub async fn create(
         if RESERVED_SUBDOMAINS.contains(&candidate.as_str()) {
             continue;
         }
-        match insert_attempt(
-            &state.db,
-            &state.config,
-            auth.user_id,
-            &display_name,
-            &candidate,
-            &deploy_key_enc,
-        )
-        .await
-        {
+        match insert_attempt(&state.db, &state.config, auth.user_id, &candidate, &new).await {
             Ok(dto) => {
                 created = Some(dto);
                 break;
@@ -1191,7 +1244,14 @@ pub async fn create(
         Some(auth.user_id),
         "service.create",
         dto.id,
-        json!({ "display_name": display_name, "subdomain": dto.subdomain }),
+        json!({
+            "display_name": display_name,
+            "subdomain": dto.subdomain,
+            "container_port": container_port,
+            "visibility": visibility.as_str(),
+            "stateful": stateful,
+            "memory_mb": memory_mb,
+        }),
         auth.client_ip.as_deref(),
     )
     .await;
@@ -1216,6 +1276,17 @@ pub async fn create(
     }))
 }
 
+/// create で確定済みの値(検証 + 既定解決済み)。insert_attempt へまとめて渡す
+/// (subdomain だけはリトライごとに変わるので別引数)。
+struct NewService<'a> {
+    display_name: &'a str,
+    deploy_key_enc: &'a [u8],
+    container_port: i32,
+    visibility: Visibility,
+    stateful: bool,
+    memory_mb: i32,
+}
+
 /// insert_attempt の失敗は 2 種:subdomain の UNIQUE 違反(呼び出し側でリトライ)と
 /// それ以外(そのまま返す)。
 enum InsertErr {
@@ -1235,10 +1306,10 @@ async fn insert_attempt(
     db: &PgPool,
     config: &Config,
     user_id: Uuid,
-    display_name: &str,
     subdomain: &str,
-    deploy_key_enc: &[u8],
+    new: &NewService<'_>,
 ) -> Result<ServiceDto, InsertErr> {
+    let display_name = new.display_name;
     // subdomain の UNIQUE 違反だけリトライさせ、それ以外(表示名衝突など)は
     // 既存の map_unique に委ねる(unique → 409 Conflict、その他 → Sqlx)。
     let classify = |e: sqlx::Error| -> InsertErr {
@@ -1280,11 +1351,17 @@ async fn insert_attempt(
     .map_err(classify)?;
 
     sqlx::query(
-        "INSERT INTO service_details (resource_id, subdomain, deploy_key_enc) VALUES ($1, $2, $3)",
+        "INSERT INTO service_details
+                (resource_id, subdomain, deploy_key_enc, container_port, visibility, stateful, memory_mb)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(id)
     .bind(subdomain)
-    .bind(deploy_key_enc)
+    .bind(new.deploy_key_enc)
+    .bind(new.container_port)
+    .bind(new.visibility.as_str())
+    .bind(new.stateful)
+    .bind(new.memory_mb)
     .execute(&mut *tx)
     .await
     .map_err(classify)?;
@@ -1299,11 +1376,13 @@ async fn insert_attempt(
         subdomain: subdomain.to_owned(),
         phase: "created".into(),
         desired_state: "stopped".into(),
-        container_port: 8080,
+        container_port: new.container_port,
         image_digest: None,
         last_deploy_at: None,
         url: config.service_url(subdomain),
-        visibility: Visibility::Company.as_str().into(), // DB の DEFAULT と一致(INSERT は列を指定しない)
+        visibility: new.visibility.as_str().into(),
+        stateful: new.stateful,
+        memory_mb: new.memory_mb,
     })
 }
 
@@ -1374,6 +1453,18 @@ mod tests {
         for s in ["api-backend", "web", "shop-x7k2", "9to5"] {
             assert!(validate_env_key(&default_service_env_var(s)).is_ok());
         }
+    }
+
+    #[test]
+    fn default_visibility_derives_from_port() {
+        // 8080(平台の HTTP 契約港)= 従来どおり company。
+        assert_eq!(default_visibility(8080), Visibility::Company);
+        // それ以外(自帯 DB 等の非 HTTP ソフト想定)= private。
+        assert_eq!(default_visibility(5432), Visibility::Private);
+        assert_eq!(default_visibility(6379), Visibility::Private);
+        assert_eq!(default_visibility(3000), Visibility::Private);
+        assert_eq!(default_visibility(1), Visibility::Private);
+        assert_eq!(default_visibility(65535), Visibility::Private);
     }
 
     #[test]

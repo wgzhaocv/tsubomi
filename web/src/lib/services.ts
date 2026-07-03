@@ -26,6 +26,11 @@ export type Service = {
   // 公開範囲:private(route 無し = 公網不可視)/ company(既定 = 会社 IP のみ)/
   // public(全網)。旧サーバ相手では欠ける = company 扱い。
   visibility?: string;
+  // true = 有状態(deploy は stop-first:数秒瞬断・データ目録の単独占有。自帯 DB 等)。
+  // 旧サーバ相手では欠ける = false 扱い。
+  stateful?: boolean;
+  // メモリ硬上限 MiB。旧サーバ相手では欠ける。
+  memory_mb?: number;
 };
 
 export type RegistryCreds = { host: string; user: string; pass: string };
@@ -48,6 +53,14 @@ export function serviceVisibility(svc?: Pick<Service, "visibility">): string {
   const v = svc?.visibility;
   return v === "private" || v === "public" ? v : "company";
 }
+
+// 公開範囲の選択肢(値 + 日本語ラベル)。詳細ページ(Radio)と作成フォーム(Select)が
+// 共有する単一真源 — 値・文言のドリフトを防ぐ。値はサーバの Visibility と対。
+export const VISIBILITY_OPTIONS = [
+  { value: "private", label: "非公開(外部からアクセス不可)" },
+  { value: "company", label: "社内のみ(会社 IP のみ)" },
+  { value: "public", label: "一般公開(IP 制限なし)" },
+] as const;
 
 // `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。Overview / Deploys で共用。
 export function shortDigest(d: string): string {
@@ -135,14 +148,24 @@ export function useServices() {
   });
 }
 
+// POST /api/services の入力。name 以外は任意 — 省略時の既定(port 8080 /
+// visibility は port から推導 / stateful false / memory 1024)はサーバが単一真源として決める。
+export type CreateServiceInput = {
+  name: string;
+  container_port?: number;
+  visibility?: string;
+  stateful?: boolean;
+  memory_mb?: number;
+};
+
 export function useCreateService() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (name: string): Promise<CreateServiceResult> => {
+    mutationFn: async (input: CreateServiceInput): Promise<CreateServiceResult> => {
       const res = await fetch("/api/services", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify(input),
       });
       if (!res.ok) return failBody(res);
       return (await res.json()) as CreateServiceResult;

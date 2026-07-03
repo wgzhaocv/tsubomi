@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, Server } from "lucide-react";
+import { ChevronDown, ChevronUp, Plus, Server } from "lucide-react";
 import { useNavigate } from "react-router";
 
 import { PageContainer } from "@/components/page-container";
@@ -7,16 +7,19 @@ import { PageMeta } from "@/components/page-meta";
 import { PhaseBadge } from "@/components/phase-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock } from "@/components/ui/codeblock";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
+import { Select } from "@/components/ui/select";
 import { Title } from "@/components/ui/title";
 import {
   type CreateServiceResult,
   type Service,
   useCreateService,
   useServices,
+  VISIBILITY_OPTIONS,
 } from "@/lib/services";
 
 // サービス一覧 + 作成導線。サービスは GitHub repo と 1:1 のデプロイ単位。
@@ -33,16 +36,52 @@ export default function Services() {
 
   const [modal, setModal] = useState<ModalState>(null);
   const [name, setName] = useState("");
+  // 詳細設定(自帯コンテナ用)。空 / auto = 送らない — 既定と visibility 推導の単一真源はサーバ。
+  const [advanced, setAdvanced] = useState(false);
+  const [port, setPort] = useState("");
+  const [visibility, setVisibility] = useState("auto");
+  const [stateful, setStateful] = useState(false);
+  const [memory, setMemory] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
 
   const submit = () => {
     const trimmed = name.trim();
     if (!trimmed || create.isPending) return; // 二重送信を防ぐ
-    create.mutate(trimmed, {
-      onSuccess: (svc) => {
-        setName("");
-        setModal({ kind: "setup", result: svc });
+    // 数値欄はクライアントで先に検証する:Number("abc") は NaN → JSON では null → サーバの
+    // serde は null を「省略」と同一視して黙って既定に倒す(範囲検証をすり抜ける)ため。
+    const portNum = port.trim() === "" ? undefined : Number(port);
+    if (portNum !== undefined && (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535)) {
+      setFormError("ポートは 1〜65535 の整数で入力してください");
+      return;
+    }
+    const memNum = memory.trim() === "" ? undefined : Number(memory);
+    if (memNum !== undefined && (!Number.isInteger(memNum) || memNum < 128 || memNum > 4096)) {
+      setFormError("メモリ上限は 128〜4096 の整数で入力してください");
+      return;
+    }
+    setFormError(null);
+    create.mutate(
+      {
+        name: trimmed,
+        // 未入力(undefined)は JSON.stringify が落とす = サーバ既定。
+        container_port: portNum,
+        visibility: visibility === "auto" ? undefined : visibility,
+        stateful: stateful || undefined,
+        memory_mb: memNum,
       },
-    });
+      {
+        onSuccess: (svc) => {
+          setName("");
+          setAdvanced(false);
+          setPort("");
+          setVisibility("auto");
+          setStateful(false);
+          setMemory("");
+          setFormError(null);
+          setModal({ kind: "setup", result: svc });
+        },
+      },
+    );
   };
 
   const setup = modal?.kind === "setup" ? modal.result : null;
@@ -162,8 +201,61 @@ export default function Services() {
               onChange={(e) => setName(e.target.value)}
               description="表示名です。GitHub リポジトリ名には自動生成の subdomain を使います。"
             />
-            {create.error && (
-              <p className="text-sm font-semibold text-[#e05a5a]">{create.error.message}</p>
+            <Button
+              type="text"
+              size="small"
+              className="self-start"
+              icon={
+                advanced ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />
+              }
+              onClick={() => setAdvanced(!advanced)}
+            >
+              詳細設定
+            </Button>
+            {advanced && (
+              <div className="flex flex-col gap-3">
+                <Input
+                  label="ポート"
+                  type="number"
+                  placeholder="8080"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  description="app が listen するポート。8080 以外は公開範囲の既定が「非公開」になります(自帯 DB 等の非 HTTP コンテナ用)。"
+                />
+                <Select
+                  label="公開範囲"
+                  value={visibility}
+                  onChange={setVisibility}
+                  options={[
+                    { key: "auto", label: "自動(ポートから推導)" },
+                    ...VISIBILITY_OPTIONS.map((o) => ({ key: o.value, label: o.label })),
+                  ]}
+                />
+                <Checkbox
+                  options={[
+                    {
+                      label:
+                        "有状態コンテナ(自帯 DB 等。デプロイは数秒の瞬断と引き換えにデータ目録を保護)",
+                      value: "stateful",
+                    },
+                  ]}
+                  value={stateful ? ["stateful"] : []}
+                  onChange={(vs) => setStateful(vs.includes("stateful"))}
+                />
+                <Input
+                  label="メモリ上限(MiB)"
+                  type="number"
+                  placeholder="1024"
+                  value={memory}
+                  onChange={(e) => setMemory(e.target.value)}
+                  description="コンテナのメモリ硬上限(128〜4096、既定 1024)。"
+                />
+              </div>
+            )}
+            {(formError || create.error) && (
+              <p className="text-sm font-semibold text-[#e05a5a]">
+                {formError ?? create.error?.message}
+              </p>
             )}
           </form>
         </Modal>
