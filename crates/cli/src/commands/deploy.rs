@@ -32,6 +32,10 @@ pub struct DeployArgs {
     /// 残り時間を配る)。text モードの CI 追跡は `gh run watch` に従う
     #[arg(long, default_value_t = 900)]
     pub timeout: u64,
+    /// デプロイ前の事前チェック(preflight)を飛ばす。既定は実行 —
+    /// .env 混入 / Dockerfile の COPY 元不在 / listen ポート不一致を**警告**する(阻止はしない)
+    #[arg(long)]
+    pub no_preflight: bool,
 }
 
 pub async fn run(
@@ -58,6 +62,16 @@ pub async fn run(
     let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
     let dc = api::deploy_config(&c, &server_url, &token, &id).await?;
 
+    // 1.5 preflight(既定 on):よくある落とし穴を **警告**する(阻止しない)。listen ポート照合の
+    // ために container_port を取る(service_get は追加 1 往復だが preflight は build 前の一度きり)。
+    if !args.no_preflight {
+        let port = api::service_get(&c, &server_url, &token, &id)
+            .await
+            .ok()
+            .map(|s| s.container_port);
+        run_preflight(&args.context, port);
+    }
+
     // 2. build + push(平台は build しない。ここはユーザ機の docker buildx)。
     let git_sha = tag();
     let image_tag = format!("{}/{}:{}", dc.registry.host, dc.service_id, git_sha);
@@ -70,7 +84,7 @@ pub async fn run(
         "git_sha": git_sha,
         "image_digest": digest,
         "commit_message": commit_subject(),
-        "ts": now_unix(),
+        "ts": crate::commands::now_unix(),
         "nonce": random_b64(16),
     }))
     .context("hook body の組み立てに失敗")?;
@@ -116,7 +130,17 @@ async fn run_watch(
     }
 
     // 対象 service(--watch は subdomain=repo 名の解決に表示名も使う)。
-    let (_id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+    let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+
+    // preflight(既定 on):CI が同じ repo をビルドするので push 前に落とし穴を警告する。
+    // --watch は cwd(=repo)を対象にする(--context は --local 用)。
+    if !args.no_preflight {
+        let port = api::service_get(&c, &server_url, &token, &id)
+            .await
+            .ok()
+            .map(|s| s.container_port);
+        run_preflight(".", port);
+    }
 
     // 全フェーズで 1 つの deadline を共有する(--timeout は「全体」の予算。各待機には残り時間を配る
     // ので合計が予算を超えない)。text モードの `gh run watch` だけは gh 自身が時間管理する例外。
@@ -243,6 +267,148 @@ fn parse_first_run(json: &str) -> Option<GhRun> {
         id: id.to_string(),
         url,
     })
+}
+
+// ===== preflight(デプロイ前の事前チェック。**警告のみ**・阻止しない) =====
+
+/// よくある落とし穴を build/push の前に警告する(高信号のものだけ)。判定できない項目は黙る
+/// (誤検知で AI/人を惑わせない)。すべて stderr。`--no-preflight` で無効化。
+/// - .env 混入:git 追跡下に .env* があり、Dockerfile が `COPY .` で .dockerignore が除外しない
+/// - Dockerfile の COPY/ADD 元(`--from=` 以外)が context に無い(タイプミス / 追加し忘れ)
+/// - `EXPOSE` が service の container_port と食い違う(502 の典型)
+fn run_preflight(context: &str, container_port: Option<i32>) {
+    let ctx = std::path::Path::new(context);
+    let mut warns: Vec<String> = Vec::new();
+
+    let dockerfile = std::fs::read_to_string(ctx.join("Dockerfile")).ok();
+    let dockerignore = std::fs::read_to_string(ctx.join(".dockerignore")).unwrap_or_default();
+
+    // (1).env 混入。git 追跡下の .env*(.env.example は除く)を拾う。
+    let tracked_env: Vec<String> = git_out(&["ls-files", "*.env", ".env*"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| {
+            let base = l.rsplit('/').next().unwrap_or(l);
+            base.starts_with(".env") && base != ".env.example" && base != ".env.sample"
+        })
+        .map(str::to_string)
+        .collect();
+    if !tracked_env.is_empty() {
+        warns.push(format!(
+            ".env らしきファイルが git 追跡下にあります({})。秘密が commit / イメージに載る恐れ — .gitignore と .dockerignore で除外してください",
+            tracked_env.join(", ")
+        ));
+    }
+    // Dockerfile が `COPY .`(context 丸ごと)で .dockerignore が .env を除外しないと、追跡外の
+    // ローカル .env もイメージに焼き込まれる。
+    if let Some(df) = &dockerfile
+        && copies_whole_context(df)
+        && ctx.join(".env").exists()
+        && !dockerignore_excludes_env(&dockerignore)
+    {
+        warns.push(
+            "ローカルの .env が `COPY .` でイメージに焼き込まれます(.dockerignore に `.env` を追加してください)".into(),
+        );
+    }
+
+    // (2)Dockerfile の COPY/ADD 元が context に無い(ocr_input を Dockerfile に足し忘れた類)。
+    if let Some(df) = &dockerfile {
+        for src in copy_sources(df) {
+            // glob / 変数展開 / リモート URL(`ADD https://…`)は判定しない(誤検知回避)。
+            // 素直な相対パスだけ存在確認する。
+            if src.contains('*') || src.contains('$') || src.contains("://") || src == "." {
+                continue;
+            }
+            if !ctx.join(&src).exists() {
+                warns.push(format!(
+                    "Dockerfile の COPY/ADD 元 '{src}' が context({context})に見つかりません(パス / 追加し忘れを確認)"
+                ));
+            }
+        }
+    }
+
+    // (3)EXPOSE と container_port の食い違い。**弱い信号**:tsubomi は各コンテナに
+    // `PORT=<container_port>` を注入し、アプリは `$PORT` を listen する契約なので、`$PORT` を
+    // 読むアプリは EXPOSE が何であれ正常(EXPOSE は基底イメージ由来 / 単なる文書のことが多い)。
+    // 固定ポート listen のアプリだけ問題になるので、断定せず気付きを促す文言にする。EXPOSE 無しは黙る。
+    if let (Some(df), Some(port)) = (&dockerfile, container_port)
+        && let Some(exposed) = first_expose(df)
+        && exposed != port
+    {
+        warns.push(format!(
+            "Dockerfile の EXPOSE {exposed} が service の container_port {port} と違います。`$PORT`(={port})を listen していれば問題ありませんが、{exposed} 固定で listen していると 502 になります"
+        ));
+    }
+
+    for w in &warns {
+        eprintln!("⚠ preflight: {w}");
+    }
+}
+
+/// Dockerfile に context 丸ごとの `COPY .`(= `COPY . <dst>` / `COPY --chown=… . <dst>`)があるか。
+fn copies_whole_context(dockerfile: &str) -> bool {
+    dockerfile.lines().any(|l| {
+        let l = l.trim();
+        if !l.to_uppercase().starts_with("COPY ") || l.contains("--from=") {
+            return false;
+        }
+        // 先頭の COPY と --flag(--chown 等)を除いた最初の src トークンが "." か "./"。
+        let first_src = l
+            .split_whitespace()
+            .skip(1)
+            .find(|t| !t.starts_with("--"));
+        matches!(first_src, Some(".") | Some("./"))
+    })
+}
+
+/// .dockerignore が **`.env` 自体を** 除外するか。`.env.example` のような行に釣られない
+/// (それは `.env.example` だけを無視し `.env` は依然 COPY される = 誤って警告を抑制しない)。
+/// リテラル `.env` に実際にマッチする代表的パターンだけを真とする。
+fn dockerignore_excludes_env(dockerignore: &str) -> bool {
+    dockerignore
+        .lines()
+        .map(str::trim)
+        .any(|l| matches!(l, ".env" | ".env*" | "*.env" | "**/.env" | ".env**"))
+}
+
+/// Dockerfile の COPY/ADD の **src トークン**(最後の dst を除く)を集める。`--from=` 付き
+/// (ステージ間コピー)は context 外なので除外。`--flag` は飛ばす。
+fn copy_sources(dockerfile: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for l in dockerfile.lines() {
+        let l = l.trim();
+        let up = l.to_uppercase();
+        if !(up.starts_with("COPY ") || up.starts_with("ADD ")) || l.contains("--from=") {
+            continue;
+        }
+        // 先頭の COPY/ADD と --flag を除いた引数列。最後は dst なので落とす。
+        let args: Vec<&str> = l
+            .split_whitespace()
+            .skip(1)
+            .filter(|t| !t.starts_with("--"))
+            .collect();
+        if args.len() >= 2 {
+            for src in &args[..args.len() - 1] {
+                out.push(src.trim_matches('"').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Dockerfile の最初の `EXPOSE <port>`(`EXPOSE 8080/tcp` の /tcp も落とす)。
+fn first_expose(dockerfile: &str) -> Option<i32> {
+    for l in dockerfile.lines() {
+        let l = l.trim();
+        if l.to_uppercase().starts_with("EXPOSE ") {
+            let tok = l[7..].split_whitespace().next()?;
+            let num = tok.split('/').next()?;
+            if let Ok(p) = num.parse::<i32>() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 /// git を実行して trimmed stdout を返す(成功かつ非空のときだけ Some)。tag / commit_subject /
@@ -415,13 +581,6 @@ fn commit_subject() -> Option<String> {
     git_out(&["log", "-1", "--pretty=%s"])
 }
 
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,5 +597,39 @@ mod tests {
     fn parse_first_run_empty_is_none() {
         assert!(parse_first_run("[]").is_none());
         assert!(parse_first_run("not json").is_none());
+    }
+
+    #[test]
+    fn copies_whole_context_detects_copy_dot() {
+        assert!(copies_whole_context("FROM x\nCOPY . /app\n"));
+        assert!(copies_whole_context("copy ./ /app")); // 小文字 + ./
+        assert!(copies_whole_context("COPY --chown=node:node . /app")); // --flag を跨いで検出
+        assert!(!copies_whole_context("COPY app /app")); // 具体パスは対象外
+        assert!(!copies_whole_context("COPY --from=build . /app")); // ステージ間は除外
+    }
+
+    #[test]
+    fn copy_sources_skips_from_and_flags() {
+        let df = "FROM x\nCOPY app pkg ./dst\nCOPY --from=b /a /b\nADD file.tar /out\n";
+        let srcs = copy_sources(df);
+        // COPY app pkg ./dst → src = app, pkg(最後の dst は除外)。--from= は丸ごと除外。
+        assert_eq!(srcs, vec!["app", "pkg", "file.tar"]);
+    }
+
+    #[test]
+    fn first_expose_parses_port_and_proto() {
+        assert_eq!(first_expose("FROM x\nEXPOSE 8080\n"), Some(8080));
+        assert_eq!(first_expose("EXPOSE 5432/tcp"), Some(5432));
+        assert_eq!(first_expose("FROM x\n"), None);
+    }
+
+    #[test]
+    fn dockerignore_env_detection() {
+        assert!(dockerignore_excludes_env(".env\nnode_modules\n"));
+        assert!(dockerignore_excludes_env("*.env"));
+        assert!(dockerignore_excludes_env(".env*"));
+        assert!(!dockerignore_excludes_env("node_modules\ndist\n"));
+        // .env.example だけ無視しても .env は COPY される = 除外とみなさない(誤抑制しない)。
+        assert!(!dockerignore_excludes_env(".env.example\n"));
     }
 }
