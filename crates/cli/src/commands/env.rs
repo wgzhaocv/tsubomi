@@ -27,7 +27,7 @@ pub enum EnvCmd {
         #[arg(required = true)]
         keys: Vec<String>,
     },
-    /// env の key 一覧(値は表示しない)
+    /// env の key 一覧(既定は key のみ。`--resolved` で解決値と由来も表示)
     List {
         /// サービスの表示名
         svc: String,

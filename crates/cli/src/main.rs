@@ -44,17 +44,20 @@ enum Cmd {
         #[arg(long)]
         web: bool,
     },
-    /// データベース(作成 / 一覧 / 改名 / 接続文字列 / rotate / 削除 / psql 接続)
+    /// データベース(create / list / rename / url(接続文字列)/ info(接続枠)/
+    /// rotate / delete / connect(psql)/ query(SQL 実行))
     Db {
         #[command(subcommand)]
         action: commands::db::DbCmd,
     },
-    /// キャッシュ(valkey。作成 / 一覧 / 改名 / rotate / 削除)
+    /// キャッシュ(valkey。create / list / rename / status / url(接続文字列)/
+    /// rotate / delete / connect(redis-cli))
     Cache {
         #[command(subcommand)]
         action: commands::cache::CacheCmd,
     },
-    /// サービス(作成 + GitHub 連携 / 一覧 / 状態)
+    /// サービス(create(+GitHub 連携)/ list / status / start / stop / logs / exec /
+    /// cat / verify(存活検証)/ rollback / visibility(公開範囲)/ delete)
     Service {
         #[command(subcommand)]
         action: commands::service::ServiceCmd,
@@ -73,12 +76,13 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::env::EnvCmd,
     },
-    /// ボリューム(作成 / 一覧 / 削除 + ファイル操作 ls/put/get/rm/mkdir/mv)
+    /// ボリューム(create / list / rename / delete + ファイル操作 ls / put / get /
+    /// rm / mkdir / mv)
     Volume {
         #[command(subcommand)]
         action: commands::volume::VolumeCmd,
     },
-    /// ゴミ箱(一覧 / 復元 / 完全削除)— 4 種リソース共通
+    /// ゴミ箱(list / restore / purge)— 4 種リソース共通
     Trash {
         #[command(subcommand)]
         action: commands::trash::TrashCmd,
@@ -89,7 +93,7 @@ enum Cmd {
     Logout,
     /// サーバのヘルスチェック
     Health,
-    /// AI エージェント向けデプロイ skill を管理(全 agent ターゲットへ書き出し / 表示)。
+    /// AI エージェント向けデプロイ skill を管理(install / where / print)。
     /// 普段は毎回の self-heal が自動で最新へ揃えるので、明示実行は強制再書き出し用。
     Skill {
         #[command(subcommand)]
@@ -211,4 +215,39 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 親コマンドの一行説明(about)が実際のサブコマンド名を全部列挙し続けることを保証する。
+    /// トップの `tbm --help` は AI の第一発見面 — 実装とズレた要約が最も害が大きい
+    /// (query / verify の存在を知らずに一段掘る羽目になる)。サブコマンドを足したら
+    /// about にも足す、という規約をここで機械化する。
+    #[test]
+    fn parent_about_lists_all_subcommands() {
+        let cmd = Cli::command();
+        for parent in cmd
+            .get_subcommands()
+            .filter(|c| c.get_subcommands().next().is_some())
+        {
+            let about = parent
+                .get_about()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            for sub in parent.get_subcommands() {
+                let name = sub.get_name();
+                if name == "help" {
+                    continue;
+                }
+                assert!(
+                    about.contains(name),
+                    "`tbm {}` の説明にサブコマンド '{}' が載っていません(main.rs の doc comment に追記すること)",
+                    parent.get_name(),
+                    name
+                );
+            }
+        }
+    }
 }
