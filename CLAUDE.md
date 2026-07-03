@@ -114,6 +114,22 @@ distinct 成功版)外の terminal 旧版を「index → 子」の順に明示 D
 共有する分を除外 — buildx キャッシュの同一子共有を dev で実証)。rollback 実効窓 = 5 版に確定。
 実装級・受容・残余は **`doc/paas-service-stateful-design.md` §10-E**。
 
+**1.0.20 後の追加(マイルストーン外):部署闭环 + 可観測性 + db query 強化(server v43 / tbm 1.0.21)**。
+AI 重度利用フィードバック第二弾。今回は **server も動かした**(v43 = Docker Hub push + `just ship`。
+無瞬断:infra `--no-recreate` + server 単換)。**server 側(W1-W3)**:(W1)**流式ログ**
+`GET /services/{id}/logs/stream`(bollard follow → `Body::from_stream`、30 分 backstop を docker.rs で
+強制、Bearer/session 両対応で CSWSH 無縁 = read-only 自資源)+ `/api` 未マッチを 404 に確定
+(旧サーバは SPA fallback で 200+HTML を返し新 CLI が未対応端点を機械判別できなかった穴を塞ぐ)。
+(W2)**単発 metrics** `GET /services/{id}/metrics`(inspect + running 時のみ stats、CPU/メモリ上限比/
+再起動/uptime/OOM。停止も 200 running:false)。(W3)**db query パラメータ化**(`QueryReq.params`、bind
+経路、`col_to_string` に binary format 分岐 + NUMERIC を bigdecimal で直解、human role・timeout・
+1000 行上限は不変)。**CLI 側(1.0.21)**:(C1)`verify --for-sha <sha|HEAD>`(CI ビルド窓もカバーする
+端到端待機 + serving 報告)/(C2)**`deploy --watch`**(push→Actions 追跡→デプロイ完走→検証を一括。
+gh はユーザ自身)/(C3)`logs --follow/--since`・`service metrics/deploys/open`・`db query --csv/--param`/
+(C4)**deploy preflight**(.env 混入 / COPY 元不在 / EXPOSE 不一致を build 前に警告・阻止しない)。
+本番 e2e 済み(2026-07-03、server v43 / tbm 1.0.21):metrics 実値・logs --follow 実時流式・
+db --param/--csv、無瞬断展開(全 app 200 継続)。実装は各切片の commit と本段落。
+
 **stateful 後の追加(マイルストーン外):CLI の AI フレンドリ改善(tbm 1.0.20)**。AI 利用の
 フィードバック起点の CLI 純粋な磨き込み(server はほぼ不変)。(1)**`tbm db query --tsv`**:
 JSON の `results[0].rows[0][0]` を毎回 jq/node で剥く手間を無くす行だけのタブ区切り出力

@@ -175,6 +175,13 @@ repo 作成・secret / variable 設定・`.github/workflows/tsubomi-deploy.yml` 
 `github.configured` が true なら完了)。あとは `git add/commit/push` → GitHub Actions が自動でビルド &
 デプロイ。
 
+**一括で回すなら `tbm deploy --watch`(推奨)。** `git add/commit` 後にこれ 1 本で:未 push なら
+push → GitHub Actions の run を追跡(URL を表示)→ CI 成功後、その commit のデプロイ完走を待って
+検証(§5 の子リソース検証まで)を自動でやる。手で `git push → run 確認 → status 輪詢 → verify` を
+繰り返す必要がない。`gh` が要る(無ければ上のインストール案内、または `--local` へ)。全体の待ち上限は
+`--timeout <秒>`(既定 900)。**要点:commit は自分でやる**(--watch は未 push を push するだけで
+`git add`/`commit` はしない)。CI が失敗したら失敗ログを出して非零終了する。
+
 - **まだ `--github` を付けていない場合**:`--github` は作成時のみ有効なので、最初の `tbm service create
   <名前> --github` で付けるのが要点(既存 service への再 create は重名 409)。create 応答(JSON)には
   `setup_commands`(`gh repo create` / `gh secret set` / `gh variable set`。**POSIX shell 前提**)も
@@ -236,9 +243,12 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    **デプロイ直後は `--wait` を付ける**(`tbm service verify <service名> --wait`):進行中の
    デプロイの完走を待ってから検証する(deploy 送信〜切替は非同期で数秒〜数十秒かかる。
    `--wait` 無しで即叩くと旧版や 502 を見る。デプロイが failed ならその error を出して非零終了 =
-   status の手動輪詢は不要)。上限は `--timeout <秒>`(既定 180)。注意:GitHub 経路で CI が
-   まだビルド中(hook 未達)の間は「最新デプロイ=旧版の succeeded」なので待たずに検証して
-   しまう — その場合は Actions の完了を待ってから実行する。
+   status の手動輪詢は不要)。上限は `--timeout <秒>`(既定 180)。報告には現在 serving 中の
+   デプロイ(`serving.git_sha` / `deploy_id`)も載る = 「見ているのが自分の新版か」が分かる。
+   **端到端で確実にするなら `--for-sha <sha|HEAD>`**(`tbm service verify <名前> --for-sha HEAD`):
+   その commit のデプロイが**到着してから**完走を待つので、GitHub 経路で CI がまだビルド中
+   (hook 未達)の窓もカバーする(`--wait` 単体はこの窓を待てず旧版を検証してしまう)。
+   `deploy --watch` は内部でこれを使うので、--watch を使うなら verify は自動で済む。
    **`visibility=private` のサービスは公開 URL 自体が無効**なので verify は明確な文言でスキップ +
    非零終了する(接続失敗ではない = サーバ障害と誤読しない)。動作確認は `tbm service logs` /
    `tbm service exec`、または内部リンク先の caller コンテナから
@@ -252,10 +262,16 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
      直近デプロイの失敗が典型。
    - `tbm service cat <service名> <パス>` でコンテナ内のファイル(ビルド成果物・設定)を直接確認できる
      (`exec -- cat` の糖衣)。`tbm service exec <service名> -- <cmd>` で任意コマンドも。
+   - **実時ログ**は `tbm service logs <名前> --follow`(Ctrl-C / パイプ切断まで tail。`--since 5m`
+     で遡り開始)。**稼働指標**は `tbm service metrics <名前>`(CPU / メモリの上限比 / 再起動回数 /
+     uptime / OOM = クラッシュループ・OOM の切り分け)。**デプロイ履歴**は `tbm service deploys <名前>`
+     (rollback の戻し先 id 選び)。いずれも server v43+ が必要(旧サーバは明確に未対応を返す)。
 3. DB / volume / cache を使うなら、実際に「書き込み → 読み戻し」で永続と隔離を確かめる。DB 側の
    読み戻しは **`tbm db query <db名> "<SQL>" --tsv`** が速い(psql 不要。`--tsv` = 行だけの
-   タブ区切り・列名なし・NULL は空 — スカラーなら `$(…)` で一発捕获。構造が要るときは `-o json` の
-   `results[].rows`。結果は 1 文あたり最大 1000 行で切り詰め — 大結果はアプリのドライバで)。
+   タブ区切り・列名なし・NULL は空 — スカラーなら `$(…)` で一発捕获。表計算向けにヘッダ付き CSV は
+   `--csv`。構造が要るときは `-o json` の `results[].rows`。結果は 1 文あたり最大 1000 行で切り詰め —
+   大結果はアプリのドライバで)。値を安全に束ねるなら **`--param`**(位置バインド $1..$n。手動
+   エスケープ不要。型は SQL 側で `$1::int` と明示。NULL は SQL に直書き。server v43+)。
    注入した値が何に解決されるかは **`tbm env list <service名> --resolved`**(由来付き・秘密は伏せる)
    で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので
    rotate 後は要再デプロイ。
