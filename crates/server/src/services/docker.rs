@@ -18,6 +18,7 @@ use bollard::models::{
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     LogsOptionsBuilder, RemoveContainerOptionsBuilder, StatsOptionsBuilder,
+    StopContainerOptionsBuilder,
 };
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -244,8 +245,15 @@ async fn list_by_service(state: &AppState, service_id: Uuid) -> AppResult<Vec<Co
 /// 名前 or id でコンテナを停止 + 強制削除(冪等)。**削除の失敗は伝播する**(stop / delete /
 /// purge が孤児を取り残さないため。stop は既に止まっていてもよいので無視)。swap の片付けだけは
 /// best-effort にしたいので呼び出し側(remove_one / run_digest の remove_others)で握り潰す。
-async fn force_remove(state: &AppState, name_or_id: &str) -> AppResult<()> {
-    let _ = state.docker.stop_container(name_or_id, None).await;
+/// `grace_secs` は SIGTERM → SIGKILL の猶予(None = docker 既定 10s。stateful の停止は
+/// `STATEFUL_STOP_GRACE_SECS` を渡す — DB の flush を SIGKILL で断ち切らない。§0-G)。
+async fn force_remove(
+    state: &AppState,
+    name_or_id: &str,
+    grace_secs: Option<i32>,
+) -> AppResult<()> {
+    let opts = grace_secs.map(|t| StopContainerOptionsBuilder::default().t(t).build());
+    let _ = state.docker.stop_container(name_or_id, opts).await;
     let rm = RemoveContainerOptionsBuilder::default().force(true).build();
     state
         .docker
@@ -260,6 +268,7 @@ async fn remove_service_containers(
     state: &AppState,
     service_id: Uuid,
     keep: Option<&str>,
+    grace_secs: Option<i32>,
 ) -> AppResult<()> {
     for c in list_by_service(state, service_id).await? {
         // docker の名前は "/name" 形式で入るので先頭スラッシュを外して比較する。
@@ -274,27 +283,78 @@ async fn remove_service_containers(
             continue;
         }
         if let Some(id) = c.id {
-            force_remove(state, &id).await?;
+            force_remove(state, &id, grace_secs).await?;
         }
     }
     Ok(())
 }
 
-/// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 / stop / 失敗時の全掃除)。冪等。
+/// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 / stop / purge /
+/// reconcile 掃除の共有路径)。冪等。猶予は「何を止めるか」で決まるので **ここで stateful を
+/// 読む** — 呼び出し側に判断を配らない(deploy の stop-first だけ丁寧に止めて stop / delete が
+/// SIGKILL、では §0-G の意味が無い — altitude review 2026-07-03)。孤児(行なし)や
+/// soft-delete 済みでも service_details 行は purge まで残るので読める。無ければ既定(10s)。
 pub async fn stop_remove(state: &AppState, service_id: Uuid) -> AppResult<()> {
-    remove_service_containers(state, service_id, None).await
+    let stateful: bool =
+        sqlx::query_scalar("SELECT stateful FROM service_details WHERE resource_id = $1")
+            .bind(service_id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(false);
+    let grace = stateful.then_some(STATEFUL_STOP_GRACE_SECS);
+    remove_service_containers(state, service_id, None, grace).await
 }
 
-/// 指定 service の **keep_name 以外** を停止 + 削除(start-first swap の収尾:新コンテナを
-/// 起こして route を切り替えた後に、旧コンテナだけを消す)。冪等。
+/// 指定 service の **keep_name 以外** を停止 + 削除(swap / stop-first の収尾:新コンテナを
+/// 起こして route を切り替えた後に、旧コンテナだけを消す)。冪等。旧は stateless なら即殺で
+/// よく(トラフィックは新へ切替済み)、stateful なら stop-first が既に丁寧に止めてある =
+/// どちらも猶予不要(None)。
 pub async fn remove_others(state: &AppState, service_id: Uuid, keep_name: &str) -> AppResult<()> {
-    remove_service_containers(state, service_id, Some(keep_name)).await
+    remove_service_containers(state, service_id, Some(keep_name), None).await
 }
 
-/// 名前指定で 1 つだけ停止 + 削除(start-first 失敗時の新コンテナ片付け)。best-effort
+/// 名前指定で 1 つだけ停止 + 削除(deploy 失敗時の新コンテナ片付け)。best-effort
 /// (失敗しても reconcile が孤児として後で掃除する。ここで失敗を伝播させない)。
 pub async fn remove_one(state: &AppState, name: &str) {
-    let _ = force_remove(state, name).await;
+    let _ = force_remove(state, name, None).await;
+}
+
+/// stateful の停止猶予(SIGTERM → SIGKILL 秒数)。docker 既定の 10s だと DB の flush が
+/// 間に合わず SIGKILL に倒れ、次回起動が WAL 回復頼みになる(§0-G)。deploy の stop-first と
+/// stop / delete(mod.rs::stop_containers)が共有する。
+pub(crate) const STATEFUL_STOP_GRACE_SECS: i32 = 30;
+
+/// stateful deploy の stop-first(設計 §3):指定 service の**走行中**コンテナを止める。
+/// **remove はしない** — 新コンテナの起動が失敗したら `restart_stopped` で再 start する退路を
+/// 残す(§0-E。stopped 容器の網 endpoint / 別名 / binds は docker が温存する = 再配線不要)。
+/// 止めた名前の列を返す(走行中の列挙は `presence` と共有 = 名前導出の単一真源)。
+/// 途中で失敗したら**既に止めた分をここで再 start してから** Err(半端な停止状態を呼び出し側に
+/// 押し付けない — 呼び出し側は Err 時に旧が走り続けている前提でよい)。
+pub async fn stop_running(
+    state: &AppState,
+    service_id: Uuid,
+    grace_secs: i32,
+) -> AppResult<Vec<String>> {
+    let (_, running) = presence(state, service_id).await?;
+    for (i, name) in running.iter().enumerate() {
+        let opts = StopContainerOptionsBuilder::default().t(grace_secs).build();
+        if let Err(e) = state.docker.stop_container(name, Some(opts)).await {
+            restart_stopped(state, &running[..i]).await;
+            return Err(AppError::Other(anyhow!("コンテナ停止に失敗({name}): {e}")));
+        }
+    }
+    Ok(running)
+}
+
+/// stop-first の退路:`stop_running` で温存した旧コンテナを再 start する(best-effort・
+/// per-item log)。新コンテナの起動 / DB 記録が失敗した時に旧版へ自動復旧する(§0-E)。
+/// これも失敗したら service は停止状態のまま — deploys.error に原因が残り、退路は rollback。
+pub async fn restart_stopped(state: &AppState, names: &[String]) {
+    for name in names {
+        if let Err(e) = state.docker.start_container(name, None).await {
+            tracing::error!(error = ?e, name, "stateful 退路:旧コンテナの再 start に失敗(service は停止状態。rollback / 再 deploy で復旧)");
+        }
+    }
 }
 
 /// `logs` の出力バイト上限(行数 tail に加えた第二の安全弁。概算 1 MiB)。超えたら打ち切る。

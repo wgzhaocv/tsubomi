@@ -293,14 +293,14 @@ async fn run_digest_inner(
     git_sha: &str,
 ) -> AppResult<()> {
     // 起動に必要な確定値を引く。
-    let row: Option<(String, i32, i32, i32, String)> = sqlx::query_as(
-        "SELECT subdomain, container_port, memory_mb, cpu_shares, visibility
+    let row: Option<(String, i32, i32, i32, String, bool)> = sqlx::query_as(
+        "SELECT subdomain, container_port, memory_mb, cpu_shares, visibility, stateful
            FROM service_details WHERE resource_id = $1",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?;
-    let (subdomain, container_port, memory_mb, cpu_shares, visibility) =
+    let (subdomain, container_port, memory_mb, cpu_shares, visibility, stateful) =
         row.ok_or(AppError::NotFound)?;
     let visibility = Visibility::from_db(&visibility);
 
@@ -315,7 +315,7 @@ async fn run_digest_inner(
     env.push(("PORT".to_string(), container_port.to_string()));
     let env = dedup_env_last(env);
 
-    // start-first:新コンテナを deploy 一意名で起こす(旧は触らない)。
+    // 新コンテナは deploy 一意名で起こす。
     let new_name = container_name(service_id, deploy_id);
     let spec = RunSpec {
         service_id,
@@ -329,18 +329,31 @@ async fn run_digest_inner(
         binds,
     };
 
-    // 新コンテナを起こし存活を確認する(create+start → is_live)。失敗したら新コンテナだけ
-    // 片付けて Err(旧コンテナ / route は無傷なので旧版が生き続ける = §6.4)。
-    if let Err(e) = start_container(state, &spec, &image_ref).await {
-        docker::remove_one(state, &new_name).await;
-        return Err(e);
-    }
+    // stateful は **stop-first**(設計 §3):swap は新旧コンテナが同一データ目録を同時に開く
+    // (postgres の postmaster.pid 防双開は跨 PID namespace で信頼できない → 双開 = 破壊)ため
+    // 禁忌。先に旧を止める — ただし **remove はしない**(§0-E:新の起動が失敗したら再 start で
+    // 自動復旧する退路。stopped 容器の網 endpoint / binds は docker が温存する)。瞬断は stateful
+    // の契約(§0-F)。pull / 注入解決は上で済ませてある = 停止窓を最小にする順序。
+    // stateless は空 Vec = 以後の復旧呼び出しが全て no-op(現行の start-first と完全に同じ動き)。
+    let stopped_old: Vec<String> = if stateful {
+        docker::stop_running(state, service_id, docker::STATEFUL_STOP_GRACE_SECS).await?
+    } else {
+        Vec::new()
+    };
 
-    // 成功を **route 切替の前に** DB へ記録する。DB 書き込み(最も多い失敗点)は route がまだ
-    // 旧を指す段階で起き、失敗しても旧版がそのまま生き続ける(§6.4 の安全な失敗点)。失敗時は
-    // 新コンテナを片付けて Err。
-    if let Err(e) = commit_success(state, deploy_id, service_id, image_digest).await {
+    // 新コンテナを起こし存活を確認(create+start → is_live)→ 成功を route 切替の **前に**
+    // DB へ記録する(DB 書き込みは最も多い失敗点で、route がまだ旧を指す §6.4 の安全な失敗点)。
+    // どちらで失敗しても巻き戻しは同一なので一箇所に畳む:新を片付け、stateful は温存した旧を
+    // 再 start して旧版へ自動復旧(§0-E。stateless と違い旧は stopped なので**能動的に**戻す —
+    // 設計 §6 地雷 2。stateless は stopped_old が空 = no-op で、旧が走ったまま = 従来どおり)。
+    let staged = async {
+        start_container(state, &spec, &image_ref).await?;
+        commit_success(state, deploy_id, service_id, image_digest).await
+    }
+    .await;
+    if let Err(e) = staged {
         docker::remove_one(state, &new_name).await;
+        docker::restart_stopped(state, &stopped_old).await;
         return Err(e);
     }
 
@@ -368,10 +381,14 @@ async fn run_digest_inner(
         ) {
             Ok(()) => true,
             Err(e) => {
-                // route 切替失敗:旧を消すと route→消えた旧 で 502 になるため旧を **残す**
-                // (旧版が当面トラフィックを受ける。reconcile / 再 deploy が route を直す)。
-                tracing::error!(error = ?e, %service_id, "route 切替に失敗。旧版を温存(reconcile / 再 deploy で収束)");
-                false
+                // route 切替失敗。**stateless**:旧を消すと route→消えた旧 で 502 になるため旧を
+                // 残す(旧版が当面トラフィックを受ける。reconcile / 再 deploy が route を直す)。
+                // **stateful**:旧は stop-first で既に停止済み =「温存」に serving の意味が無く、
+                // 公開 route はどのみち stale(→ reconcile が ≤30s で新へ修復)。ここで止めると
+                // 内部リンクまで新版へ向かないまま残るので、内部カットオーバーは進める(codex
+                // review 2026-07-03 #2)。
+                tracing::error!(error = ?e, %service_id, stateful, "route 切替に失敗(stateless=旧版を温存 / stateful=内部切替は続行。reconcile / 再 deploy で収束)");
+                stateful
             }
         }
     };

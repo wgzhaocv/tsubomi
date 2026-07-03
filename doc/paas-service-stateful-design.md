@@ -76,8 +76,12 @@
 - **§0-F 瞬断は stateful の契約**:正常時 = stop→start の数秒。失敗時 = 旧再起動までの十数秒。
   受容(データ整合の対価。無瞬断が欲しいものは stateful ではない)。
 - **§0-G graceful stop の猶予 30s**:DB は SIGTERM 後の flush に時間がかかる。docker stop の
-  t=10s 既定では SIGKILL に倒れて WAL 回復頼みになるため、stateful の stop は t=30 を明示。
-  (stateless の stop_remove は現状のまま。)
+  t=10s 既定では SIGKILL に倒れて WAL 回復頼みになるため、stateful の停止は t=30 を明示。
+  **猶予は「何を止めるか」で決まる** — deploy の stop-first だけでなく、共有停止路径
+  `docker::stop_remove`(stop / delete / purge / reconcile 掃除)が **自分で stateful を読んで**
+  猶予を決める(当初「stateless の stop_remove は現状のまま」と書いたのは stop_remove を
+  stateless 専用と誤認した mis-scope — altitude review 2026-07-03 で訂正)。stateless は従来
+  どおり docker 既定 10s。
 - **§0-H `_HOST`/`_PORT` の名前は `_URL` の作法を踏襲**:注入 env_var の末尾 `_URL` を剥いだ
   BASE に `_HOST` / `_PORT` を付ける(cache の `key_prefix_env` と同型)。値:HOST = callee の
   subdomain(docker 網別名)、PORT = callee の container_port。**`_URL` は温存**(HTTP app の互換)。
@@ -236,3 +240,11 @@ env.push((format!("{base}_PORT"), port.to_string()));            // 追加
 - **§10-D stateful の後から変更入口**(false→true 片方向、visibility 同型の専用 POST):
   既存 workaround service(DB を stateless で走らせている人)が現れたら。
 - **compose_spec 多容器**(tech-design M6):同生死 sidecar/worker の需要が立ってから。
+- **§10-E registry GC の keep-set 欠陥(既存バグ・本設計とは独立。S2 の dev e2e で発見)**:
+  日次 GC(`registry::garbage_collect` = stock registry の未参照回収)は「tag に参照されない
+  manifest」を消すが、**同じ tag への再 push(同一 commit の deploy --local 再実行 / GH Action
+  の re-run — build は非再現なので digest は毎回変わる)でも旧 digest は失参照になる**。後続
+  deploy が失敗した場合、「現に serving 中 = 直近成功 deploy の digest」が GC に食われ、
+  start / reconcile 復活 / rollback の digest pull が 404 で全滅する(dev で実証:GC 直後の
+  `service start` が 500)。修正案:GC 前に各 service の `image_digest`(+ rollback 用の直近
+  成功 N 版)を保護 tag として付け直す、等。stateful(DB)は復活不能の実害が大きいので優先度中。
