@@ -10,7 +10,7 @@
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use anyhow::anyhow;
-use tsubomi_shared::ExecResult;
+use tsubomi_shared::{ExecResult, ServiceMetricsDto};
 use bollard::models::{
     ContainerCreateBody, ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum,
     HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
@@ -734,6 +734,16 @@ pub struct ServiceStat {
     pub mem_bytes: i64,
 }
 
+/// 1 サンプルの stats 結果(`sample_stats` の戻り)。
+struct Sample {
+    /// CPU 使用率(%)。算出不能(system delta 0 / フィールド欠落)は None。
+    cpu_pct: Option<f64>,
+    /// メモリ使用量(bytes)。
+    mem_bytes: u64,
+    /// メモリ硬上限(bytes)。取得不能は None(`--memory` 未設定 = 宿主機 RAM を返し得る)。
+    mem_limit: Option<u64>,
+}
+
 /// 指定 service の **稼働中** コンテナを 1 サンプル stats する(owner 可視化、§3.3)。
 /// コンテナ不在 / 停止中 / 取得失敗は None(UI は「-」表示 = best-effort)。
 ///
@@ -748,25 +758,79 @@ pub async fn stats(state: &AppState, service_id: Uuid) -> Option<ServiceStat> {
         .into_iter()
         .find(|c| matches!(c.state, Some(ContainerSummaryStateEnum::RUNNING)))
         .and_then(|c| c.id)?;
-    let (cpu_pct, mem_bytes) = sample_stats(state, &name).await?;
+    let s = sample_stats(state, &name).await?;
     Some(ServiceStat {
-        cpu_pct,
-        mem_bytes: mem_bytes as i64,
+        cpu_pct: s.cpu_pct,
+        mem_bytes: s.mem_bytes as i64,
     })
 }
 
-/// 1 コンテナ(名前 or id)を 1 サンプル stats して `(cpu_pct, mem_bytes)` を返す。
-/// `stream=false` で daemon の 2 サンプルから precpu を埋めるので CPU% が出る(~1 秒)。
-/// service stats と platform stats が共有する。取得失敗は None(best-effort)。
-async fn sample_stats(state: &AppState, name_or_id: &str) -> Option<(Option<f64>, u64)> {
+/// 1 コンテナ(名前 or id)を 1 サンプル stats する。`stream=false` で daemon の 2 サンプルから
+/// precpu を埋めるので CPU% が出る(~1 秒)。service stats / platform stats / metrics が共有。
+/// 取得失敗は None(best-effort)。
+async fn sample_stats(state: &AppState, name_or_id: &str) -> Option<Sample> {
     let opts = StatsOptionsBuilder::default().stream(false).build();
     let sample = state.docker.stats(name_or_id, Some(opts)).next().await?.ok()?;
-    let mem_bytes = sample
-        .memory_stats
-        .as_ref()
-        .and_then(|m| m.usage)
-        .unwrap_or(0);
-    Some((compute_cpu_pct(&sample), mem_bytes))
+    let mem = sample.memory_stats.as_ref();
+    Some(Sample {
+        cpu_pct: compute_cpu_pct(&sample),
+        mem_bytes: mem.and_then(|m| m.usage).unwrap_or(0),
+        mem_limit: mem.and_then(|m| m.limit),
+    })
+}
+
+/// 指定 service の 1 発メトリクス(`tbm service metrics`)。稼働中なら stats を、常に inspect を
+/// 引き、CPU / メモリ(上限比)/ 再起動回数 / uptime / OOM を返す。**任意状態**で解決する —
+/// restart_count / oom_killed は落ちている時こそ見たい。停止 / 未デプロイは running=false + 各 None
+/// (200。不在も答え)。stats(~1s)と inspect を並行(join!)。所有権は handler の ensure_owned。
+pub async fn service_metrics(state: &AppState, service_id: Uuid) -> ServiceMetricsDto {
+    let empty = ServiceMetricsDto {
+        running: false,
+        cpu_pct: None,
+        mem_bytes: None,
+        mem_limit_bytes: None,
+        restart_count: None,
+        started_at: None,
+        uptime_secs: None,
+        oom_killed: None,
+    };
+    let Some(name) = any_container_name(state, service_id).await.ok().flatten() else {
+        return empty; // 未デプロイ / 実体削除済み。
+    };
+    // まず inspect(安価)。stats は precpu が要る ~1s の重い呼び出しなので **running のときだけ**
+    // 引く(停止コンテナで無駄な docker stats を投げない)。inspect は速いので逐次でも running 情形の
+    // 実時間は stats 一発にほぼ等しい。
+    let Ok(info) = state.docker.inspect_container(&name, None).await else {
+        return empty;
+    };
+    let st = info.state.as_ref();
+    let running = st.and_then(|s| s.running).unwrap_or(false);
+    let started_at = st.and_then(|s| s.started_at.clone()).filter(|s| !s.is_empty());
+    let sample = if running {
+        sample_stats(state, &name).await
+    } else {
+        None
+    };
+    // uptime は running かつ started_at が有効(哨兵 0001-01-01 でない)なら算出。
+    let uptime_secs = if running {
+        started_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+            .filter(|&secs| secs >= 0)
+    } else {
+        None
+    };
+    ServiceMetricsDto {
+        running,
+        cpu_pct: sample.as_ref().and_then(|s| s.cpu_pct),
+        mem_bytes: sample.as_ref().map(|s| s.mem_bytes as i64),
+        mem_limit_bytes: sample.as_ref().and_then(|s| s.mem_limit).map(|l| l as i64),
+        restart_count: info.restart_count,
+        started_at,
+        uptime_secs,
+        oom_killed: st.and_then(|s| s.oom_killed),
+    }
 }
 
 /// 平台自身の 1 コンテナの監視指標(リソース概要「プラットフォーム自身」。各コンテナ別に出す)。
@@ -805,12 +869,12 @@ pub async fn platform_stats(state: &AppState) -> Vec<ContainerStat> {
         .collect();
 
     let futs = targets.into_iter().map(|(id, raw)| async move {
-        let (cpu_pct, mem_bytes) = sample_stats(state, &id).await?;
+        let s = sample_stats(state, &id).await?;
         let name = raw.strip_prefix("tsubomi-").unwrap_or(&raw).to_string();
         Some(ContainerStat {
             name,
-            cpu_pct,
-            mem_bytes,
+            cpu_pct: s.cpu_pct,
+            mem_bytes: s.mem_bytes,
         })
     });
     let mut stats: Vec<ContainerStat> = futures_util::future::join_all(futs)

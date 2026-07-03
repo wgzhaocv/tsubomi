@@ -116,6 +116,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/stop", post(stop))
         .route("/services/{id}/logs", get(logs))
         .route("/services/{id}/logs/stream", get(logs_stream))
+        .route("/services/{id}/metrics", get(metrics))
         .route("/services/{id}/exec", post(exec))
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
@@ -569,6 +570,18 @@ pub async fn set_visibility(
         }
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/services/:id/metrics`:稼働中コンテナの 1 発メトリクス(CPU / メモリ(上限比)/
+/// 再起動回数 / uptime / OOM)。停止 / 未デプロイでも 200(running=false)。所有者のみ。
+/// Bearer / session 両対応(logs / status と同層 = 自資源の読み取り)。
+pub async fn metrics(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<tsubomi_shared::ServiceMetricsDto>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    Ok(Json(docker::service_metrics(&state, id).await))
 }
 
 /// `?tail=N&since=TS`(since = unix 秒。快照 / 流式で共用)。
