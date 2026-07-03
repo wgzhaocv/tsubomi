@@ -27,7 +27,8 @@ use tsubomi_shared::{
 use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
-/// web SQL が返す最大行数(超過は truncated=true で切り詰め)。
+/// web SQL が返す最大行数(超過は truncated=true で切り詰め)。CLI の `tbm db query` の
+/// help(crates/cli/src/commands/db.rs)にこの値が写してある — 変えるときは両方揃える。
 const MAX_QUERY_ROWS: usize = 1000;
 /// 1 ロールあたりの既定接続上限。DB 列 `database_roles.conn_limit` と Postgres 役割の
 /// CONNECTION LIMIT の単一真源(本轮は固定。owner 調整は後相)。利用者は少数想定なので

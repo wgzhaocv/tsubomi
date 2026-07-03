@@ -49,12 +49,21 @@ pub enum DbCmd {
         /// 接続するデータベースの表示名(`tbm db list` で確認)
         name: String,
     },
-    /// SQL を実行(psql 不要。web の SQL エディタと同じ経路。複数文可)
+    /// SQL を実行(psql 不要。web の SQL エディタと同じ経路。複数文可)。
+    /// 結果は 1 文あたり最大 1000 行で切り詰め(truncated=true)— 大きな結果は
+    /// アプリのドライバか `tbm db connect`(psql)で
+    // ↑ の「1000 行」は server の databases.rs::MAX_QUERY_ROWS の写し(変えたら両方揃える。
+    //   実行時の切り詰め警告はサーバ報告の truncated/row_count 由来なのでズレない)。
     Query {
         /// 対象データベースの表示名(`tbm db list` で確認)
         name: String,
         /// 実行する SQL(`-` を渡すと標準入力から読む)
         sql: String,
+        /// 行だけを TSV で出す(tuples-only:列名なし・タブ区切り・NULL は空文字・
+        /// タブ/改行/バックスラッシュは \t \n \r \\ にエスケープ。`-o` より優先)。
+        /// スカラー取得用:`count=$(tbm db query mydb "select count(*) from t" --tsv)`
+        #[arg(long)]
+        tsv: bool,
     },
 }
 
@@ -163,11 +172,21 @@ pub async fn run(
                 connect_psql(&url)?;
             }
         }
-        DbCmd::Query { name, sql } => {
+        DbCmd::Query { name, sql, tsv } => {
             let sql = read_sql_arg(&sql)?;
             let id = resolve_id(&c, &server_url, &token, &name).await?;
             let resp = api::db_query(&c, &server_url, &token, &id, &sql).await?;
-            if json {
+            if tsv {
+                // TSV は「行データだけを機械可読で」— シェル / AI のスカラー捕获用。
+                // 出力形式そのものの指定なので `-o` より優先する。警告は stderr(stdout を汚さない)。
+                if let Some(rs) = resp.results.iter().find(|r| r.truncated) {
+                    eprintln!(
+                        "⚠ 結果は上限 {} 行で切り詰められました。全量はアプリのドライバか `tbm db connect` で。",
+                        rs.row_count
+                    );
+                }
+                print!("{}", render_tsv(&resp));
+            } else if json {
                 // 共有 DTO(QueryResp)をそのまま出す:{ "results": [ { columns, rows,
                 // row_count, truncated, rows_affected }, ... ] }。jq で拾える。
                 print_json(&resp)?;
@@ -220,6 +239,34 @@ fn print_results_text(resp: &QueryResp) {
             }
         }
     }
+}
+
+/// `--tsv` の描画(tuples-only)。1 行 = 1 レコードをタブ結合、NULL は空文字。
+/// セル内のタブ/改行/バックスラッシュをエスケープして「1 行 = 1 レコード」を機械的に
+/// 保証する(シェル / AI がパース器なしで read できる)。列を持たない結果集合
+/// (INSERT/DDL 等)は行を出さず、複数文は各集合を順に連結する。
+fn render_tsv(resp: &QueryResp) -> String {
+    let mut out = String::new();
+    for rs in &resp.results {
+        for row in &rs.rows {
+            let line: Vec<String> = row
+                .iter()
+                .map(|c| escape_tsv_cell(c.as_deref().unwrap_or("")))
+                .collect();
+            out.push_str(&line.join("\t"));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// TSV セルのエスケープ:`\` → `\\`、タブ → `\t`、改行 → `\n`、CR → `\r`
+/// (`\` を最初に — 後段が生む `\` を二重エスケープしないため)。
+fn escape_tsv_cell(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 /// 簡易な整列テーブル(NULL は `NULL` 表示)。幅は char 数で揃える
@@ -295,5 +342,68 @@ fn connect_psql(url: &str) -> Result<()> {
             Ok(())
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tsubomi_shared::QueryResultSet;
+
+    /// テスト用の結果集合(columns 空 = 非 SELECT)。
+    fn set(columns: &[&str], rows: Vec<Vec<Option<&str>>>) -> QueryResultSet {
+        QueryResultSet {
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            row_count: rows.len(),
+            rows: rows
+                .into_iter()
+                .map(|r| r.into_iter().map(|c| c.map(str::to_string)).collect())
+                .collect(),
+            truncated: false,
+            rows_affected: 0,
+        }
+    }
+
+    #[test]
+    fn tsv_escapes_and_nulls() {
+        let resp = QueryResp {
+            results: vec![set(
+                &["a", "b"],
+                vec![
+                    vec![Some("x\ty"), None],
+                    vec![Some("line1\nline2"), Some("back\\slash\r")],
+                ],
+            )],
+        };
+        assert_eq!(
+            render_tsv(&resp),
+            "x\\ty\t\nline1\\nline2\tback\\\\slash\\r\n"
+        );
+    }
+
+    #[test]
+    fn tsv_scalar_is_single_line() {
+        let resp = QueryResp {
+            results: vec![set(&["count"], vec![vec![Some("42")]])],
+        };
+        assert_eq!(render_tsv(&resp), "42\n");
+    }
+
+    #[test]
+    fn tsv_skips_non_select_and_concats_sets() {
+        // 複数文:INSERT(列なし)→ SELECT ×2。行を持つ集合だけが順に出る。
+        let resp = QueryResp {
+            results: vec![
+                set(&[], vec![]),
+                set(&["a"], vec![vec![Some("1")]]),
+                set(&["b"], vec![vec![Some("2")]]),
+            ],
+        };
+        assert_eq!(render_tsv(&resp), "1\n2\n");
+    }
+
+    #[test]
+    fn tsv_empty_result_is_empty() {
+        assert_eq!(render_tsv(&QueryResp { results: vec![] }), "");
     }
 }
