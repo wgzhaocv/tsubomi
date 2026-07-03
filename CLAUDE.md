@@ -88,6 +88,26 @@ watch で数秒反映・**private callee への M6 内部リンクが caller コ
 `bad address`(隔離維持)。会社 IP 許可リストは現状**空 = fail-open**(company≒public。owner が
 entries を入れた時に差が立ち上がる)。実装級は **`doc/paas-service-visibility-design.md`**。
 
+**visibility 後の追加(マイルストーン外):service 任意ポート + stateful(自帯コンテナ)**。managed database に
+拡張(pgvector 等)を入れられない需要への回答 — 第 5 のリソースも compose も作らず、**service を 3 箇所で
+撑開**して「自帯 postgres / meilisearch / Grafana」を成立させた(migration 1 本 = `service_details.stateful`)。
+(S1)create パラメータ解放:`container_port`(1–65535。**8080 焊死は入口 1 箇所だけで、route / PORT env /
+M6 リンク URL の下游は元々 DB 由来**)+ `memory_mb`(既定 1024)+ `stateful`、CLI `--port/--stateful/
+--visibility/--memory` + web 詳細設定折疊。**visibility 省略時は port から推導**(8080→company / 他→private。
+単一真源は server の create handler、CLI/web は None 素通し)。CLI は作成回显を検証し旧サーバの静默無視を
+エラー化。port / stateful は**作成後不変**(変更許可は deploys に port を焼く改修とセット — 設計 §10-C)。
+(S2)**stateful = stop-first deploy**:swap は新旧が同一データ目録を同時に開く(postgres の postmaster.pid
+防双開は跨 PID namespace で信頼できない = 双開→破壊)ため、`docker::stop_running`(SIGTERM 猶予 30s・
+**remove しない**)→ 新起動 → 失敗なら温存した旧を再 start = **旧版自動復旧**。猶予は共有停止路径
+`stop_remove` が**自分で stateful を読んで**決める(stop / delete / purge も 30s)。route 切替失敗時、
+stateful は内部カットオーバーを進める(旧は停止済みで温存の意味が無い)。分岐は `run_digest_inner` 一箇所 =
+hook / start / rollback / reconcile 復活の全経路をカバー。(S3)M6 リンク注入に **`_HOST` / `_PORT`** を併注
+(`_URL` の http テンプレは非 HTTP ソフトに廃紙 — 利用側が自分のスキームで接続文字列を組む素材。
+`inject.rs::host_port_base`、resolved env の由来判定は `derived_env_source` に一般化)。dev e2e 済み:
+postgres(--port 5432 --stateful + volume=PGDATA)の redeploy でデータ健在・坏 image で旧版自動復旧・
+graceful stop。**副産物の発見**:registry GC の keep-set 欠陥(tag 再利用で直近成功 digest が回収され
+start/rollback が pull 404 — 既存バグ、設計 §10-E に記録)。実装級は **`doc/paas-service-stateful-design.md`**。
+
 M3 は prod-infra 込みで完了し **`tsubomi-app.com` で本番稼働・端到端検証済み**(両デプロイ経路:
 `git push`→GitHub Actions と `tbm deploy --local` の両方で `https://<sub>.tsubomi-app.com` が開くことを実機確認)。
 本番トポロジ:香橙派(arm64、共有ホスト)+ **Cloudflare Tunnel**(上流 TLS 終端 → `TSUBOMI_TLS` 未設定 =

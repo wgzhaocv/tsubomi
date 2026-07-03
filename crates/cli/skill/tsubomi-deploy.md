@@ -37,9 +37,10 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
       Dockerfile か start コマンドを足す(配方は Vercel 等の公式 example に従う)。
   - **バージョンを明示指定しないなら最新の安定版を使う。** 自分で Dockerfile や start を足す場面では、
     `node:20` のような旧版固定に落とさず現行の安定版(LTS など)を選ぶ。古い既定にしない。
-  - **アプリは service の `container_port` で listen する**(既定 **8080**)。`tbm service create` の
-    出力や `tbm service status` の `container_port` を見て、アプリの listen ポートを一致させる。
-    **ここがズレると 502。**
+  - **アプリは service の `container_port` で listen する**(既定 **8080**。create 時に
+    `--port <PORT>` で変更可 — 現成イメージが固定ポートで listen する場合はそちらに合わせる)。
+    `tbm service create` の出力や `tbm service status` の `container_port` を見て、アプリの
+    listen ポートを一致させる。**ここがズレると 502。**
 
 ## 2. リソースを作る(必要なものだけ)
 
@@ -47,6 +48,11 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
   作成時に `--github` を付ける**(repo/secret/variable と workflow 設定までこの 1 回で済む。§4 参照)。
   `--github` は**作成時のみ有効**(付け忘れた既存 service には効かず、再 create は重名 409)。GitHub 経路なら
   最初から付ける。registry 情報や `setup_commands` も返る。**平台は GitHub に触れない** — gh を使うのはあなた。
+  - 任意フラグ:`--port <PORT>`(listen ポート。既定 8080。**8080 以外を指定すると公開範囲の既定が
+    `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(自帯 DB 等の
+    有状態コンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータ目録を保護)/
+    `--memory <MiB>`(硬上限。既定 1024)。**port / stateful は作成後に変更できない** — 間違えたら
+    削除して作り直す。
 - database:`tbm db create <名前>`
 - volume:`tbm volume create <名前>`(ファイル永続が要るなら)
 - cache:`tbm cache create <名前>`(valkey が要るなら)
@@ -58,6 +64,11 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 | database | `tbm inject <db名> --into <service名>` | `DATABASE_URL` |
 | volume | `tbm inject <vol名> --into <service名> [--mount /data/foo]` | `STORAGE_PATH` |
 | cache | `tbm inject <cache名> --into <service名>` | `REDIS_URL` + `REDIS_KEY_PREFIX` |
+| service | `tbm inject <svc名> --into <service名>` | `<名前>_URL`(内部直連 http)+ `<名前>_HOST` / `<名前>_PORT` |
+
+service 注入 = 別 app への**内部直連**(公網を通らない。同一 owner 限定)。HTTP app は `_URL` を
+そのまま使い、**非 HTTP(自帯 postgres 等)は `_HOST` / `_PORT` で自分のスキームの接続文字列を組む**
+(例 `postgres://user:pass@${MYPG_HOST}:${MYPG_PORT}/db` — パスワードは自分が env で設定したもの)。
 
 確認:`tbm service status <service名>` の `injections` がすべて `valid: true`。
 
@@ -102,7 +113,34 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 迷ったら **起動時ではなくリクエスト時に DB へ繋ぐ**と、失敗が「起動直後 exit」ではなく
 レスポンスのエラーに出て切り分けやすい。
 
-### 3.2 訪問者の実 IP はヘッダで来る(使うかは任意)
+### 3.2 自帯コンテナ(managed database で足りない時:拡張入り Postgres・meilisearch 等)
+
+平台の database(pg-tenant)には**拡張を入れられない**。pgvector 等が要るときは、DB を
+**stateful service として自分で立てて**リンクする:
+
+```
+tbm service create mypg --port 5432 --stateful        # 非8080 → 自動で private(公開URLなし)
+tbm volume create mypg-data
+tbm inject mypg-data --into mypg --mount /var/lib/postgresql/data   # データ目録の永続化(必須!)
+tbm env set mypg POSTGRES_PASSWORD=<自分で決める>
+printf 'FROM pgvector/pgvector:pg17\n' > Dockerfile   # 現成イメージなら 1 行でよい
+tbm deploy --local --service mypg --context .
+tbm inject mypg --into <app名>                         # app に MYPG_HOST / MYPG_PORT が入る
+```
+
+- **volume 注入を忘れない**:コンテナはデプロイごとに作り直される。データ目録を volume に
+  マウントしないと**再デプロイでデータ全損**。マウント先はそのソフトのデータパスに合わせる
+  (postgres = `/var/lib/postgresql/data`)。
+- **`--stateful` を忘れない**:無いと再デプロイ時に新旧コンテナが同じデータ目録を同時に開き
+  **データ破壊**になり得る。stateful のデプロイ / 停止は数秒の瞬断がある(仕様)。
+- 接続文字列は app 側で `_HOST` / `_PORT` + 自分の設定したパスワードで組む(§3 の表)。
+  中身(ユーザ・スキーマ・チューニング・升級)は**全部ユーザの責任** — 平台が保証するのは
+  「活きている・データが在る・app から届く」まで。
+- 外部(手元の psql 等)からは繋げない(公網入口は HTTP のみ)。操作は
+  `tbm service exec mypg -- psql -U postgres -c "..."` で。
+- 検証:`tbm service verify` は private では使えない。`tbm service exec` で書き込み → 読み戻し。
+
+### 3.3 訪問者の実 IP はヘッダで来る(使うかは任意)
 
 app は HTTP リクエストヘッダで**訪問者の実 client IP** を受け取れる(プラットフォームが提供する。
 使う/使わないは app 次第):
@@ -237,6 +275,8 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 | `code: conflict` | 名前が既出 | 別名にする |
 | `code: validation` | 入力不正 | メッセージに従う |
 | 注入が効かない | デプロイ前に注入していない / rotate 後に再デプロイしていない | 注入を確認 → 再デプロイ |
+| 平台 DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 自帯コンテナ(§3.2:`--port` + `--stateful` + volume) |
+| 自帯 DB が再デプロイでデータ全損 | データ目録を volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ |
 | 両経路とも不可(枠切れ + 跨アーキ / Docker 無し) | この環境にビルド環境が無い | 部署できないとユーザに伝える(§4。別経路を発明しない) |
 | `gh` が無い | 未インストール | OS 別に案内 → `! gh auth login --web --git-protocol https --clipboard` |
