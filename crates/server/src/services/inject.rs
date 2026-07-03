@@ -97,11 +97,20 @@ pub async fn resolve(
                 }
             }
             "service" => {
-                // 別 app の内部直連 URL。失効(注入元 service が削除済み)→ None でスキップ。
-                // 値は subdomain を docker 網別名として引く `http://<subdomain>:<port>`(http 固定 —
-                // 内部網なので TLS 無し。§9)。実到達は network.rs の網リンクが担保する。
+                // 別 app の内部直連。失効(注入元 service が削除済み)→ None でスキップ。
+                // `_URL` は subdomain を docker 網別名として引く `http://<subdomain>:<port>`
+                // (http 固定 — 内部網なので TLS 無し。§9)。加えて素材の `_HOST` / `_PORT` も
+                // 注入する:非 HTTP ソフト(自帯 postgres 等)には http テンプレが廃紙で、
+                // 利用側が `postgres://user:pass@$X_HOST:$X_PORT/db` を自分のスキームで組める
+                // ようにする(stateful 設計 §0-H)。名前は `_URL` を剥いだ基底に付ける(cache の
+                // `key_prefix_env` と同型)。派生名が別注入と衝突したら dedup_env_last の後勝ち
+                // (受容)。実到達は network.rs の網リンクが担保する。
                 if let Some((subdomain, port)) = fetch_service_endpoint(state, resource_id).await? {
-                    env.push((env_var, format!("http://{subdomain}:{port}")));
+                    let url = format!("http://{subdomain}:{port}");
+                    let base = host_port_base(&env_var);
+                    env.push((format!("{base}_HOST"), subdomain));
+                    env.push((format!("{base}_PORT"), port.to_string()));
+                    env.push((env_var, url));
                 }
             }
             // 未知 kind は無視。
@@ -115,8 +124,30 @@ pub async fn resolve(
 /// REDIS_URL の env 名から REDIS_KEY_PREFIX の env 名を導く:末尾 `_URL` を `_KEY_PREFIX` に
 /// 置換、無ければ `_KEY_PREFIX` を付加(REDIS_URL→REDIS_KEY_PREFIX / CACHE_URL→CACHE_KEY_PREFIX。§5)。
 fn key_prefix_env(env_var: &str) -> String {
-    let base = env_var.strip_suffix("_URL").unwrap_or(env_var);
-    format!("{base}_KEY_PREFIX")
+    format!("{}_KEY_PREFIX", host_port_base(env_var))
+}
+
+/// service 注入の `_HOST` / `_PORT` の名前基底:env 名の末尾 `_URL` を剥ぐ(無ければそのまま)。
+/// `MYPG_URL` → `MYPG_HOST` / `MYPG_PORT`(stateful 設計 §0-H。`key_prefix_env` と共有)。
+fn host_port_base(env_var: &str) -> &str {
+    env_var.strip_suffix("_URL").unwrap_or(env_var)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_port_base_strips_url_suffix() {
+        // 既定名(subdomain 由来の `<X>_URL`)→ 基底に剥がれる。
+        assert_eq!(host_port_base("MYPG_URL"), "MYPG");
+        assert_eq!(host_port_base("API_BACKEND_URL"), "API_BACKEND");
+        // `_URL` で終わらないカスタム名はそのまま基底になる(`FOO` → `FOO_HOST`)。
+        assert_eq!(host_port_base("FOO"), "FOO");
+        // key_prefix_env も同じ基底導出を共有する(cache の既存規約と一貫)。
+        assert_eq!(key_prefix_env("REDIS_URL"), "REDIS_KEY_PREFIX");
+        assert_eq!(key_prefix_env("CACHE"), "CACHE_KEY_PREFIX");
+    }
 }
 
 /// 注入元 cache の (acl_user, namespace, password_enc) を引く。

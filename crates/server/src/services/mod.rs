@@ -962,10 +962,10 @@ pub async fn list_env_resolved(
             } else if let Some(kind) = inj_kinds.get(&key) {
                 kind.clone()
             } else {
-                // 注入 env_var の対応表に無い = cache の派生キー(`_URL` と対で注入される
-                // `_KEY_PREFIX`。派生キーを生むのは今は inject.rs::key_prefix_env だけ —
-                // 新しい派生元を足すときはここの判定も更新すること)。
-                "cache".to_string()
+                // 注入 env_var の対応表に無い = 派生キー(cache の `_KEY_PREFIX` / service の
+                // `_HOST`・`_PORT`)。基底(`_URL` を付けた形 or そのまま)で注入元 kind を引く。
+                derived_env_source(&key, &inj_kinds)
+                    .unwrap_or_else(|| "injection".to_string())
             };
             let value = if source == "static" {
                 "***".to_string()
@@ -1034,6 +1034,32 @@ pub async fn set_env(
     .await?;
     let warning = public_db_env_warning(&state, id, &req.key, &req.value).await;
     Ok(Json(SetEnvResp { warning }))
+}
+
+/// 派生キー(注入 env_var 本体ではない)の由来 kind を引く:`X_KEY_PREFIX` → cache /
+/// `X_HOST`・`X_PORT` → service。注入 env_var は基底そのまま(`FOO`)か `_URL` 付き
+/// (`FOO_URL`)のどちらかなので両方を引き、**その後缀を生み得る kind の注入だけ**を採用する
+/// (service `FOO_URL` と cache `FOO` が併存しても `FOO_KEY_PREFIX` は cache に帰属 —
+/// codex review 2026-07-03)。派生キーを生むのは inject.rs の `key_prefix_env` /
+/// `host_port_base` だけ — 新しい派生元を足すときはここも更新すること。
+/// 既知の限界(受容):明示注入の env_var が派生名そのもの(例 `FOO_HOST`)と衝突すると、
+/// 表示ラベルは明示注入側に倒れる(実際に効く値は後勝ちで正しい — 表示のみの病理ケース。
+/// 根治は resolve が kind を外帯する改修 = deploy 熱路径に死データを背負わせるため見送り)。
+fn derived_env_source(
+    key: &str,
+    inj_kinds: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let (base, want_kind) = if let Some(b) = key.strip_suffix("_KEY_PREFIX") {
+        (b, "cache")
+    } else if let Some(b) = key.strip_suffix("_HOST").or_else(|| key.strip_suffix("_PORT")) {
+        (b, "service")
+    } else {
+        return None;
+    };
+    [format!("{base}_URL"), base.to_string()]
+        .iter()
+        .find_map(|k| inj_kinds.get(k).filter(|kind| *kind == want_kind))
+        .cloned()
 }
 
 /// 静的 env の値が公開 DB ホストを指していれば注意文を返す(非破壊の footgun 検知)。
@@ -1453,6 +1479,33 @@ mod tests {
         for s in ["api-backend", "web", "shop-x7k2", "9to5"] {
             assert!(validate_env_key(&default_service_env_var(s)).is_ok());
         }
+    }
+
+    #[test]
+    fn derived_env_source_maps_back_to_injection_kind() {
+        let inj: std::collections::HashMap<String, String> = [
+            ("REDIS_URL".to_string(), "cache".to_string()),
+            ("MYPG_URL".to_string(), "service".to_string()),
+            ("BARE".to_string(), "service".to_string()), // --as で `_URL` 無しの注入名
+            // 混在:service FOO_URL + cache FOO(裸名)。派生は後缀を生む kind に帰属する。
+            ("FOO_URL".to_string(), "service".to_string()),
+            ("FOO".to_string(), "cache".to_string()),
+        ]
+        .into();
+        // cache の派生(`_KEY_PREFIX`)→ `_URL` 形の基底で引ける。
+        assert_eq!(derived_env_source("REDIS_KEY_PREFIX", &inj), Some("cache".into()));
+        // service の派生(`_HOST` / `_PORT`)→ 同上。
+        assert_eq!(derived_env_source("MYPG_HOST", &inj), Some("service".into()));
+        assert_eq!(derived_env_source("MYPG_PORT", &inj), Some("service".into()));
+        // 裸名注入(`FOO`)の派生 `FOO_HOST` → `FOO_URL` が無ければ裸名で引く。
+        assert_eq!(derived_env_source("BARE_HOST", &inj), Some("service".into()));
+        // 混在ケース:`FOO_KEY_PREFIX` は cache(裸名 FOO)に、`FOO_HOST` は service
+        // (FOO_URL)に、それぞれ「後缀を生み得る kind」で正しく帰属する(codex review)。
+        assert_eq!(derived_env_source("FOO_KEY_PREFIX", &inj), Some("cache".into()));
+        assert_eq!(derived_env_source("FOO_HOST", &inj), Some("service".into()));
+        // 派生後缀を持たない / 対応する注入が無い → None(呼び出し側が中立ラベルに倒す)。
+        assert_eq!(derived_env_source("FOO", &inj), None);
+        assert_eq!(derived_env_source("UNKNOWN_HOST", &inj), None);
     }
 
     #[test]

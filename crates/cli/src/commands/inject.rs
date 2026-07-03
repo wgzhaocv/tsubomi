@@ -10,7 +10,8 @@ use crate::config;
 
 /// `tbm inject <resource> --into <service> [--as ENV] [--mount /path]`。
 /// database / volume / cache / 別 service を service に注入(バインディングを保存。値は起動の瞬間に解決)。
-/// service 注入は内部直連 URL `http://<subdomain>:<port>` を渡す(公網を通らない。同一 owner 限定)。
+/// service 注入は内部直連 URL `http://<subdomain>:<port>` に加え `_HOST` / `_PORT`(素材)を渡す
+/// (公網を通らない。同一 owner 限定。非 HTTP ソフトは HOST/PORT で自分のスキームの接続文字列を組む)。
 #[derive(Args)]
 pub struct InjectArgs {
     /// 注入するリソースの表示名(database / volume / cache / service)
@@ -19,7 +20,8 @@ pub struct InjectArgs {
     #[arg(long)]
     pub into: String,
     /// env 変数名(既定:database=DATABASE_URL / volume=STORAGE_PATH / cache=REDIS_URL。
-    /// cache は加えて REDIS_KEY_PREFIX(--as 指定時は <ENV>_KEY_PREFIX)も注入される)
+    /// cache は加えて REDIS_KEY_PREFIX(--as 指定時は <ENV>_KEY_PREFIX)、service は加えて
+    /// <名前>_HOST / <名前>_PORT(--as 指定時は <ENV> の _URL を剥いだ基底 + _HOST/_PORT)も注入される)
     #[arg(long = "as")]
     pub env_as: Option<String>,
     /// volume のコンテナ内マウント先(既定 /data/<名前>)
