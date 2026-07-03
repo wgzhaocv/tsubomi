@@ -91,6 +91,15 @@ pub enum ServiceCmd {
     Verify {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
+        /// 進行中のデプロイの完走を待ってから検証する(2 秒間隔で輪詢。failed なら
+        /// その error を出して非零終了)。待てるのは受理済み(最新)のデプロイだけ —
+        /// GitHub 経路で CI がビルド中(hook 未達)の間は最新=旧版の succeeded のため
+        /// 待たずに検証してしまう(その場合は Actions の完了後に実行する)
+        #[arg(long)]
+        wait: bool,
+        /// `--wait` の最大待機秒数
+        #[arg(long, default_value_t = 180)]
+        timeout: u64,
     },
     /// サービスを削除(ゴミ箱へ。3 日間は復元可能)
     Delete {
@@ -224,7 +233,11 @@ pub async fn run(
             let result = api::service_exec(&c, &server_url, &token, &id, &cmd).await?;
             emit_exec_result(&result, json)?;
         }
-        ServiceCmd::Verify { name } => {
+        ServiceCmd::Verify {
+            name,
+            wait,
+            timeout,
+        } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
             let svc = api::service_get(&c, &server_url, &token, &id).await?;
             // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
@@ -238,7 +251,14 @@ pub async fn run(
             if svc.url.is_empty() {
                 bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
             }
-            let report = verify_url(&c, &svc.url).await?;
+            let report = if wait {
+                // デプロイの完走を待ってから検証(succeeded 直後は traefik の file-watch
+                // 反映に数秒かかるため、NG の間は短い窓で再試行する)。
+                wait_for_deploy(&c, &server_url, &token, &id, &name, timeout, json).await?;
+                verify_with_retry(&c, &svc.url).await?
+            } else {
+                verify_url(&c, &svc.url).await?
+            };
             if json {
                 // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
                 // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
@@ -786,6 +806,84 @@ fn gh_variable(repo: &str, name: &str, value: &str) -> Result<()> {
 }
 
 // ===== verify(公開 URL の存活検証) =====
+
+/// `--wait` の輪詢間隔。デプロイ状態も検証再試行も同じ歩調で見る。
+const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// succeeded 後の検証再試行の窓(traefik file-watch の反映遅延を吸収する長さ)。
+const VERIFY_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `--wait`:最新デプロイが終態(succeeded / failed)になるまで輪詢する。
+/// succeeded で戻り、failed / タイムアウトはエラー(検証 NG と同じく exit 1 に落ちる)。
+/// text モードのみ stderr に状態遷移を流す(json は最終出力だけ = 契約を汚さない)。
+/// 待てるのは「受理済みの最新デプロイ」だけ — CI がまだ hook を叩いていない間は
+/// 最新=旧版の succeeded なので即座に検証へ進む(help に明記済みの既知の限界)。
+async fn wait_for_deploy(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+    timeout_secs: u64,
+    quiet: bool,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut last = String::new();
+    loop {
+        match api::service_deploys(c, server_url, token, id).await {
+            Ok(deploys) => {
+                // deploys は新しい順(サーバが ORDER BY created_at DESC で返す)。
+                let Some(latest) = deploys.first() else {
+                    bail!(
+                        "デプロイがありません。先に `tbm deploy --local --service {name}` か git push を実行してください"
+                    );
+                };
+                match latest.status.as_str() {
+                    "succeeded" => return Ok(()),
+                    "failed" => bail!(
+                        "最新のデプロイが失敗しました:{}(`tbm service logs {name}` でログを確認)",
+                        latest.error.as_deref().unwrap_or("原因不明")
+                    ),
+                    status => {
+                        if !quiet && status != last {
+                            eprintln!("デプロイ進行中:{status} …");
+                            last = status.to_string();
+                        }
+                    }
+                }
+            }
+            // 一過性の API エラー(網の瞬断等)は期限内なら次の輪詢で拾い直す
+            // (verify_with_retry と同じ寛容さ。数分待ちの途中 1 回の瞬断で
+            // 「デプロイ失敗」と誤読させない)。期限切れならそのまま伝播。
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e);
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "デプロイが {timeout_secs} 秒以内に終わりませんでした。`tbm service status {name}` で確認してください"
+            );
+        }
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
+}
+
+/// succeeded 直後は traefik の file-watch 反映に数秒かかる(route ファイルは succeeded
+/// より前に書かれている)。NG の間だけ短い窓で再試行し、最後の報告を返す — 恒常的な
+/// NG(assets 404 等)は窓が閉じた時点でそのまま NG として報告される。
+async fn verify_with_retry(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
+    let deadline = std::time::Instant::now() + VERIFY_RETRY_WINDOW;
+    loop {
+        // 接続エラーも窓内は再試行(切替の瞬間は接続自体が落ち得る)。窓が閉じたら
+        // 成否にかかわらず最後の結果を返す。
+        let res = verify_url(c, root).await;
+        if matches!(&res, Ok(r) if r.ok) || std::time::Instant::now() >= deadline {
+            return res;
+        }
+        tokio::time::sleep(WAIT_POLL_INTERVAL).await;
+    }
+}
 
 /// `tbm service verify` の結果(JSON はこの DTO をそのまま serde)。
 #[derive(serde::Serialize)]

@@ -5,7 +5,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::api;
-use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
+use crate::commands::{
+    OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
+};
 use crate::config;
 use tsubomi_shared::{DeployConfig, hmac_sha256, random_b64};
 
@@ -42,7 +44,7 @@ pub async fn run(
     let c = reqwest::Client::new();
 
     // 1. 対象 service を決める → build+hook に要る全値を取得(deploy_key / registry / hook_url / platforms)。
-    let id = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+    let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
     let dc = api::deploy_config(&c, &server_url, &token, &id).await?;
 
     // 2. build + push(平台は build しない。ここはユーザ機の docker buildx)。
@@ -73,7 +75,7 @@ pub async fn run(
         }))?;
     } else {
         eprintln!(
-            "デプロイを送信しました。`tbm service status` で deploying→running を確認してください。"
+            "デプロイを送信しました。`tbm service verify {svc_name} --wait` で完了まで待って検証できます。"
         );
         println!("{digest}");
     }
@@ -81,29 +83,29 @@ pub async fn run(
 }
 
 /// --service 名で解決、省略時はサービスが 1 つだけならそれ(複数 / 0 はエラー)。
+/// 表示名も返す(成功文案の `tbm service verify <名前> --wait` 指引に使う)。
+/// 名前指定時は共有の `resolve_service_id` に委譲(not_found の文言・code を 1 箇所に保つ)。
 async fn resolve_service(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
     name: Option<&str>,
-) -> Result<String> {
-    let svcs = api::service_list(c, server_url, token).await?;
+) -> Result<(String, String)> {
     match name {
-        Some(n) => match svcs.iter().find(|s| s.display_name == n) {
-            Some(s) => Ok(s.id.to_string()),
-            None => Err(api::ApiError {
-                code: "not_found",
-                message: format!("サービス '{n}' が見つかりません(`tbm service list` で確認)"),
+        Some(n) => {
+            let id = resolve_service_id(c, server_url, token, n).await?;
+            Ok((id, n.to_string()))
+        }
+        None => {
+            let svcs = api::service_list(c, server_url, token).await?;
+            match svcs.as_slice() {
+                [only] => Ok((only.id.to_string(), only.display_name.clone())),
+                [] => bail!(
+                    "サービスがありません。先に `tbm service create <名前>` を実行してください"
+                ),
+                _ => bail!("サービスが複数あります。`--service <名前>` で対象を指定してください"),
             }
-            .into()),
-        },
-        None => match svcs.as_slice() {
-            [only] => Ok(only.id.to_string()),
-            [] => {
-                bail!("サービスがありません。先に `tbm service create <名前>` を実行してください")
-            }
-            _ => bail!("サービスが複数あります。`--service <名前>` で対象を指定してください"),
-        },
+        }
     }
 }
 
