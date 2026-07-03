@@ -81,6 +81,21 @@ pub fn resolve_token_from(over: Option<String>, cfg: Option<Config>) -> Result<S
         .context("not logged in (run: tbm login)")
 }
 
+/// 手元 repo の HEAD の full sha(40 桁)。`verify --for-sha HEAD` が使う(将来の
+/// `deploy --watch` も同じ解決を想定)。
+pub fn git_head_sha() -> Result<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("git の実行に失敗しました(git はインストール済みですか?)")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "HEAD を解決できません(git リポジトリの中で実行してください。または sha を直接指定)"
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// サービスの表示名 → id を一覧から解決する(service / inject / env が共有。専用エンドポイント
 /// を増やさない)。見つからなければ機械可読な not_found コードを付けて返す。
 pub async fn resolve_service_id(

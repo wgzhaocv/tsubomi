@@ -87,17 +87,22 @@ pub enum ServiceCmd {
         path: String,
     },
     /// 公開 URL の存活を検証:根 HTML とそこから参照される js/css 子リソースが全部 2xx か。
-    /// deploy=succeeded + 根 200 でも assets が 404 で白画面、という取りこぼしを検出する
+    /// deploy=succeeded + 根 200 でも assets が 404 で白画面、という取りこぼしを検出する。
+    /// 報告には現在 serving 中のデプロイ(git_sha / deploy_id)も載る
     Verify {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
         /// 進行中のデプロイの完走を待ってから検証する(2 秒間隔で輪詢。failed なら
         /// その error を出して非零終了)。待てるのは受理済み(最新)のデプロイだけ —
-        /// GitHub 経路で CI がビルド中(hook 未達)の間は最新=旧版の succeeded のため
-        /// 待たずに検証してしまう(その場合は Actions の完了後に実行する)
+        /// CI がビルド中(hook 未達)の間もカバーしたいときは `--for-sha` を使う
         #[arg(long)]
         wait: bool,
-        /// `--wait` の最大待機秒数
+        /// 指定 commit のデプロイが**到着して**完走するまで待ってから検証する(--wait を含意。
+        /// CI ビルド中=hook 未達の窓もカバーする端到端の待機)。値は full/短 sha どちらでも
+        /// 前綴一致、`HEAD` は手元 repo から解決。例:`--for-sha $(git rev-parse HEAD)`
+        #[arg(long)]
+        for_sha: Option<String>,
+        /// `--wait` / `--for-sha` の最大待機秒数
         #[arg(long, default_value_t = 180)]
         timeout: u64,
     },
@@ -236,8 +241,24 @@ pub async fn run(
         ServiceCmd::Verify {
             name,
             wait,
+            for_sha,
             timeout,
         } => {
+            // `HEAD` は手元 repo から解決(CI に渡った sha と同じものを追う)。
+            let for_sha = match for_sha.as_deref() {
+                Some("HEAD") => Some(crate::commands::git_head_sha()?),
+                other => other.map(str::to_owned),
+            };
+            // sha として不正な値(例:`--for-sha main` のようなブランチ名)は前綴一致し得ず、
+            // そのまま待つと満了まで空回りして「タイムアウト」と誤診する。早期に弾いて次の一手を出す
+            // (branch/tag は受けない — HEAD かコミット sha を明示。設計どおり scope を絞る)。
+            if let Some(s) = &for_sha
+                && (s.len() < 4 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                bail!(
+                    "--for-sha の値 '{s}' は commit sha ではありません。full/短縮 sha か `HEAD` を指定してください(例:--for-sha $(git rev-parse HEAD))"
+                );
+            }
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
             let svc = api::service_get(&c, &server_url, &token, &id).await?;
             // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
@@ -251,14 +272,22 @@ pub async fn run(
             if svc.url.is_empty() {
                 bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
             }
-            let report = if wait {
+            let report = if wait || for_sha.is_some() {
                 // デプロイの完走を待ってから検証(succeeded 直後は traefik の file-watch
                 // 反映に数秒かかるため、NG の間は短い窓で再試行する)。
-                wait_for_deploy(&c, &server_url, &token, &id, &name, timeout, json).await?;
+                let spec = WaitSpec {
+                    for_sha: for_sha.as_deref(),
+                    timeout_secs: timeout,
+                    quiet: json,
+                };
+                wait_for_deploy(&c, &server_url, &token, &id, &name, spec).await?;
                 verify_with_retry(&c, &svc.url).await?
             } else {
                 verify_url(&c, &svc.url).await?
             };
+            // いま serving 中のデプロイを報告に付す(「見ているのが新版か」の機械判別材料)。
+            let mut report = report;
+            report.serving = fetch_serving(&c, &server_url, &token, &id).await;
             if json {
                 // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
                 // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
@@ -272,6 +301,9 @@ pub async fn run(
                 println!("{} {} (根 HTML)", mark(report.root_status), svc.url);
                 for r in &report.resources {
                     println!("  {} {} {}", mark(r.status), r.status, r.url);
+                }
+                if let Some(s) = &report.serving {
+                    println!("serving: sha={} (deploy {})", short_sha(&s.git_sha), s.deploy_id);
                 }
                 if report.ok {
                     println!(
@@ -812,43 +844,82 @@ const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2
 /// succeeded 後の検証再試行の窓(traefik file-watch の反映遅延を吸収する長さ)。
 const VERIFY_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// `--wait`:最新デプロイが終態(succeeded / failed)になるまで輪詢する。
+/// `wait_for_deploy` の待機条件(引数が膨れるのを避ける束。将来の deploy --watch でも想定)。
+struct WaitSpec<'a> {
+    /// Some = この sha のデプロイが**到着して**完走するまで待つ(CI ビルド窓もカバー)。
+    /// None = 受理済みの最新デプロイを待つ(従来の --wait)。
+    for_sha: Option<&'a str>,
+    timeout_secs: u64,
+    /// json モードでは進行状況の stderr 出力を抑止する。
+    quiet: bool,
+}
+
+/// `--for-sha` の照合:格納側(GitHub 経路=全 40 桁 / `--local`=短 sha)と入力側
+/// (full / 短どちらも来る)のどちらが短くても前綴一致で当てる。空文字は不一致。
+fn sha_matches(stored: &str, wanted: &str) -> bool {
+    !stored.is_empty()
+        && !wanted.is_empty()
+        && (stored.starts_with(wanted) || wanted.starts_with(stored))
+}
+
+/// `--wait` / `--for-sha`:対象デプロイが終態(succeeded / failed)になるまで輪詢する。
 /// succeeded で戻り、failed / タイムアウトはエラー(検証 NG と同じく exit 1 に落ちる)。
 /// text モードのみ stderr に状態遷移を流す(json は最終出力だけ = 契約を汚さない)。
-/// 待てるのは「受理済みの最新デプロイ」だけ — CI がまだ hook を叩いていない間は
-/// 最新=旧版の succeeded なので即座に検証へ進む(help に明記済みの既知の限界)。
+/// for_sha 無しは「受理済みの最新デプロイ」を待つ(CI がまだ hook を叩いていない間は
+/// 最新=旧版の succeeded なので即座に検証へ進む)。for_sha 有りは対象の**到着自体**を
+/// 待ち、見つけたら id で固定して追う(後続デプロイが混ざっても目標を見失わない)。
 async fn wait_for_deploy(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
     id: &str,
     name: &str,
-    timeout_secs: u64,
-    quiet: bool,
+    spec: WaitSpec<'_>,
 ) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(spec.timeout_secs);
     let mut last = String::new();
+    let mut target_id: Option<uuid::Uuid> = None;
     loop {
         match api::service_deploys(c, server_url, token, id).await {
             Ok(deploys) => {
                 // deploys は新しい順(サーバが ORDER BY created_at DESC で返す)。
-                let Some(latest) = deploys.first() else {
-                    bail!(
-                        "デプロイがありません。先に `tbm deploy --local --service {name}` か git push を実行してください"
-                    );
+                // 優先順:固定済みの目標 > sha 一致(新しい方) > 最新。
+                let target = match (target_id, spec.for_sha) {
+                    (Some(tid), _) => deploys.iter().find(|d| d.id == tid),
+                    (None, Some(sha)) => deploys.iter().find(|d| sha_matches(&d.git_sha, sha)),
+                    (None, None) => deploys.first(),
                 };
-                match latest.status.as_str() {
-                    "succeeded" => return Ok(()),
-                    "failed" => bail!(
-                        "最新のデプロイが失敗しました:{}(`tbm service logs {name}` でログを確認)",
-                        latest.error.as_deref().unwrap_or("原因不明")
-                    ),
-                    status => {
-                        if !quiet && status != last {
-                            eprintln!("デプロイ進行中:{status} …");
-                            last = status.to_string();
+                match target {
+                    Some(d) => {
+                        // for_sha で初めて掴んだデプロイを id で固定(後続が混ざっても見失わない)。
+                        if spec.for_sha.is_some() {
+                            target_id = Some(d.id);
+                        }
+                        match d.status.as_str() {
+                            "succeeded" => return Ok(()),
+                            "failed" => bail!(
+                                "対象のデプロイが失敗しました:{}(`tbm service logs {name}` でログを確認)",
+                                d.error.as_deref().unwrap_or("原因不明")
+                            ),
+                            status => {
+                                if !spec.quiet && status != last {
+                                    eprintln!("デプロイ進行中:{status} …");
+                                    last = status.to_string();
+                                }
+                            }
                         }
                     }
+                    // for_sha の対象がまだ無い = hook 未達(CI ビルド中)。到着自体を待つ。
+                    None if spec.for_sha.is_some() => {
+                        if !spec.quiet && last != "(到着待ち)" {
+                            eprintln!("デプロイの到着を待っています(CI ビルド中の可能性)…");
+                            last = "(到着待ち)".to_string();
+                        }
+                    }
+                    None => bail!(
+                        "デプロイがありません。先に `tbm deploy --local --service {name}` か git push を実行してください"
+                    ),
                 }
             }
             // 一過性の API エラー(網の瞬断等)は期限内なら次の輪詢で拾い直す
@@ -862,7 +933,8 @@ async fn wait_for_deploy(
         }
         if std::time::Instant::now() >= deadline {
             bail!(
-                "デプロイが {timeout_secs} 秒以内に終わりませんでした。`tbm service status {name}` で確認してください"
+                "デプロイが {} 秒以内に終わりませんでした。`tbm service status {name}` で確認してください",
+                spec.timeout_secs
             );
         }
         tokio::time::sleep(WAIT_POLL_INTERVAL).await;
@@ -894,6 +966,43 @@ struct VerifyReport {
     root_status: u16,
     /// 根 HTML が参照する js / css 子リソースの検証結果。
     resources: Vec<VerifyResource>,
+    /// いま serving 中のデプロイ(service.image_digest に一致する直近成功 deploy)。
+    /// 「見ているのが自分の新版か」を機械判別する材料(`--for-sha` と併用で端到端)。
+    /// 特定できない(未デプロイ等)ときは省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serving: Option<ServingInfo>,
+}
+
+/// serving 中デプロイの識別情報(VerifyReport 用)。
+#[derive(serde::Serialize)]
+struct ServingInfo {
+    git_sha: String,
+    deploy_id: String,
+    image_digest: String,
+}
+
+/// いま serving 中のデプロイ(service の image_digest に一致する成功 deploy を新しい順で)。
+/// 取得失敗は None(検証結果とは独立の補助情報 — ここで検証自体を失敗にしない)。
+async fn fetch_serving(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Option<ServingInfo> {
+    let (svc, deploys) = tokio::join!(
+        api::service_get(c, server_url, token, id),
+        api::service_deploys(c, server_url, token, id),
+    );
+    let (svc, deploys) = (svc.ok()?, deploys.ok()?);
+    let digest = svc.image_digest?;
+    let d = deploys
+        .iter()
+        .find(|d| d.status == "succeeded" && d.image_digest == digest)?;
+    Some(ServingInfo {
+        git_sha: d.git_sha.clone(),
+        deploy_id: d.id.to_string(),
+        image_digest: d.image_digest.clone(),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -949,6 +1058,7 @@ async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
         url: root.to_string(),
         root_status,
         resources: results,
+        serving: None, // 呼び出し側の attach_serving が別途埋める(補助情報)。
     })
 }
 
@@ -1020,7 +1130,22 @@ fn attr_value<'a>(orig: &'a str, lower: &str, attr: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{attr_value, extract_subresources};
+    use super::{attr_value, extract_subresources, sha_matches};
+
+    #[test]
+    fn sha_matches_prefix_both_directions() {
+        let full = "0123456789abcdef0123456789abcdef01234567";
+        // GitHub 経路(格納=全 40 桁)× 入力が短 sha
+        assert!(sha_matches(full, "0123456"));
+        // --local 経路(格納=短 sha)× 入力が full sha
+        assert!(sha_matches("0123456", full));
+        // 完全一致・不一致・空
+        assert!(sha_matches(full, full));
+        assert!(!sha_matches(full, "fedcba9"));
+        assert!(!sha_matches("local", "0123456"));
+        assert!(!sha_matches("", full));
+        assert!(!sha_matches(full, ""));
+    }
 
     #[test]
     fn extracts_script_and_link() {
