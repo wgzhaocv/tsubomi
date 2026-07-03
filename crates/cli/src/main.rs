@@ -62,7 +62,8 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::service::ServiceCmd,
     },
-    /// デプロイ(`--local`:ローカルで build+push して hook を叩く。GitHub 非依存の退路)
+    /// デプロイ(`--watch`:git push → Actions 追跡 → 検証まで一括 / `--local`:ローカルで
+    /// build+push する GitHub 非依存の退路)
     Deploy(commands::deploy::DeployArgs),
     /// リソース(database / volume / cache / 別 service)を service に注入する
     Inject(commands::inject::InjectArgs),

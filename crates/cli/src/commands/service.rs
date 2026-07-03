@@ -244,81 +244,8 @@ pub async fn run(
             for_sha,
             timeout,
         } => {
-            // `HEAD` は手元 repo から解決(CI に渡った sha と同じものを追う)。
-            let for_sha = match for_sha.as_deref() {
-                Some("HEAD") => Some(crate::commands::git_head_sha()?),
-                other => other.map(str::to_owned),
-            };
-            // sha として不正な値(例:`--for-sha main` のようなブランチ名)は前綴一致し得ず、
-            // そのまま待つと満了まで空回りして「タイムアウト」と誤診する。早期に弾いて次の一手を出す
-            // (branch/tag は受けない — HEAD かコミット sha を明示。設計どおり scope を絞る)。
-            if let Some(s) = &for_sha
-                && (s.len() < 4 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
-            {
-                bail!(
-                    "--for-sha の値 '{s}' は commit sha ではありません。full/短縮 sha か `HEAD` を指定してください(例:--for-sha $(git rev-parse HEAD))"
-                );
-            }
-            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
-            let svc = api::service_get(&c, &server_url, &token, &id).await?;
-            // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
-            // 誤読させる(AI が無駄リトライする既知の実害パターン)ので、明確な文言で短絡する。
-            // 旧サーバ(visibility 空)は company 扱いで従来どおり探測する。
-            if svc.visibility == VISIBILITY_PRIVATE {
-                bail!(
-                    "このサービスは非公開(visibility=private)です。公開 URL は無効のため検証をスキップしました。公開するには `tbm service visibility {name} company`(または public)を実行してください"
-                );
-            }
-            if svc.url.is_empty() {
-                bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
-            }
-            let report = if wait || for_sha.is_some() {
-                // デプロイの完走を待ってから検証(succeeded 直後は traefik の file-watch
-                // 反映に数秒かかるため、NG の間は短い窓で再試行する)。
-                let spec = WaitSpec {
-                    for_sha: for_sha.as_deref(),
-                    timeout_secs: timeout,
-                    quiet: json,
-                };
-                wait_for_deploy(&c, &server_url, &token, &id, &name, spec).await?;
-                verify_with_retry(&c, &svc.url).await?
-            } else {
-                verify_url(&c, &svc.url).await?
-            };
-            // いま serving 中のデプロイを報告に付す(「見ているのが新版か」の機械判別材料)。
-            let mut report = report;
-            report.serving = fetch_serving(&c, &server_url, &token, &id).await;
-            if json {
-                // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
-                // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
-                print_json(&report)?;
-                if !report.ok {
-                    std::io::stdout().flush().ok();
-                    std::process::exit(1);
-                }
-            } else {
-                let mark = |s: u16| if (200..300).contains(&s) { "✓" } else { "✗" };
-                println!("{} {} (根 HTML)", mark(report.root_status), svc.url);
-                for r in &report.resources {
-                    println!("  {} {} {}", mark(r.status), r.status, r.url);
-                }
-                if let Some(s) = &report.serving {
-                    println!("serving: sha={} (deploy {})", short_sha(&s.git_sha), s.deploy_id);
-                }
-                if report.ok {
-                    println!(
-                        "OK:根 + 子リソース {} 件すべて 2xx。",
-                        report.resources.len()
-                    );
-                } else {
-                    // 白画面の典型原因と次の一手(AI / 人間の自己修正用)。
-                    println!(
-                        "NG:2xx でないリソースがあります。assets 404 は build 出力パス / base 設定 / 直近デプロイの失敗が典型です(`tbm service status {name}` でデプロイ履歴を確認)。"
-                    );
-                    std::io::stdout().flush().ok();
-                    std::process::exit(1);
-                }
-            }
+            run_verify(&c, &server_url, &token, &name, wait, for_sha.as_deref(), timeout, json)
+                .await?;
         }
         ServiceCmd::Delete { name } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
@@ -542,7 +469,7 @@ fn short_digest(d: &str) -> String {
     }
 }
 
-fn short_sha(s: &str) -> String {
+pub(crate) fn short_sha(s: &str) -> String {
     s.chars().take(12).collect()
 }
 
@@ -771,7 +698,7 @@ fn write_workflow_file(yaml: &str) -> Result<()> {
 // ===== gh ヘルパ =====
 
 /// gh が使える(存在 + 認証済み)か。`gh auth status` が成功なら true。
-fn gh_ok() -> bool {
+pub(crate) fn gh_ok() -> bool {
     gh_silent(&["auth", "status"])
 }
 
@@ -787,7 +714,7 @@ fn gh_silent(args: &[&str]) -> bool {
 }
 
 /// gh を実行(コマンドは stderr にエコー、出力は継承)。失敗は anyhow エラー。
-fn run_gh(args: &[&str]) -> Result<()> {
+pub(crate) fn run_gh(args: &[&str]) -> Result<()> {
     eprintln!("$ gh {}", args.join(" "));
     let status = Command::new("gh")
         .args(args)
@@ -800,7 +727,7 @@ fn run_gh(args: &[&str]) -> Result<()> {
 }
 
 /// gh の標準出力を取得する(失敗はエラー)。
-fn gh_capture(args: &[&str]) -> Result<String> {
+pub(crate) fn gh_capture(args: &[&str]) -> Result<String> {
     let out = Command::new("gh")
         .args(args)
         .output()
@@ -838,6 +765,96 @@ fn gh_variable(repo: &str, name: &str, value: &str) -> Result<()> {
 }
 
 // ===== verify(公開 URL の存活検証) =====
+
+/// `tbm service verify` の本体(deploy --watch も CI 成功後にこれを呼ぶ)。名前解決 →
+/// private / URL 無しの短絡 → (wait / for_sha なら)デプロイ完走待ち → 検証 → serving 付与 →
+/// 報告出力 + 検証結果を終了コードに映す(NG は exit 1)。`for_sha` の `HEAD` は手元 repo で解決、
+/// 非 sha は早期に弾く(満了空回り + 誤診を防ぐ)。
+#[allow(clippy::too_many_arguments)] // API triple(c/server/token)+ 対象 + 検証オプション。束ねる価値は薄い。
+pub(crate) async fn run_verify(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+    wait: bool,
+    for_sha: Option<&str>,
+    timeout: u64,
+    json: bool,
+) -> Result<()> {
+    // `HEAD` は手元 repo から解決(CI に渡った sha と同じものを追う)。
+    let for_sha = match for_sha {
+        Some("HEAD") => Some(crate::commands::git_head_sha()?),
+        other => other.map(str::to_owned),
+    };
+    // sha として不正な値(例:`--for-sha main` のようなブランチ名)は前綴一致し得ず、
+    // そのまま待つと満了まで空回りして「タイムアウト」と誤診する。早期に弾いて次の一手を出す
+    // (branch/tag は受けない — HEAD かコミット sha を明示。設計どおり scope を絞る)。
+    if let Some(s) = &for_sha
+        && (s.len() < 4 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        bail!(
+            "--for-sha の値 '{s}' は commit sha ではありません。full/短縮 sha か `HEAD` を指定してください(例:--for-sha $(git rev-parse HEAD))"
+        );
+    }
+    let id = resolve_service_id(c, server_url, token, name).await?;
+    let svc = api::service_get(c, server_url, token, &id).await?;
+    // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
+    // 誤読させる(AI が無駄リトライする既知の実害パターン)ので、明確な文言で短絡する。
+    // 旧サーバ(visibility 空)は company 扱いで従来どおり探測する。
+    if svc.visibility == VISIBILITY_PRIVATE {
+        bail!(
+            "このサービスは非公開(visibility=private)です。公開 URL は無効のため検証をスキップしました。公開するには `tbm service visibility {name} company`(または public)を実行してください"
+        );
+    }
+    if svc.url.is_empty() {
+        bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
+    }
+    let report = if wait || for_sha.is_some() {
+        // デプロイの完走を待ってから検証(succeeded 直後は traefik の file-watch
+        // 反映に数秒かかるため、NG の間は短い窓で再試行する)。
+        let spec = WaitSpec {
+            for_sha: for_sha.as_deref(),
+            timeout_secs: timeout,
+            quiet: json,
+        };
+        wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+        verify_with_retry(c, &svc.url).await?
+    } else {
+        verify_url(c, &svc.url).await?
+    };
+    // いま serving 中のデプロイを報告に付す(「見ているのが新版か」の機械判別材料)。
+    let mut report = report;
+    report.serving = fetch_serving(c, server_url, token, &id).await;
+    if json {
+        // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
+        // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
+        print_json(&report)?;
+        if !report.ok {
+            std::io::stdout().flush().ok();
+            std::process::exit(1);
+        }
+    } else {
+        let mark = |s: u16| if (200..300).contains(&s) { "✓" } else { "✗" };
+        println!("{} {} (根 HTML)", mark(report.root_status), svc.url);
+        for r in &report.resources {
+            println!("  {} {} {}", mark(r.status), r.status, r.url);
+        }
+        if let Some(s) = &report.serving {
+            println!("serving: sha={} (deploy {})", short_sha(&s.git_sha), s.deploy_id);
+        }
+        if report.ok {
+            println!("OK:根 + 子リソース {} 件すべて 2xx。", report.resources.len());
+        } else {
+            // 白画面の典型原因と次の一手(AI / 人間の自己修正用)。
+            println!(
+                "NG:2xx でないリソースがあります。assets 404 は build 出力パス / base 設定 / 直近デプロイの失敗が典型です(`tbm service status {name}` でデプロイ履歴を確認)。"
+            );
+            std::io::stdout().flush().ok();
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
 
 /// `--wait` の輪詢間隔。デプロイ状態も検証再試行も同じ歩調で見る。
 const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
