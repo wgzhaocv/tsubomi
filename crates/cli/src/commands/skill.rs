@@ -11,7 +11,8 @@ use crate::skill;
 
 #[derive(Subcommand)]
 pub enum SkillCmd {
-    /// 全 agent ターゲット(Claude / Codex)へ skill を書き出す(既存は上書き)
+    /// 全 agent ターゲット(Claude + 共有技能庫 ~/.agents/skills + 各 agent の symlink)へ
+    /// skill を書き出す / 張り直す(既存は上書き。旧 Codex AGENTS.md ブロックも掃除)
     Install,
     /// 書き出し先のパスを表示
     Where,
@@ -24,6 +25,14 @@ pub async fn run(action: SkillCmd) -> Result<()> {
         SkillCmd::Install => {
             for p in skill::install()? {
                 println!("{}", p.display());
+            }
+            // 投影できなかったターゲット(権限で symlink / 実複写できない agent 等)を可視化。
+            let stale = skill::stale_targets();
+            if !stale.is_empty() {
+                eprintln!("warning: 次のターゲットへは投影できませんでした(権限などを確認):");
+                for p in stale {
+                    eprintln!("  {}", p.display());
+                }
             }
         }
         SkillCmd::Where => {
