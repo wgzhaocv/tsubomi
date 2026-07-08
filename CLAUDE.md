@@ -154,6 +154,15 @@ GET 404**(CI は push 成功、deploy は manifest unknown。利用 AI は「reg
 再試行/診断に要る)②GC を**毎日 19:05 UTC(04:05 JST)固定**・起動 tick 廃止(gc.rs
 `until_next_utc`)③pull の manifest unknown エラーに「再デプロイで再 push」の次の一手 + skill
 早見表に一行。復旧は再デプロイのみ(毒された digest は再 push で実体が落ちる)。
+**AI 複測(同日)→ v47 / tbm 1.0.26 で 2 バグ追修**:(bug①)exit code が実際は 3/3 欠落 —
+restart policy 下では inspect の State が再起動でリセットされ、速い crash-loop は常に crash-loop
+分岐へ。**docker events(die/oom)を第一源**に変更(最初の die が「その退出」の exitCode を保持。
+crash-loop 実機で exit=101 捕獲を実証)、inspect は再起動回数と fallback に降格。(bug②)純基底
+イメージ(`FROM debian` + CMD のみ)が**再 push でも恒久 manifest unknown** — 假 201 の真因は
+registry の `blobdescriptor: inmemory` cache が**別プロセスの blob 掃除を知らない**こと
+(distribution 既知欠陥)。純基底の子 manifest は digest が全 build 同一 = 毒 cache に必中。
+恒久修正 = **GC 成功後に registry を自動再起動**(`registry::restart_registry`、深夜帯の数秒断は
+受容)。教訓:**registry の DELETE を伴う操作は、serving プロセスの cache 失効までがワンセット**。
 
 **stateful 後の追加(マイルストーン外):CLI の AI フレンドリ改善(tbm 1.0.20)**。AI 利用の
 フィードバック起点の CLI 純粋な磨き込み(server はほぼ不変)。(1)**`tbm db query --tsv`**:
