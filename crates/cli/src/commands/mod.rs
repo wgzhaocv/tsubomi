@@ -89,8 +89,13 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// 手元 repo の HEAD の full sha(40 桁)。`verify --for-sha HEAD` が使う(将来の
-/// `deploy --watch` も同じ解決を想定)。
+/// `--for-sha` の値が commit sha の形か(4 桁以上の hex。branch/tag は受けない —
+/// 前綴一致し得ず timeout まで空回りするため早期に弾く)。verify / deploy --watch が共有。
+pub fn looks_like_sha(s: &str) -> bool {
+    s.len() >= 4 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 手元 repo の HEAD の full sha(40 桁)。`verify --for-sha HEAD` と `deploy --watch` が共有。
 pub fn git_head_sha() -> Result<String> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])

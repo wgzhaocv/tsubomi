@@ -777,8 +777,11 @@ fn write_workflow_file(yaml: &str) -> Result<()> {
 // ===== gh ヘルパ =====
 
 /// gh が使える(存在 + 認証済み)か。`gh auth status` が成功なら true。
+/// `gh auth status` は GitHub への往復(数百 ms)なので結果をプロセス内で記憶する
+/// (deploy --watch は前提確認とサービス推断の 2 箇所から呼ぶ。CLI は短命 = 陳腐化しない)。
 pub(crate) fn gh_ok() -> bool {
-    gh_silent(&["auth", "status"])
+    static GH_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GH_OK.get_or_init(|| gh_silent(&["auth", "status"]))
 }
 
 /// gh を出力を捨てて実行し、成功したかだけ返す(存在チェック / repo view 用)。
@@ -1017,7 +1020,7 @@ pub(crate) async fn run_verify(
     // そのまま待つと満了まで空回りして「タイムアウト」と誤診する。早期に弾いて次の一手を出す
     // (branch/tag は受けない — HEAD かコミット sha を明示。設計どおり scope を絞る)。
     if let Some(s) = &for_sha
-        && (s.len() < 4 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+        && !crate::commands::looks_like_sha(s)
     {
         bail!(
             "--for-sha の値 '{s}' は commit sha ではありません。full/短縮 sha か `HEAD` を指定してください(例:--for-sha $(git rev-parse HEAD))"

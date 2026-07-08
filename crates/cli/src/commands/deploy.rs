@@ -36,6 +36,11 @@ pub struct DeployArgs {
     /// .env 混入 / Dockerfile の COPY 元不在 / listen ポート不一致を**警告**する(阻止はしない)
     #[arg(long)]
     pub no_preflight: bool,
+    /// (--watch 用)追跡する commit の sha(`HEAD` も可。省略時 HEAD)。`verify --for-sha` と同型
+    // conflicts_with も要る:requires だけだと clap は「必須が conflict で消えた」ケースを
+    // 免除し、`--local --for-sha X` が黙って --for-sha を捨てて通ってしまう(review で実証)。
+    #[arg(long, value_name = "SHA", requires = "watch", conflicts_with = "local")]
+    pub for_sha: Option<String>,
 }
 
 pub async fn run(
@@ -147,34 +152,91 @@ async fn run_watch(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout);
     let remaining = || deadline.saturating_duration_since(std::time::Instant::now()).as_secs();
 
-    // 1) HEAD(full sha)と上流を確認 → 未 push なら push。
-    let sha = crate::commands::git_head_sha()?;
-    let upstream = git_upstream()
-        .context("追跡ブランチ(upstream)がありません。`git push -u origin <branch>` で一度設定してください")?;
-    if git_has_unpushed(&upstream) {
-        if !json {
-            eprintln!("未 push のコミットがあります。push します…");
+    // 1) 追跡対象の sha(既定 HEAD、--for-sha で明示)と上流を確認 → 未 push なら push。
+    let head = crate::commands::git_head_sha()?;
+    let sha = match args.for_sha.as_deref() {
+        None | Some("HEAD") => head.clone(),
+        // 短縮 sha は full に解決(gh run list --commit は full sha 前提)。branch/tag は
+        // verify --for-sha と同じく受けない(sha か HEAD に絞る)。`--verify ^{commit}` で
+        // **オブジェクトの実在まで**確認する(素の rev-parse は 40 桁 hex をノーチェックで
+        // echo し返すため、typo sha が全 timeout を空費してから「run が現れない」と誤診する)。
+        Some(s) => {
+            if !crate::commands::looks_like_sha(s) {
+                bail!(
+                    "--for-sha はコミット sha か `HEAD` を指定してください(branch/tag 名は不可): {s}"
+                );
+            }
+            git_out(&["rev-parse", "--verify", "--quiet", &format!("{s}^{{commit}}")])
+                .with_context(|| {
+                    format!("sha '{s}' が手元 repo に見つかりません(fetch 済みか・typo を確認)")
+                })?
         }
-        git_push()?;
+    };
+    let upstream = match git_upstream() {
+        Some(u) => u,
+        None => {
+            // 初回(追跡ブランチ未設定)。remote は**実在する名前**で選ぶ:`service create
+            // --github` が作る remote は `origin` ではなく `tsubomi`(origin 固定の案内は
+            // そのまま打つと失敗する — 実利用フィードバック)。選べたら -u 付き push まで
+            // 自動でやる(次回からは通常の push で済む)。
+            let branch = git_out(&["rev-parse", "--abbrev-ref", "HEAD"]).context(
+                "現在のブランチを特定できません(git リポジトリの中で実行してください)",
+            )?;
+            if branch == "HEAD" {
+                bail!(
+                    "detached HEAD では --watch を使えません。ブランチに checkout してから再実行してください"
+                );
+            }
+            let remote = pick_remote().context(
+                "追跡ブランチ(upstream)が無く、push 先の remote も特定できません。`git remote -v` で確認し、`git push -u <remote> <branch>` で一度設定してください",
+            )?;
+            eprintln!("追跡ブランチ(upstream)未設定 → `git push -u {remote} {branch}` を実行します…");
+            run_git(&["push", "-u", &remote, &branch])?;
+            format!("{remote}/{branch}")
+        }
+    };
+    if sha == head {
+        if git_has_unpushed(&upstream) {
+            if !json {
+                eprintln!("未 push のコミットがあります。push します…");
+            }
+            run_git(&["push"])?;
+        }
+    } else {
+        // 過去 commit を追うモード:ここで push すると HEAD の未 push WIP まで巻き込み、
+        // 新しい CI/デプロイが対象 sha を追い越す(検証対象が変わる)。push はせず、対象が
+        // upstream に**未着なら**手動 push を案内して止める。
+        if !git_is_ancestor(&sha, &upstream) {
+            bail!(
+                "--for-sha {} は upstream({upstream})に含まれていません。先にその commit を push してから再実行してください",
+                crate::commands::service::short_sha(&sha)
+            );
+        }
     }
 
-    // 2) この commit の Actions run を探す(push 直後は現れるまで数秒かかる)。
+    // 2) この commit の Actions run を探す(push 直後は現れるまで数秒かかる)。gh の対象 repo は
+    // -R で明示する(tsubomi + origin の複数 remote だと既定解決が非対話ではエラーになる)。
+    let repo = repo_slug();
     if !json {
         eprintln!(
             "commit {} の GitHub Actions run を待っています…",
             crate::commands::service::short_sha(&sha)
         );
     }
-    let run = wait_for_run(&sha, remaining()).await?;
+    let run = wait_for_run(&sha, repo.as_deref(), remaining()).await?;
     // run URL は追跡先として常に出す(捕捉側が持てるよう stderr へ)。
     eprintln!("Actions run: {}", run.url);
 
     // 3) run の完了を待つ。text は `gh run watch`(ログを継承、時間管理は gh)、json は静かに輪詢。
     if json {
-        wait_for_run_conclusion(&run.id, remaining()).await?;
+        wait_for_run_conclusion(&run.id, repo.as_deref(), remaining()).await?;
     } else {
         // gh run watch は run 完了で成功、CI 失敗時は --exit-status で非零。
-        crate::commands::service::run_gh(&["run", "watch", &run.id, "--exit-status"])
+        let mut a = vec!["run", "watch", &run.id, "--exit-status"];
+        if let Some(r) = repo.as_deref() {
+            a.extend(["-R", r]);
+        }
+        crate::commands::service::run_gh(&a)
             .context("CI が失敗しました(上のログを確認)。修正して再度 push してください")?;
     }
 
@@ -202,11 +264,11 @@ struct GhRun {
 }
 
 /// commit sha の run が現れるまで輪詢する(push 直後は登録に数秒かかる)。timeout 超過はエラー。
-async fn wait_for_run(sha: &str, timeout_secs: u64) -> Result<GhRun> {
+async fn wait_for_run(sha: &str, repo: Option<&str>, timeout_secs: u64) -> Result<GhRun> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         // 最新の該当 run 1 件(databaseId と url)。まだ無ければ空配列。
-        let out = crate::commands::service::gh_capture(&[
+        let mut a = vec![
             "run",
             "list",
             "--commit",
@@ -215,7 +277,11 @@ async fn wait_for_run(sha: &str, timeout_secs: u64) -> Result<GhRun> {
             "1",
             "--json",
             "databaseId,url",
-        ])?;
+        ];
+        if let Some(r) = repo {
+            a.extend(["-R", r]);
+        }
+        let out = crate::commands::service::gh_capture(&a)?;
         if let Some(run) = parse_first_run(&out) {
             return Ok(run);
         }
@@ -230,16 +296,18 @@ async fn wait_for_run(sha: &str, timeout_secs: u64) -> Result<GhRun> {
 }
 
 /// json モードで run の結論を輪詢する(text は `gh run watch` に任せる)。CI 失敗は非零で bail。
-async fn wait_for_run_conclusion(run_id: &str, timeout_secs: u64) -> Result<()> {
+async fn wait_for_run_conclusion(
+    run_id: &str,
+    repo: Option<&str>,
+    timeout_secs: u64,
+) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        let out = crate::commands::service::gh_capture(&[
-            "run",
-            "view",
-            run_id,
-            "--json",
-            "status,conclusion",
-        ])?;
+        let mut a = vec!["run", "view", run_id, "--json", "status,conclusion"];
+        if let Some(r) = repo {
+            a.extend(["-R", r]);
+        }
+        let out = crate::commands::service::gh_capture(&a)?;
         let v: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
         if v.get("status").and_then(|s| s.as_str()) == Some("completed") {
             return match v.get("conclusion").and_then(|c| c.as_str()) {
@@ -433,16 +501,94 @@ fn git_has_unpushed(upstream: &str) -> bool {
     git_out(&["rev-list", &format!("{upstream}..HEAD")]).is_some()
 }
 
-/// `git push`(出力は継承)。失敗はエラー。
-fn git_push() -> Result<()> {
-    let status = Command::new("git")
-        .arg("push")
+/// `<sha>` が `<upstream>` に含まれる(= push 済み)か。--for-sha で過去 commit を追うとき、
+/// 誤って HEAD を push しないための判定。
+fn git_is_ancestor(sha: &str, upstream: &str) -> bool {
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", sha, upstream])
         .status()
-        .context("git push の実行に失敗しました")?;
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// git を出力継承で実行する(push / push -u が共有)。失敗はエラー。
+fn run_git(args: &[&str]) -> Result<()> {
+    let status = Command::new("git")
+        .args(args)
+        .status()
+        .with_context(|| format!("git {} の実行に失敗しました", args.join(" ")))?;
     if !status.success() {
-        bail!("git push が失敗しました。手元の git 状態を確認してください");
+        bail!(
+            "git {} が失敗しました。手元の git 状態を確認してください",
+            args.join(" ")
+        );
     }
     Ok(())
+}
+
+/// upstream 未設定時の push 先 remote。**git 自身の push 先設定を最優先**
+/// (`branch.<名>.pushRemote` → `remote.pushDefault` — CLI が代理 push する以上、ユーザの
+/// 明示設定を無視しない)。無ければ `tsubomi`(`service create --github` が作る名)→ `origin` →
+/// 唯一の remote。複数あって決められない場合は None(勝手に選ばない — 誤 push 防止)。
+fn pick_remote() -> Option<String> {
+    if let Some(branch) = git_out(&["rev-parse", "--abbrev-ref", "HEAD"])
+        && let Some(r) = git_out(&["config", "--get", &format!("branch.{branch}.pushRemote")])
+    {
+        return Some(r);
+    }
+    if let Some(r) = git_out(&["config", "--get", "remote.pushDefault"]) {
+        return Some(r);
+    }
+    let out = git_out(&["remote"])?;
+    let remotes: Vec<&str> = out.lines().collect();
+    for pref in ["tsubomi", "origin"] {
+        if remotes.contains(&pref) {
+            return Some(pref.to_string());
+        }
+    }
+    match remotes.as_slice() {
+        [only] => Some((*only).to_string()),
+        _ => None,
+    }
+}
+
+/// 現 repo の GitHub `owner/repo`(gh の `-R` に渡す形)。remote の選好は pick_remote と同一
+/// (方針を 1 箇所に:push 先と gh の対象 repo がズレない)。GitHub 以外 / repo 外は None。
+fn repo_slug() -> Option<String> {
+    pick_remote()
+        .and_then(|r| git_out(&["remote", "get-url", &r]))
+        .and_then(|u| gh_repo_from_url(&u))
+}
+
+/// git remote URL(https / ssh)→ gh の `-R` に渡す `owner/repo` 形。対象外の URL は None。
+fn gh_repo_from_url(url: &str) -> Option<String> {
+    let s = url.trim().trim_end_matches(".git");
+    let tail = s
+        .strip_prefix("git@github.com:")
+        .or_else(|| s.split("github.com/").nth(1))?;
+    let mut it = tail.split('/');
+    let (owner, repo) = (it.next()?, it.next()?);
+    (!owner.is_empty() && !repo.is_empty()).then(|| format!("{owner}/{repo}"))
+}
+
+/// 現在の git repo から対象 service の id を推断する。単一の真源は `service create --github` が
+/// repo variable に焼いた `TSUBOMI_SERVICE_ID`(`gh variable get` で読む)。gh 不在 / repo 外 /
+/// variable 無しは None — あくまで補助で、失敗したら従来の `--service` 指定エラーに落ちる。
+fn infer_service_id_from_repo() -> Option<String> {
+    if !crate::commands::service::gh_ok() {
+        return None;
+    }
+    // -R を明示する(tsubomi + origin の複数 remote だと gh の既定 repo 解決が非対話では
+    // エラーになる)。repo を特定できなければ gh の既定解決に任せる。
+    let out = match repo_slug().as_deref() {
+        Some(r) => {
+            crate::commands::service::gh_capture(&["variable", "get", "TSUBOMI_SERVICE_ID", "-R", r])
+        }
+        None => crate::commands::service::gh_capture(&["variable", "get", "TSUBOMI_SERVICE_ID"]),
+    }
+    .ok()?;
+    let id = out.trim().to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 /// --service 名で解決、省略時はサービスが 1 つだけならそれ(複数 / 0 はエラー)。
@@ -466,7 +612,23 @@ async fn resolve_service(
                 [] => bail!(
                     "サービスがありません。先に `tbm service create <名前>` を実行してください"
                 ),
-                _ => bail!("サービスが複数あります。`--service <名前>` で対象を指定してください"),
+                _ => {
+                    // 複数あっても、手元 repo の TSUBOMI_SERVICE_ID variable が一意に指すなら
+                    // それを使う(deploy は対象 repo の中で打つのが普通 — 毎回 --service を
+                    // 要求しない。実利用フィードバック)。
+                    if let Some(inferred) = infer_service_id_from_repo()
+                        && let Some(svc) = svcs.iter().find(|s| s.id.to_string() == inferred)
+                    {
+                        eprintln!(
+                            "対象 service を repo の TSUBOMI_SERVICE_ID から自動推断:{}",
+                            svc.display_name
+                        );
+                        return Ok((svc.id.to_string(), svc.display_name.clone()));
+                    }
+                    bail!(
+                        "サービスが複数あります。`--service <名前>` で対象を指定してください(service の repo 内で gh ログイン済みなら、TSUBOMI_SERVICE_ID variable から自動推断します)"
+                    )
+                }
             }
         }
     }
@@ -621,6 +783,24 @@ mod tests {
         assert_eq!(first_expose("FROM x\nEXPOSE 8080\n"), Some(8080));
         assert_eq!(first_expose("EXPOSE 5432/tcp"), Some(5432));
         assert_eq!(first_expose("FROM x\n"), None);
+    }
+
+    #[test]
+    fn gh_repo_from_url_parses_ssh_and_https() {
+        assert_eq!(
+            gh_repo_from_url("git@github.com:me/app.git").as_deref(),
+            Some("me/app")
+        );
+        assert_eq!(
+            gh_repo_from_url("https://github.com/me/app.git").as_deref(),
+            Some("me/app")
+        );
+        assert_eq!(
+            gh_repo_from_url("https://github.com/me/app").as_deref(),
+            Some("me/app")
+        );
+        assert_eq!(gh_repo_from_url("https://gitlab.com/me/app"), None);
+        assert_eq!(gh_repo_from_url("git@github.com:"), None);
     }
 
     #[test]

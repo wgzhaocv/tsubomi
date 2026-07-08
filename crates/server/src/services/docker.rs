@@ -464,6 +464,50 @@ pub async fn logs_stream(
     ))
 }
 
+/// 死んだ(死にかけの)コンテナの **終了要因の一行サマリ** を inspect から組む。ベストエフォート
+/// (inspect 失敗・state 欠落は None = 呼び出し側の「取得できず」文言に落とす)。失敗 deploy の
+/// エラーに exit code / シグナル / OOM を載せ、ログが空でも原因の当たりが付くようにする。
+pub async fn crash_summary(state: &AppState, name: &str) -> Option<String> {
+    let info = state.docker.inspect_container(name, None).await.ok()?;
+    let st = info.state.as_ref()?;
+    let restarts = info.restart_count.unwrap_or(0);
+    // RestartPolicy=unless-stopped で既に自動再起動された後だと exit_code は 0 にリセット
+    // されている(「正常終了」と誤診させる)。再起動済みで走行/再起動中なら crash-loop の
+    // 事実だけ伝え、あてにならない exit code には触れない。
+    if restarts > 0
+        && (st.running.unwrap_or(false) || st.restarting.unwrap_or(false))
+    {
+        return Some(format!(
+            "起動直後にクラッシュし再起動を繰り返しています(再起動 {restarts} 回)。`tbm service logs` で直近の出力を確認"
+        ));
+    }
+    let exit = st.exit_code?;
+    let oom = st.oom_killed.unwrap_or(false);
+    // exit code 別の当たり(断定しない — 典型例のヒント)。
+    let hint: std::borrow::Cow<'static, str> = if oom {
+        "メモリ上限(--memory)超過で OOM kill。`tbm service metrics` で使用量と上限を確認".into()
+    } else {
+        match exit {
+            0 => "何もせず即終了 — CMD がサーバを起動していない / ビルド成果物が空の典型".into(),
+            101 => "Rust の panic の典型値。ログの panic メッセージを確認".into(),
+            126 => "コマンドが実行不可(権限 / 形式)。実行ビットとアーキ(arm64/x86_64)を確認".into(),
+            127 => "コマンドが見つかりません。CMD のパス / シェルの有無(distroless 等)を確認".into(),
+            137 => "SIGKILL。OOM か外部 kill の典型".into(),
+            139 => "SIGSEGV(ネイティブクラッシュ / ライブラリ・ABI 不整合など)。ログとバイナリ互換を確認".into(),
+            255 => "起動即失敗の慣用値(init 失敗 / 範囲外 exit)。ログを確認".into(),
+            n if n > 128 => format!("シグナル {} で終了", n - 128).into(),
+            n => format!("アプリ自身の終了コード {n}。起動時エラーのログを確認").into(),
+        }
+    };
+    let oom_tag = if oom { "・OOMKilled" } else { "" };
+    let restart_tag = if restarts > 0 {
+        format!("、再起動 {restarts} 回")
+    } else {
+        String::new()
+    };
+    Some(format!("exit={exit}{oom_tag}{restart_tag}({hint})"))
+}
+
 /// 指定した **名前**のコンテナの直近ログ(stdout+stderr、tail 行)。ベストエフォート
 /// (取得失敗・コンテナ不在は空文字)。失敗 deploy で掃除される前の死にかけコンテナから、
 /// クラッシュ原因をエラーに載せるために使う(`logs` は現行コンテナを service_id で引く別経路)。

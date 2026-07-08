@@ -423,14 +423,18 @@ async fn run_digest_inner(
 async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<()> {
     docker::run(state, spec, image_ref).await?;
     if !docker::is_live(state, &spec.container_name).await {
-        // 掃除される前に死んだ新コンテナのログ末尾を拾い、原因をエラーに載せる。
-        // これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が空になり、
+        // 掃除される前に死んだ新コンテナから終了要因(inspect)とログ末尾を拾い、原因をエラーに
+        // 載せる。これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が空になり、
         // クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service status に残る。
+        let why = docker::crash_summary(state, &spec.container_name).await;
+        let why = why
+            .as_deref()
+            .unwrap_or("終了要因を取得できませんでした");
         let tail = docker::logs_by_name(state, &spec.container_name, 40).await;
         let tail = tail.trim();
+        // logs_by_name は best-effort(取得失敗も空文字)なので「無出力」と断定しない。
         let detail = if tail.is_empty() {
-            "(コンテナログ無し — 出力前にクラッシュ / 即 exit、またはログ取得に失敗した可能性)"
-                .to_string()
+            "コンテナログ(stdout+stderr)無し — 何も出力せず終了したか、ログ取得に失敗".to_string()
         } else {
             // deploys.error 列に載るので末尾 1500 文字だけに切る(char 境界安全)。
             let n = tail.chars().count();
@@ -439,10 +443,10 @@ async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> A
             } else {
                 tail.to_string()
             };
-            format!("コンテナログ末尾:\n{clipped}")
+            format!("コンテナログ末尾(stdout+stderr):\n{clipped}")
         };
         return Err(AppError::Other(anyhow::anyhow!(
-            "新コンテナが起動直後に終了しました(イメージ / $PORT のリッスンを確認してください)。{detail}"
+            "新コンテナが起動直後に終了しました:{why}。{detail}"
         )));
     }
     Ok(())
