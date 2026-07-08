@@ -61,7 +61,15 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
         let mut stream = state.docker.create_image(Some(opts), None, None);
         while let Some(item) = stream.next().await {
             item.map_err(|e| {
-                AppError::Other(anyhow!("イメージ pull に失敗({repo}@{image_digest}): {e}"))
+                // manifest unknown = push は成功したのに registry に実体が無い。典型は registry GC
+                // (blob 掃除)と push の競合(§10-E、2026-07-08 実証)。再 push で回復するので
+                // 次の一手を明示する(AI がこれを「registry 二重化 / 認証の壊れ」と誤診した実害)。
+                let hint = if e.to_string().contains("manifest unknown") {
+                    "。registry にイメージがありません(GC と push の競合の可能性)— 再デプロイ(CI 再実行 / `tbm deploy`)で再 push してください"
+                } else {
+                    ""
+                };
+                AppError::Other(anyhow!("イメージ pull に失敗({repo}@{image_digest}): {e}{hint}"))
             })?;
         }
         Ok::<(), AppError>(())

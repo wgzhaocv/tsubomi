@@ -22,9 +22,10 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(3600);
 const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 /// バックアップ保持日数。
 const BACKUP_RETAIN_DAYS: i64 = 7;
-/// registry の未参照 blob 回収(GC)の間隔。backup と同じ日次だが別タスクにする
-/// (関心事が無関係 + 遅い backup に GC が引きずられないように)。
-const REGISTRY_GC_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// registry GC の実行時刻(UTC)。**固定時刻**であって間隔ではない — 理由は
+/// [`spawn_registry_gc`] のドキュメント参照(起動 tick は本番事故で廃止)。
+/// 19:05 UTC = 04:05 JST(push が最少の深夜帯。finance 系の quiet hours とも整合)。
+const REGISTRY_GC_UTC: (u32, u32) = (19, 5);
 
 pub fn spawn(state: AppState) {
     spawn_housekeeping(state.clone());
@@ -260,13 +261,16 @@ fn spawn_backup(state: AppState) {
 }
 
 /// 日次:registry の未参照 blob を回収する(削除済み service の旧イメージ / 上書きで孤立した版)。
-/// backup とは独立したタスク。並行 push との競合を避けるため 1h ではなく日次。最初の回収は
-/// 起動直後(interval の 0 tick)。best-effort:失敗は log のみ。
+/// backup とは独立したタスク。**毎日 19:05 UTC 固定・起動直後 tick は廃止**:blob 掃除は
+/// Pi で 10 分超走り、その間に「掃除対象と同一 digest」を再 push すると dedup が掃除前の
+/// blob を見て書き込みを省略 → 直後に実体が掃除され **PUT 201 なのに GET 404** の假成功で
+/// 毒される(2026-07-08 本番実証 — push 成功ログと pull manifest unknown が同時に成立)。
+/// 起動 tick だと ship のたびに任意時刻で GC が走り、アクティブなデプロイと衝突するため、
+/// push が最少の深夜帯に固定する。best-effort:失敗は log のみ。
 fn spawn_registry_gc(state: AppState) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(REGISTRY_GC_INTERVAL);
         loop {
-            tick.tick().await;
+            tokio::time::sleep(until_next_utc(REGISTRY_GC_UTC.0, REGISTRY_GC_UTC.1)).await;
             // 旧版 manifest(index + 子)の期限切れを**先に**、blob 回収を後に —
             // manifest を消す判断は平台の keep 窓だけが行う(--delete-untagged は廃止。§10-E)。
             if let Err(e) = crate::services::registry::protect_and_expire_manifests(&state).await {
@@ -277,6 +281,23 @@ fn spawn_registry_gc(state: AppState) {
             }
         }
     });
+}
+
+/// 次に UTC の hh:mm を迎えるまでの時間(既に過ぎていれば翌日の同時刻)。registry GC の
+/// 固定時刻スケジュール用。負値になり得ない構成だが、時計後退等の異常時は 60s で安全側に倒す。
+fn until_next_utc(hour: u32, minute: u32) -> Duration {
+    let now = chrono::Utc::now();
+    let today = now
+        .date_naive()
+        .and_hms_opt(hour, minute, 0)
+        .expect("固定時刻は常に有効")
+        .and_utc();
+    let next = if today > now {
+        today
+    } else {
+        today + chrono::Duration::days(1)
+    };
+    (next - now).to_std().unwrap_or(Duration::from_secs(60))
 }
 
 async fn run_backup(state: &AppState) -> anyhow::Result<()> {

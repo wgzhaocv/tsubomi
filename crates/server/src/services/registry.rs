@@ -339,13 +339,19 @@ async fn protect_and_expire_one(
 ) -> AppResult<()> {
     // 1) 期限切れ候補(古い快照):terminal な deploys の distinct digest。
     //    非 terminal 行(received/pulling/starting)を 1 つでも持つ digest は in-flight = 触らない。
+    //    **48h の年齢下限**(HAVING):直近に push された digest は消さない — (a)失敗 deploy の
+    //    イメージは即時の再試行 / 診断にまだ要る、(b)温かい buildx キャッシュが同一 digest を
+    //    再 push し得る = 「DELETE 直後の再 push が blob 掃除と競合して假 201 で毒される」
+    //    (2026-07-08 本番実証)の餌をまかない。48h 分の失敗イメージのディスクは受容。
     let expendable: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT d.image_digest FROM deploys d
+        "SELECT d.image_digest FROM deploys d
           WHERE d.service_id = $1 AND d.status IN ('succeeded','failed')
             AND NOT EXISTS (
               SELECT 1 FROM deploys x
                WHERE x.service_id = d.service_id AND x.image_digest = d.image_digest
-                 AND x.status NOT IN ('succeeded','failed'))",
+                 AND x.status NOT IN ('succeeded','failed'))
+          GROUP BY d.image_digest
+          HAVING MAX(d.created_at) < now() - interval '48 hours'",
     )
     .bind(service_id)
     .fetch_all(&state.db)
