@@ -64,6 +64,8 @@ export const VISIBILITY_OPTIONS = [
 
 // `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。Overview / Deploys で共用。
 export function shortDigest(d: string): string {
+  // deploy-source の取得中プレースホルダ('pending')は digest ではないので分かる文言にする。
+  if (d === "pending") return "取得中…";
   const i = d.indexOf(":");
   return i >= 0 ? `${d.slice(0, i + 1)}${d.slice(i + 1, i + 13)}` : d.slice(0, 19);
 }

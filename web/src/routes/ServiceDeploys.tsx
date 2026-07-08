@@ -26,7 +26,7 @@ export default function ServiceDeploys() {
 
       {!isPending && deploys && deploys.length === 0 && (
         <p className="text-sm font-medium text-muted-foreground">
-          (まだデプロイがありません。git push か `tbm deploy --local` で開始)
+          (まだデプロイがありません。git push / `tbm deploy --local` / `tbm deploy --image` で開始)
         </p>
       )}
 

@@ -9,7 +9,10 @@ use crate::commands::{
     OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
 };
 use crate::config;
-use tsubomi_shared::{DeployConfig, hmac_sha256, random_b64};
+use tsubomi_shared::{
+    DeployConfig, DeploySourceReq, MAX_DOCKERFILE_BYTES, SOURCE_KIND_DOCKERFILE, SOURCE_KIND_IMAGE,
+    hmac_sha256, random_b64,
+};
 
 /// `tbm deploy`(GitHub 非依存の退路)。ローカルで build + push して自分で hook を叩く。
 /// 平台は build しない(決定 #3)— build はここ(ユーザ機の docker)。CI が無い / 緊急時に使う。
@@ -41,6 +44,19 @@ pub struct DeployArgs {
     // 免除し、`--local --for-sha X` が黙って --for-sha を捨てて通ってしまう(review で実証)。
     #[arg(long, value_name = "SHA", requires = "watch", conflicts_with = "local")]
     pub for_sha: Option<String>,
+    /// 既成イメージ参照をサーバ側で取得してデプロイ(GitHub もローカル docker も不要。
+    /// 例: pgvector/pgvector:pg17)。`--watch` を付けると完走まで待って検証する
+    // 第 3 経路(deploy-source)。--local(経路排他)/ --for-sha(sha はサーバが合成)/
+    // --context・--no-preflight(ローカル build 前提の概念)と排他。conflicts は明示
+    // (上の --for-sha と同じ教訓:requires 頼みは黙って捨てられる)。
+    #[arg(long, value_name = "REF",
+          conflicts_with_all = ["dockerfile", "local", "for_sha", "no_preflight", "context"])]
+    pub image: Option<String>,
+    /// コンテキスト無し Dockerfile(FROM/RUN 等のみ、COPY・ADD 不可)をサーバ側で
+    /// ビルドしてデプロイ(GitHub もローカル docker も不要)。`--watch` で完走待ち + 検証
+    #[arg(long, value_name = "PATH",
+          conflicts_with_all = ["local", "for_sha", "no_preflight", "context"])]
+    pub dockerfile: Option<String>,
 }
 
 pub async fn run(
@@ -49,12 +65,17 @@ pub async fn run(
     token: Option<String>,
     out: OutputFormat,
 ) -> Result<()> {
+    // 第 3 経路(deploy-source)は --watch より先に分岐する:source モードの --watch は
+    // 「完走まで待って検証」の意味で、GitHub 経路の run_watch に吸われてはならない。
+    if args.image.is_some() || args.dockerfile.is_some() {
+        return run_source(args, server, token, out).await;
+    }
     if args.watch {
         return run_watch(args, server, token, out).await;
     }
     if !args.local {
         bail!(
-            "`tbm deploy` は `--local`(ローカル build)か `--watch`(GitHub 経路を追跡)のいずれかを指定してください。素の git push でも GitHub Actions が自動デプロイします"
+            "`tbm deploy` は `--local`(ローカル build)/ `--watch`(GitHub 経路を追跡)/ `--image`・`--dockerfile`(サーバ側で取得/ビルド)のいずれかを指定してください。素の git push でも GitHub Actions が自動デプロイします"
         );
     }
     let cfg = config::load()?;
@@ -108,6 +129,107 @@ pub async fn run(
             "デプロイを送信しました。`tbm service verify {svc_name} --wait` で完了まで待って検証できます。"
         );
         println!("{digest}");
+    }
+    Ok(())
+}
+
+/// `tbm deploy --image / --dockerfile`(第 3 経路):サーバ側で取得/ビルドするので GitHub も
+/// ローカル docker も不要。202 即返し → `--watch` なら完走まで待って検証(run_verify に合流)。
+async fn run_source(
+    args: DeployArgs,
+    server: Option<String>,
+    token: Option<String>,
+    out: OutputFormat,
+) -> Result<()> {
+    let cfg = config::load()?;
+    let server_url = resolve_server_from(server.as_deref(), cfg.as_ref());
+    let token = resolve_token_from(token, cfg)?;
+    let json = out.is_json();
+    let c = reqwest::Client::new();
+
+    // リクエストを先に組む(ローカルの Dockerfile 読み込み / サイズ検証を、サーバ往復より前に —
+    // パス誤りで無駄な resolve_service 往復をしない)。dispatch 条件で image/dockerfile の
+    // どちらかは必ず在る(run() の分岐、deploy.rs)。
+    let req = match (&args.image, &args.dockerfile) {
+        (Some(image), _) => DeploySourceReq {
+            kind: SOURCE_KIND_IMAGE.to_string(),
+            spec: image.clone(),
+        },
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("Dockerfile を読めません: {path}"))?;
+            if text.len() > MAX_DOCKERFILE_BYTES {
+                bail!(
+                    "Dockerfile が大きすぎます(上限 {}KiB)。コンテキスト無しビルドは FROM+RUN 程度の軽い定制向けです",
+                    MAX_DOCKERFILE_BYTES / 1024
+                );
+            }
+            DeploySourceReq {
+                kind: SOURCE_KIND_DOCKERFILE.to_string(),
+                spec: text,
+            }
+        }
+        (None, None) => unreachable!("run() の dispatch が image/dockerfile を保証"),
+    };
+    let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+
+    let resp = match api::deploy_source(&c, &server_url, &token, &id, &req).await {
+        Ok(r) => r,
+        Err(e) => {
+            // v43+ の未知 /api 路由は機械可判の 404 — 旧サーバへの誤診(「service が無い」)を防ぐ。
+            if e.downcast_ref::<api::ApiError>()
+                .is_some_and(|a| a.code == "not_found")
+            {
+                bail!(
+                    "デプロイ端点が見つかりません。サーバがこの機能(deploy --image / --dockerfile)に未対応の可能性があります。プラットフォーム側のサーバ更新が必要です"
+                );
+            }
+            return Err(e);
+        }
+    };
+
+    if args.watch {
+        // 完走待ち。公開サービスは URL + 子リソース検証まで(GitHub 経路の --watch と同じ着地点。
+        // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は公開 URL が無いので
+        // 完走だけ待って報告する(run_verify の private 短絡は「待たず失敗扱い」に見えるため分岐)。
+        let svc = api::service_get(&c, &server_url, &token, &id).await?;
+        if svc.visibility == tsubomi_shared::VISIBILITY_PRIVATE {
+            return crate::commands::service::wait_deploy_only(
+                &c,
+                &server_url,
+                &token,
+                &svc_name,
+                &resp.git_sha,
+                args.timeout,
+                json,
+            )
+            .await;
+        }
+        return crate::commands::service::run_verify(
+            &c,
+            &server_url,
+            &token,
+            &svc_name,
+            /*wait*/ true,
+            Some(&resp.git_sha),
+            args.timeout,
+            json,
+        )
+        .await;
+    }
+    if json {
+        print_json(&serde_json::json!({
+            "service_id": resp.service_id,
+            "deploy_id": resp.deploy_id,
+            "git_sha": resp.git_sha,
+            "status": "accepted",
+        }))?;
+    } else {
+        eprintln!(
+            "サーバ側でイメージ取得〜デプロイを開始しました。`tbm service verify {svc_name} --wait --for-sha {sha}` で完了まで待って検証できます(private サービスは `tbm service status {svc_name}`)。",
+            sha = resp.git_sha
+        );
+        println!("{}", resp.git_sha);
     }
     Ok(())
 }

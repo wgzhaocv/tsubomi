@@ -277,6 +277,29 @@ async fn manifest_digest(state: &AppState, base: &str, reference: &str) -> AppRe
     Ok(digest)
 }
 
+/// push 直後の tag の頂点 manifest digest を引く(deploy-source 経路:サーバ側 pull/build →
+/// push_to_internal の直後に呼ぶ。bollard の push 応答に digest が無いための registry API 迂回)。
+/// 直後なので不在は異常 — None に倒さずエラーにする。形式も検証する(以後この値が deploys /
+/// service_details の digest 不変量に入るため)。
+pub(crate) async fn pushed_manifest_digest(
+    state: &AppState,
+    service_id: Uuid,
+    tag: &str,
+) -> AppResult<String> {
+    let base = repo_base(state, service_id);
+    let digest = manifest_digest(state, &base, tag).await?.ok_or_else(|| {
+        AppError::Other(anyhow!(
+            "push 直後の manifest digest を取得できませんでした(registry 応答異常。tag={tag})"
+        ))
+    })?;
+    if !crate::services::deploy::is_sha256_digest(&digest) {
+        return Err(AppError::Other(anyhow!(
+            "registry が返した digest が不正です({digest})"
+        )));
+    }
+    Ok(digest)
+}
+
 /// manifest を digest 指定で削除(その manifest を指す**全 tag も一緒に消える** — distribution v2
 /// に tag 単体の削除は無い)。202 = 受理、404 = 既に無い(冪等)。
 async fn delete_manifest(state: &AppState, base: &str, digest: &str) -> AppResult<()> {
@@ -397,6 +420,11 @@ async fn protect_and_expire_one(
     // 守るべき index の子 manifest 集合(keep ∪ in-flight。高々 N+α 回の GET/日)。
     let mut protected_children: std::collections::HashSet<String> = std::collections::HashSet::new();
     for digest in keep.iter().chain(inflight.iter().map(|(d,)| d)) {
+        // deploy-source 経路の取得中プレースホルダ('pending' 等、digest 形でない値)はスキップ
+        // (registry に実体が無い = 列挙しても無意味な GET になるだけ)。
+        if !crate::services::deploy::is_sha256_digest(digest) {
+            continue;
+        }
         match manifest_children(state, &base, digest).await {
             Ok(children) => protected_children.extend(children),
             Err(e) => {
@@ -410,6 +438,11 @@ async fn protect_and_expire_one(
     //    子は保護集合(keep / in-flight の index が参照)に入っている分をスキップ。
     for (digest,) in expendable {
         if keep.contains(&digest) {
+            continue;
+        }
+        // digest 形でない値(deploy-source の取得前失敗行の 'pending')は registry に実体が無い。
+        // tag 形の DELETE は distribution が拒否する(毎日 warn が出続ける)のでスキップ。
+        if !crate::services::deploy::is_sha256_digest(&digest) {
             continue;
         }
         // 子を先に列挙(index 削除後は本体が読めない)、削除は index が先(参照を断ってから子)。

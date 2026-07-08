@@ -13,6 +13,7 @@ pub mod network;
 pub mod reconcile;
 pub mod registry;
 pub mod route;
+pub mod source;
 pub mod workflow;
 
 use crate::auth::AuthCtx;
@@ -126,6 +127,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/visibility", post(set_visibility))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
+        .route("/services/{id}/deploy-source", post(source::deploy_source))
         .route(
             "/services/{id}/injections",
             get(list_injections).post(create_injection),
@@ -222,7 +224,7 @@ pub async fn get_one(
 }
 
 /// 自分の service か確認する(他人 / 不在 / 削除済みは 404)。所有権ゲート。
-async fn ensure_owned(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<()> {
+pub(crate) async fn ensure_owned(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<()> {
     let ok: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM resources
           WHERE id=$1 AND user_id=$2 AND kind='service' AND deleted_at IS NULL)",
@@ -759,6 +761,14 @@ pub async fn rollback(
     .fetch_optional(&state.db)
     .await?;
     let (digest, git_sha, msg) = row.ok_or(AppError::NotFound)?;
+    // deploy-source の取得前に失敗した行は digest がプレースホルダ('pending')のまま =
+    // 内部 registry に実体が無い。rollback 先にすると pull が誤解を招くエラー(manifest
+    // unknown → 「再 push してください」)になるので、ここで明確に弾く。
+    if !deploy::is_sha256_digest(&digest) {
+        return Err(AppError::BadRequest(
+            "このデプロイはイメージ取得前に失敗しています(digest 未確定)。`tbm service deploys` で別のデプロイを指定してください".into(),
+        ));
+    }
     redeploy(
         &state,
         id,

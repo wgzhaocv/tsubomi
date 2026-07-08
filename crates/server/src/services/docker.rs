@@ -16,9 +16,10 @@ use bollard::models::{
     HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder, StatsOptionsBuilder,
-    StopContainerOptionsBuilder,
+    BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
+    ListContainersOptionsBuilder, LogsOptionsBuilder, PushImageOptionsBuilder,
+    RemoveContainerOptionsBuilder, StatsOptionsBuilder, StopContainerOptionsBuilder,
+    TagImageOptionsBuilder,
 };
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
@@ -85,6 +86,210 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
         }
     }
     Ok(format!("{repo}@{image_digest}"))
+}
+
+// ===========================================================================
+// デプロイ源(deploy-source)の取得原語:サーバ側 pull / build / 内部 registry への push。
+// いずれも「digest を内部 registry に置く」ための前段で、以後は既存の run_digest 経路。
+// 注意:build の RUN コンテナは docker の default bridge(172.17/16)で走り、
+// TSUBOMI-EGRESS(テナント池 10.231/16 だけを縛る)の対象外 = 出網は無制限。
+// build は apt/pip 等の取得に出網が要るので**意図した設計**(誤って「隔離漏れ」と
+// 審計しないこと)。tar はビルドコンテキスト無し(Dockerfile 1 枚)なのでホストの
+// ファイルには触れない。
+// ===========================================================================
+
+/// 外部イメージ取得の全体タイムアウト(Pi の家庭回線で数百 MB を想定)。
+const PULL_EXTERNAL_TIMEOUT_SECS: u64 = 600;
+/// 内部 registry への push(loopback だがディスク律速で大イメージは分単位)。
+const PUSH_INTERNAL_TIMEOUT_SECS: u64 = 600;
+/// コンテキスト無し Dockerfile の build(RUN の apt/pip は Pi では遅い)。
+const BUILD_TIMEOUT_SECS: u64 = 900;
+/// build コンテナのメモリ硬上限(= memswap で swap も無効化)。
+const BUILD_MEMORY_BYTES: i32 = 1024 * 1024 * 1024;
+/// build ログの保持上限(末尾のみ。エラー表示用)。
+const BUILD_LOG_TAIL_CHARS: usize = 2000;
+
+/// イメージ参照を create_image の (fromImage, tag) に分解する。
+/// digest 形(`name@sha256:…`)は fromImage に全体を入れ tag は None。
+/// tag 無しは **"latest" を明示**する(Docker API は tag 空だと全 tag を pull してしまう)。
+pub(crate) fn split_image_ref(image_ref: &str) -> (String, Option<String>) {
+    if image_ref.contains('@') {
+        return (image_ref.to_string(), None);
+    }
+    // 最後の '/' より後の ':' だけが tag 区切り(それ以前はレジストリの host:port)。
+    let after_slash = image_ref.rfind('/').map_or(0, |i| i + 1);
+    match image_ref[after_slash..].rfind(':') {
+        Some(i) => {
+            let split = after_slash + i;
+            (
+                image_ref[..split].to_string(),
+                Some(image_ref[split + 1..].to_string()),
+            )
+        }
+        None => (image_ref.to_string(), Some("latest".to_string())),
+    }
+}
+
+/// 外部 registry(Docker Hub 等)から任意参照を daemon に pull する(deploy-source の
+/// kind=image)。ホストのアーキ(arm64)の変体が自動選択される。認証は無し(匿名 pull)。
+pub(crate) async fn pull_external(state: &AppState, image_ref: &str) -> AppResult<()> {
+    let (from_image, tag) = split_image_ref(image_ref);
+    let mut opts = CreateImageOptionsBuilder::default().from_image(&from_image);
+    if let Some(t) = &tag {
+        opts = opts.tag(t);
+    }
+    let drain = async {
+        let mut stream = state.docker.create_image(Some(opts.build()), None, None);
+        while let Some(item) = stream.next().await {
+            item.map_err(|e| {
+                let msg = e.to_string();
+                // 失敗の典型 3 種に次の一手を併載する(AI が自己修正できる文案)。
+                let hint = if msg.contains("no matching manifest")
+                    || msg.contains("does not match the specified platform")
+                {
+                    "。このイメージにはプラットフォームのアーキ版がありません(tbm whoami でアーキ確認)。対応するイメージ / タグを指定してください"
+                } else if msg.contains("toomanyrequests") {
+                    "。Docker Hub の匿名 pull 上限に達しています。しばらく待って再デプロイしてください"
+                } else if msg.contains("not found") || msg.contains("manifest unknown") {
+                    "。イメージが見つかりません。参照(名前・タグ)を確認してください"
+                } else {
+                    ""
+                };
+                AppError::Other(anyhow!("イメージ取得に失敗({image_ref}): {e}{hint}"))
+            })?;
+        }
+        Ok::<(), AppError>(())
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(PULL_EXTERNAL_TIMEOUT_SECS),
+        drain,
+    )
+    .await
+    .map_err(|_| {
+        AppError::Other(anyhow!(
+            "イメージ取得がタイムアウトしました({PULL_EXTERNAL_TIMEOUT_SECS}s。{image_ref})"
+        ))
+    })?
+}
+
+/// pull / build 済みのローカルイメージを内部 registry の per-service repo へ tag + push する。
+/// 内部 registry はコンテナ自体に認証が無い(loopback。認証は公網入口の traefik 層)ので
+/// 資格情報は不要。digest は push 応答に載らない(bollard 0.21 の PushImageInfo に digest
+/// フィールドが無い)ため、呼び出し側が registry API(pushed_manifest_digest)で取る。
+pub(crate) async fn push_to_internal(
+    state: &AppState,
+    local_ref: &str,
+    service_id: Uuid,
+    tag: &str,
+) -> AppResult<()> {
+    let repo = format!("{}/{}", state.config.registry_pull, service_id);
+    let internal_ref = format!("{repo}:{tag}");
+    // build 済みで既に内部 ref を名乗っている場合も tag_image は冪等(同名同参照は no-op)。
+    if local_ref != internal_ref {
+        state
+            .docker
+            .tag_image(
+                local_ref,
+                Some(TagImageOptionsBuilder::default().repo(&repo).tag(tag).build()),
+            )
+            .await
+            .map_err(|e| AppError::Other(anyhow!("イメージの tag 付けに失敗({local_ref} → {internal_ref}): {e}")))?;
+    }
+    let drain = async {
+        let mut stream = state.docker.push_image(
+            &repo,
+            Some(PushImageOptionsBuilder::default().tag(tag).build()),
+            None,
+        );
+        while let Some(item) = stream.next().await {
+            item.map_err(|e| {
+                AppError::Other(anyhow!("内部 registry への push に失敗({internal_ref}): {e}"))
+            })?;
+        }
+        Ok::<(), AppError>(())
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(PUSH_INTERNAL_TIMEOUT_SECS),
+        drain,
+    )
+    .await
+    .map_err(|_| {
+        AppError::Other(anyhow!(
+            "内部 registry への push がタイムアウトしました({PUSH_INTERNAL_TIMEOUT_SECS}s。{internal_ref})"
+        ))
+    })?
+}
+
+/// コンテキスト無し Dockerfile を classic builder でビルドする(deploy-source の
+/// kind=dockerfile)。tar は「Dockerfile 1 枚だけ」を呼び出し側(source::dockerfile_tar)が
+/// 組む。`pull=true` で FROM の基底を毎回最新に解決する。失敗時はビルドログ末尾を併載
+/// (deploys.error → CLI/web に届き、AI が自己修正できる)。
+pub(crate) async fn build_dockerfile(
+    state: &AppState,
+    tar_bytes: Vec<u8>,
+    image_tag: &str,
+) -> AppResult<()> {
+    let opts = BuildImageOptionsBuilder::default()
+        .dockerfile("Dockerfile")
+        .t(image_tag)
+        .pull("true")
+        .rm(true)
+        // 宿主機保護(Pi は本番コンテナと同居):メモリ 1GiB 硬上限 + swap を無効化
+        // (memswap==memory で追加 swap 0 = SD/SSD のスラッシング防止)+ CPU を 2 コア相当に
+        // 制限(cpuquota/period。無制限だと RUN の native ビルドが全コアを 900s 占有し隣人を拖らせる)。
+        .memory(BUILD_MEMORY_BYTES)
+        .memswap(BUILD_MEMORY_BYTES)
+        .cpuperiod(100_000)
+        .cpuquota(200_000)
+        .build();
+    // ビルドログ末尾(≤2000 chars)を保持。エラー時に原因を見せる唯一の窓。char 境界で切る。
+    let mut log = String::new();
+    let drain = async {
+        let mut stream = state.docker.build_image(
+            opts,
+            None,
+            Some(bollard::body_full(bytes::Bytes::from(tar_bytes))),
+        );
+        while let Some(item) = stream.next().await {
+            let info = item.map_err(|e| e.to_string())?;
+            if let Some(s) = info.stream {
+                log.push_str(&s);
+            }
+            if let Some(s) = info.status {
+                log.push_str(&s);
+                log.push('\n');
+            }
+            clip_tail_in_place(&mut log, BUILD_LOG_TAIL_CHARS);
+        }
+        Ok::<(), String>(())
+    };
+    let reason = match tokio::time::timeout(
+        std::time::Duration::from_secs(BUILD_TIMEOUT_SECS),
+        drain,
+    )
+    .await
+    {
+        Ok(Ok(())) => return Ok(()),
+        Ok(Err(e)) => e,
+        Err(_) => format!("タイムアウト({BUILD_TIMEOUT_SECS}s)"),
+    };
+    let tail = log.trim();
+    let tail_note = if tail.is_empty() {
+        "ビルドログ無し".to_string()
+    } else {
+        format!("ビルドログ末尾:\n{tail}")
+    };
+    Err(AppError::Other(anyhow!(
+        "Dockerfile のビルドに失敗しました: {reason}。{tail_note}"
+    )))
+}
+
+/// 文字列を末尾 `max` chars に切り詰める(char 境界安全。ビルドログの逐次抑制用)。
+fn clip_tail_in_place(s: &mut String, max: usize) {
+    let n = s.chars().count();
+    if n > max {
+        *s = s.chars().skip(n - max).collect();
+    }
 }
 
 /// 新コンテナを create + start(per-service 私網のみ。起動の直前に ensure_service_network で
@@ -1132,4 +1337,53 @@ fn container_ip(info: &bollard::models::ContainerInspectResponse) -> Option<Stri
         .as_ref()?
         .values()
         .find_map(|e| e.ip_address.clone().filter(|s| !s.is_empty()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_image_ref_cases() {
+        assert_eq!(split_image_ref("nginx"), ("nginx".into(), Some("latest".into())));
+        assert_eq!(
+            split_image_ref("pgvector/pgvector:pg17"),
+            ("pgvector/pgvector".into(), Some("pg17".into()))
+        );
+        // host:port を含む参照 — tag 区切りは最後の '/' より後の ':' だけ。
+        assert_eq!(
+            split_image_ref("registry:5000/a/b"),
+            ("registry:5000/a/b".into(), Some("latest".into()))
+        );
+        assert_eq!(
+            split_image_ref("registry:5000/a/b:v1"),
+            ("registry:5000/a/b".into(), Some("v1".into()))
+        );
+        // digest 形は fromImage に全体・tag なし。
+        assert_eq!(
+            split_image_ref("repo@sha256:abc"),
+            ("repo@sha256:abc".into(), None)
+        );
+        // IPv6 registry(host のコロンは最後の '/' より前なので tag 判定に影響しない)。
+        assert_eq!(
+            split_image_ref("[2001:db8::1]:5000/repo"),
+            ("[2001:db8::1]:5000/repo".into(), Some("latest".into()))
+        );
+        assert_eq!(
+            split_image_ref("[2001:db8::1]:5000/repo:tag"),
+            ("[2001:db8::1]:5000/repo".into(), Some("tag".into()))
+        );
+    }
+
+    #[test]
+    fn clip_tail_keeps_last_chars_on_boundary() {
+        let mut s = "あいうえお".repeat(1000); // 5000 chars
+        clip_tail_in_place(&mut s, 2000);
+        assert_eq!(s.chars().count(), 2000);
+        // マルチバイト境界で panic せず、末尾を保持している。
+        assert!(s.ends_with("あいうえお"));
+        let mut short = "hi".to_string();
+        clip_tail_in_place(&mut short, 2000);
+        assert_eq!(short, "hi");
+    }
 }

@@ -558,7 +558,7 @@ async fn commit_success(
 }
 
 /// 失敗の記録(deploys=failed + service_details phase=failed を 1 tx で一致させる)。
-async fn mark_failed(
+pub(crate) async fn mark_failed(
     state: &AppState,
     deploy_id: Uuid,
     service_id: Uuid,
@@ -592,7 +592,7 @@ async fn abort_deploy(state: &AppState, deploy_id: Uuid, reason: &str) {
     .await;
 }
 
-async fn set_status(state: &AppState, deploy_id: Uuid, status: &str) {
+pub(crate) async fn set_status(state: &AppState, deploy_id: Uuid, status: &str) {
     let _ = sqlx::query("UPDATE deploys SET status=$2 WHERE id=$1")
         .bind(deploy_id)
         .bind(status)
@@ -612,7 +612,7 @@ fn dedup_env_last(env: Vec<(String, String)>) -> Vec<(String, String)> {
 }
 
 /// `sha256:` + 64 桁 16 進かどうか。tag や任意文字列を弾く(決定 #3 の digest ピン留め)。
-fn is_sha256_digest(s: &str) -> bool {
+pub(crate) fn is_sha256_digest(s: &str) -> bool {
     s.strip_prefix("sha256:")
         .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }

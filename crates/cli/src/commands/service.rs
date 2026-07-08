@@ -1166,6 +1166,36 @@ pub(crate) async fn run_verify(
     Ok(())
 }
 
+/// deploy-source の **private** サービス向け:公開 URL が無いので URL 検証はできない。
+/// 指定 sha のデプロイの完走だけを待って結果を報告する(`run_verify` の private 短絡は
+/// `tbm service verify` としては正しいが、`deploy --watch` では「待たず失敗扱い」に見えるため
+/// この経路を分ける)。deploy が failed ならその error を出して非零終了する。
+pub(crate) async fn wait_deploy_only(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+    for_sha: &str,
+    timeout: u64,
+    json: bool,
+) -> Result<()> {
+    let id = resolve_service_id(c, server_url, token, name).await?;
+    let spec = WaitSpec {
+        for_sha: Some(for_sha),
+        timeout_secs: timeout,
+        quiet: json,
+    };
+    wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+    if json {
+        print_json(&serde_json::json!({ "status": "succeeded", "git_sha": for_sha }))?;
+    } else {
+        println!(
+            "デプロイ完了(private のため URL 検証はスキップ)。動作確認は `tbm service exec {name} -- <cmd>` / `tbm service logs {name}` で。"
+        );
+    }
+    Ok(())
+}
+
 /// `--wait` の輪詢間隔。デプロイ状態も検証再試行も同じ歩調で見る。
 const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// succeeded 後の検証再試行の窓(traefik file-watch の反映遅延を吸収する長さ)。

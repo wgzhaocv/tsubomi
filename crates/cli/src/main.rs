@@ -63,7 +63,8 @@ enum Cmd {
         action: commands::service::ServiceCmd,
     },
     /// デプロイ(`--watch`:git push → Actions 追跡 → 検証まで一括 / `--local`:ローカルで
-    /// build+push する GitHub 非依存の退路)
+    /// build+push する GitHub 非依存の退路 / `--image`・`--dockerfile`:サーバ側で既成イメージ
+    /// 取得 / コンテキスト無しビルド — GitHub もローカル docker も不要)
     Deploy(commands::deploy::DeployArgs),
     /// リソース(database / volume / cache / 別 service)を service に注入する
     Inject(commands::inject::InjectArgs),
@@ -249,6 +250,40 @@ mod tests {
                     name
                 );
             }
+        }
+    }
+
+    /// deploy の経路フラグの排他が clap レベルで効いていることを保証する(--for-sha の教訓:
+    /// requires 頼みだと衝突時に黙って捨てられる)。--image/--dockerfile は第 3 経路。
+    #[test]
+    fn deploy_source_flag_conflicts() {
+        for bad in [
+            vec!["tbm", "deploy", "--image", "nginx", "--local"],
+            vec!["tbm", "deploy", "--image", "nginx", "--dockerfile", "Dockerfile"],
+            vec!["tbm", "deploy", "--dockerfile", "Dockerfile", "--for-sha", "abc123"],
+            vec!["tbm", "deploy", "--image", "nginx", "--context", "."],
+            vec!["tbm", "deploy", "--dockerfile", "Dockerfile", "--local"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&bad).is_err(),
+                "should conflict: {bad:?}"
+            );
+        }
+        // 正常形:--image 単独 / --image --watch / --dockerfile --watch --timeout。
+        for ok in [
+            vec!["tbm", "deploy", "--image", "pgvector/pgvector:pg17"],
+            vec!["tbm", "deploy", "--image", "nginx", "--watch"],
+            vec![
+                "tbm",
+                "deploy",
+                "--dockerfile",
+                "./Dockerfile",
+                "--watch",
+                "--timeout",
+                "600",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&ok).is_ok(), "should parse: {ok:?}");
         }
     }
 }

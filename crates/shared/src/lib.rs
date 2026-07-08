@@ -522,6 +522,37 @@ pub struct DeployConfig {
     pub platforms: String,
 }
 
+/// デプロイ源の種別(`POST /services/:id/deploy-source` の kind)。DB の
+/// `service_details.source_kind` CHECK と対(migration 20260709000001)。
+pub const SOURCE_KIND_IMAGE: &str = "image";
+pub const SOURCE_KIND_DOCKERFILE: &str = "dockerfile";
+/// コンテキスト無し Dockerfile 全文の上限(サーバが強制。CLI も同値で送信前に弾く =
+/// 契約なので shared に置く。サーバが上げても古い CLI が過剰拒否しないよう単一真源)。
+pub const MAX_DOCKERFILE_BYTES: usize = 8 * 1024;
+
+/// `POST /api/services/:id/deploy-source` のリクエスト。**第 3 のデプロイ経路**:サーバ側で
+/// 既成イメージを pull / コンテキスト無し Dockerfile を build して内部 registry へ push し、
+/// 既存パイプライン(run_digest)で起こす — GitHub にもローカル docker にも依存しない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploySourceReq {
+    /// "image"(既成イメージ参照)か "dockerfile"(コンテキスト無し Dockerfile 全文)。
+    pub kind: String,
+    /// kind=image: イメージ参照(例 pgvector/pgvector:pg17)。
+    /// kind=dockerfile: Dockerfile 全文(≤8KiB。COPY/ADD 不可 = コンテキスト無しの契約)。
+    pub spec: String,
+}
+
+/// `POST /api/services/:id/deploy-source` のレスポンス(202)。取得〜起動は非同期 —
+/// git_sha を `tbm service verify --wait --for-sha` に渡して完走を待てる。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploySourceResp {
+    pub service_id: Uuid,
+    pub deploy_id: Uuid,
+    /// 合成 sha(sha256(kind‖spec) 先頭 12 hex)。deploys.git_sha / registry tag と同値。
+    /// **純 hex**(CLI の sha 判定と互換)。
+    pub git_sha: String,
+}
+
 /// `GET /api/services/:id/env/resolved` の各要素。**今この瞬間**に注入バインディングを解決した
 /// env(コンテナの実際の値は起動の瞬間に解決 — rotate 後は再デプロイで初めて変わる。決定 #5)。
 /// URL 形の値はパスワード部を `***` に伏せる(暴露ティアは exec/web SQL と同じ owner 限定だが、

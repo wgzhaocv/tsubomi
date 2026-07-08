@@ -679,6 +679,26 @@ pub async fn deploy_config(
         .context("failed to parse deploy-config response")
 }
 
+/// 第 3 経路(deploy-source):サーバ側で既成イメージ pull / コンテキスト無し Dockerfile build。
+/// 202 即返し(取得〜起動は非同期)— 完走待ちは `verify --wait --for-sha <resp.git_sha>`。
+pub async fn deploy_source(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    req: &tsubomi_shared::DeploySourceReq,
+) -> Result<tsubomi_shared::DeploySourceResp> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services/{id}/deploy-source"))
+            .bearer_auth(token)
+            .json(req),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse deploy-source response")
+}
+
 // ============ M3 service lifecycle ============
 
 pub async fn service_start(

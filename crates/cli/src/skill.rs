@@ -41,7 +41,7 @@ fn body_rendered() -> String {
 
 /// SKILL.md の frontmatter。`description` が skill 発火の判断材料になる。Claude も共有技能庫も
 /// この同一形式(frontmatter + 本文)の SKILL.md を読むので、両者で使い回す。
-const SKILL_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi(蕾)社内 PaaS を tbm CLI で扱うときの運用手順書(デプロイに限らない)。tsubomi / tbm / 蕾 が関わる作業はすべてこれに従う — service/database/volume/cache の作成・注入・デプロイ・検証、`tbm` 各コマンド(service status/logs/exec、db/cache/volume、inject、rotate、deploy --local)、GitHub 経路と退路、デプロイ可否の判断。次の症状でも必ず読む — app が `succeeded` なのに 502 / サイトが開かない、`tbm` が `unauthorized`・`conflict`・`validation` を返す、注入が効かない、rotate 後に反映されない、gh / docker が無い、GitHub Actions の枠が切れた。「tbm でデプロイ」「tsubomi にあげる」「蕾にデプロイ」等の依頼でも起動。\n---\n";
+const SKILL_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi(蕾)社内 PaaS を tbm CLI で扱うときの運用手順書(デプロイに限らない)。tsubomi / tbm / 蕾 が関わる作業はすべてこれに従う — service/database/volume/cache の作成・注入・デプロイ・検証、`tbm` 各コマンド(service status/logs/exec、db/cache/volume、inject、rotate、deploy --local/--image/--dockerfile)、GitHub 経路と退路(既成イメージ・無 context Dockerfile はサーバ側取得/ビルド = docker 不要)、デプロイ可否の判断。次の症状でも必ず読む — app が `succeeded` なのに 502 / サイトが開かない、`tbm` が `unauthorized`・`conflict`・`validation` を返す、注入が効かない、rotate 後に反映されない、gh / docker が無い、GitHub Actions の枠が切れた。「tbm でデプロイ」「tsubomi にあげる」「蕾にデプロイ」等の依頼でも起動。\n---\n";
 
 /// 旧 `~/.codex/AGENTS.md` 管理ブロックの目印([`migrate_legacy`] がこれを目当てに除去)。
 /// 新規書き出しには使わない — 旧版の残骸掃除専用。
