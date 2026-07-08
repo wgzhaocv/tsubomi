@@ -145,6 +145,15 @@ WIP を巻き込み push しない)④ gh 呼び出しに `-R` 貫通(複数 rem
 不要を明記)。品質検証は 4 simplify agents + codex 二輪(計 21 findings、真バグ 6 件を出荷前後に
 回収 — clap の `--local --for-sha` 静默受理 / 偽 sha の timeout 空費 / crash-loop の exit=0 誤報 等)。
 本番展開済み(2026-07-08、Docker Hub v44/v45 双架 + Pi 無瞬断 + CLI 4 平台)。
+**同日の本番事故 → 恒久修正(server v46 / tbm 1.0.25)**:registry GC が**起動直後 tick** で
+走る設計のため、ship のたびに任意時刻で manifest DELETE + blob 掃除(Pi で 10 分超)が発火。
+掃除中に同一 digest を再 push すると dedup が掃除前 blob を見て書き込みを省略 → **PUT 201 なのに
+GET 404**(CI は push 成功、deploy は manifest unknown。利用 AI は「registry 双入口の分裂」と
+誤診したが、実体は同一 registry での假成功 — DELETE→再 push→GET 200 を窓外で実証し切り分け)。
+修正:①expendable に **48h 年齢下限**(直近 push は消さない — 再 push 競合の餌 + 失敗イメージは
+再試行/診断に要る)②GC を**毎日 19:05 UTC(04:05 JST)固定**・起動 tick 廃止(gc.rs
+`until_next_utc`)③pull の manifest unknown エラーに「再デプロイで再 push」の次の一手 + skill
+早見表に一行。復旧は再デプロイのみ(毒された digest は再 push で実体が落ちる)。
 
 **stateful 後の追加(マイルストーン外):CLI の AI フレンドリ改善(tbm 1.0.20)**。AI 利用の
 フィードバック起点の CLI 純粋な磨き込み(server はほぼ不変)。(1)**`tbm db query --tsv`**:
