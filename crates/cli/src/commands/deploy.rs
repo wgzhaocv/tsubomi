@@ -172,7 +172,7 @@ async fn run_watch(
                 })?
         }
     };
-    let upstream = match git_upstream() {
+    let upstream = match git_push_ref() {
         Some(u) => u,
         None => {
             // 初回(追跡ブランチ未設定)。remote は**実在する名前**で選ぶ:`service create
@@ -491,9 +491,13 @@ fn git_out(args: &[&str]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 現ブランチの upstream(`git rev-parse --abbrev-ref @{u}`)。未設定は None。
-fn git_upstream() -> Option<String> {
-    git_out(&["rev-parse", "--abbrev-ref", "@{u}"])
+/// 現ブランチの **push 先**追跡 ref。`@{push}`(pushRemote / pushDefault / triangular を git
+/// 自身が解決)を優先し、無ければ `@{u}`。「已 push か」の比較と実際の `git push` の行き先を
+/// 同じ remote に揃える(upstream 固定だと pushRemote 設定時に、@{u} には有るが push 先には
+/// 無い commit の push を漏らし、違う repo の Actions を空待ちする — codex 指摘)。
+fn git_push_ref() -> Option<String> {
+    git_out(&["rev-parse", "--abbrev-ref", "@{push}"])
+        .or_else(|| git_out(&["rev-parse", "--abbrev-ref", "@{u}"]))
 }
 
 /// upstream に未 push のコミットがあるか(`git rev-list <upstream>..HEAD` が非空 = Some)。
@@ -552,12 +556,14 @@ fn pick_remote() -> Option<String> {
     }
 }
 
-/// 現 repo の GitHub `owner/repo`(gh の `-R` に渡す形)。remote の選好は pick_remote と同一
-/// (方針を 1 箇所に:push 先と gh の対象 repo がズレない)。GitHub 以外 / repo 外は None。
+/// 現 repo の GitHub `owner/repo`(gh の `-R` に渡す形)。remote は **push 先追跡 ref のもの**
+/// を最優先(push した repo と Actions を見る repo をズラさない)、未設定時のみ pick_remote。
+/// GitHub 以外 / repo 外は None。
 fn repo_slug() -> Option<String> {
-    pick_remote()
-        .and_then(|r| git_out(&["remote", "get-url", &r]))
-        .and_then(|u| gh_repo_from_url(&u))
+    let remote = git_push_ref()
+        .and_then(|r| r.split('/').next().map(str::to_string))
+        .or_else(pick_remote)?;
+    git_out(&["remote", "get-url", &remote]).and_then(|u| gh_repo_from_url(&u))
 }
 
 /// git remote URL(https / ssh)→ gh の `-R` に渡す `owner/repo` 形。対象外の URL は None。

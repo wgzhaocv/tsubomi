@@ -477,8 +477,16 @@ pub async fn crash_summary(state: &AppState, name: &str) -> Option<String> {
     if restarts > 0
         && (st.running.unwrap_or(false) || st.restarting.unwrap_or(false))
     {
+        // OOMKilled は「最後の起動以降」の値 = restarting 中なら直近クラッシュの要因として
+        // 有効(OOM 起因の crash-loop はログに現れないことが多く、これが唯一の信号)。走行
+        // 再開後はリセットされ得るので **true のときだけ**添える(false は OOM 否定の保証にならない)。
+        let oom_tag = if st.oom_killed.unwrap_or(false) {
+            "・直近は OOM(メモリ上限超過)"
+        } else {
+            ""
+        };
         return Some(format!(
-            "起動直後にクラッシュし再起動を繰り返しています(再起動 {restarts} 回)。`tbm service logs` で直近の出力を確認"
+            "起動直後にクラッシュし再起動を繰り返しています(再起動 {restarts} 回{oom_tag})。`tbm service logs` で直近の出力を確認"
         ));
     }
     let exit = st.exit_code?;
