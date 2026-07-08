@@ -283,8 +283,8 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 
 ### 起動直後にクラッシュする(deploy failed)— 当てずっぽうで再デプロイしない
 
-コンテナが起動即 exit した失敗デプロイは、**エラーに終了要因(exit code / OOM。server v44+)と
-ログ末尾(以前から)が載る**。`tbm service status <名前>` / `verify --wait` の error を**まず読む**:
+コンテナが起動即 exit した失敗デプロイは、**エラーに終了要因(exit code / OOM。server v47+ —
+docker events 由来なので速い crash-loop でも取れる)とログ末尾が載る**。`tbm service status <名前>` / `verify --wait` の error を**まず読む**:
 
 1. **exit code を読む**(`exit=…` 形式。これだけで原因の当たりが付く):
    - `exit=0` = プロセスが何もせず正常終了。**CMD がサーバを起動していない / ビルド成果物が
@@ -323,7 +323,7 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 | `succeeded` なのに画面が真っ白 | index.html は 200 だが `/assets/*.js` が 404 | `tbm service verify` で特定 → build 出力パス / base 設定を直す |
 | `succeeded` なのに 502 | アプリが 8080 で listen していない | ポート修正 → 再デプロイ |
 | deploy failed(起動即 exit) | エラーの `exit=…` が要因を示す(0=空イメージ / 101=panic / 137=OOM 等) | §5「起動直後にクラッシュする」playbook |
-| deploy failed(`manifest unknown`) | push は成功したが registry GC と競合し実体が無い | 再デプロイ(CI 再実行 / `tbm deploy`)で再 push — registry 障害ではない |
+| deploy failed(`manifest unknown`) | push は成功したが registry に実体が無い(GC 競合) | 再デプロイで再 push。直らなければ管理者へ(registry cache の毒 — `docker restart tsubomi-registry`) |
 | URL が `/noservice` へ 302 する | `visibility=private`(または未デプロイ/停止) | `tbm service status` で確認 → 公開するなら `tbm service visibility <名前> company` |
 | push が 413 | 単層 >100MB(CF 経由)。直連入口があれば起きない | §「push が 413」。無ければ層を小さく |
 | Node/Next が起動直後 exit / DB で 502 | `pg` が `sslmode=require` を verify-full 扱い | §3.1(URL から sslmode を外し `ssl:{rejectUnauthorized:false}`)+ ioredis に `on("error")` |

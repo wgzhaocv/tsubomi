@@ -472,33 +472,41 @@ pub async fn logs_stream(
     ))
 }
 
-/// 死んだ(死にかけの)コンテナの **終了要因の一行サマリ** を inspect から組む。ベストエフォート
-/// (inspect 失敗・state 欠落は None = 呼び出し側の「取得できず」文言に落とす)。失敗 deploy の
-/// エラーに exit code / シグナル / OOM を載せ、ログが空でも原因の当たりが付くようにする。
-pub async fn crash_summary(state: &AppState, name: &str) -> Option<String> {
-    let info = state.docker.inspect_container(name, None).await.ok()?;
-    let st = info.state.as_ref()?;
-    let restarts = info.restart_count.unwrap_or(0);
-    // RestartPolicy=unless-stopped で既に自動再起動された後だと exit_code は 0 にリセット
-    // されている(「正常終了」と誤診させる)。再起動済みで走行/再起動中なら crash-loop の
-    // 事実だけ伝え、あてにならない exit code には触れない。
-    if restarts > 0
-        && (st.running.unwrap_or(false) || st.restarting.unwrap_or(false))
-    {
-        // OOMKilled は「最後の起動以降」の値 = restarting 中なら直近クラッシュの要因として
-        // 有効(OOM 起因の crash-loop はログに現れないことが多く、これが唯一の信号)。走行
-        // 再開後はリセットされ得るので **true のときだけ**添える(false は OOM 否定の保証にならない)。
-        let oom_tag = if st.oom_killed.unwrap_or(false) {
-            "・直近は OOM(メモリ上限超過)"
-        } else {
-            ""
-        };
-        return Some(format!(
-            "起動直後にクラッシュし再起動を繰り返しています(再起動 {restarts} 回{oom_tag})。`tbm service logs` で直近の出力を確認"
-        ));
-    }
-    let exit = st.exit_code?;
-    let oom = st.oom_killed.unwrap_or(false);
+/// 死んだ(死にかけの)コンテナの **終了要因の一行サマリ**。exit code / OOM は docker **events**
+/// (die / oom)を第一源にする:RestartPolicy=unless-stopped 下では inspect の State は再起動で
+/// リセットされ、速い crash-loop だと**常に**手遅れ(実利用の複測で exit 欠落 3/3 を実証)。
+/// events の die は退出ごとに daemon が記録し、最初の 1 件が「その退出」の exitCode を保持する。
+/// `since` はコンテナ起動前の unix 秒(呼び出し側が控える)。inspect は再起動回数と、events が
+/// 取れなかった場合の fallback。全体 best-effort(何も取れなければ None)。
+pub async fn crash_summary(state: &AppState, name: &str, since: i64) -> Option<String> {
+    let (event_exit, event_oom) = death_events(state, name, since).await;
+    let info = state.docker.inspect_container(name, None).await.ok();
+    let st = info.as_ref().and_then(|i| i.state.as_ref());
+    let restarts = info.as_ref().and_then(|i| i.restart_count).unwrap_or(0);
+    let (exit, oom) = match event_exit {
+        Some(e) => (e, event_oom || st.and_then(|s| s.oom_killed).unwrap_or(false)),
+        None => {
+            // events 不発の fallback。走行/再起動中は inspect の exit_code が再起動でリセット
+            // 済み = あてにならないので、crash-loop の事実だけ伝える(OOM は true のときだけ —
+            // false は否定の保証にならない)。
+            let running = st.and_then(|s| s.running).unwrap_or(false);
+            let restarting = st.and_then(|s| s.restarting).unwrap_or(false);
+            if restarts > 0 && (running || restarting) {
+                let oom_tag = if st.and_then(|s| s.oom_killed).unwrap_or(false) {
+                    "・直近は OOM(メモリ上限超過)"
+                } else {
+                    ""
+                };
+                return Some(format!(
+                    "起動直後にクラッシュし再起動を繰り返しています(再起動 {restarts} 回{oom_tag})。`tbm service logs` で直近の出力を確認"
+                ));
+            }
+            (
+                st.and_then(|s| s.exit_code)?,
+                st.and_then(|s| s.oom_killed).unwrap_or(false),
+            )
+        }
+    };
     // exit code 別の当たり(断定しない — 典型例のヒント)。
     let hint: std::borrow::Cow<'static, str> = if oom {
         "メモリ上限(--memory)超過で OOM kill。`tbm service metrics` で使用量と上限を確認".into()
@@ -522,6 +530,42 @@ pub async fn crash_summary(state: &AppState, name: &str) -> Option<String> {
         String::new()
     };
     Some(format!("exit={exit}{oom_tag}{restart_tag}({hint})"))
+}
+
+/// container の die / oom イベントを since〜now の窓で読む。返り値は
+/// (最初の die の exitCode, oom イベントの有無)。**最初の** die = restart 前の「その退出」
+/// (以降は restart 後の再クラッシュ)。until 指定で流は必ず終わるが、daemon 異常への保険で
+/// 5s timeout も被せる。best-effort:失敗 / 不発は (None, false)。
+async fn death_events(state: &AppState, name: &str, since: i64) -> (Option<i64>, bool) {
+    use bollard::query_parameters::EventsOptionsBuilder;
+    let filters = HashMap::from([("container", vec![name]), ("event", vec!["die", "oom"])]);
+    let opts = EventsOptionsBuilder::default()
+        .since(&since.to_string())
+        .until(&chrono::Utc::now().timestamp().to_string())
+        .filters(&filters)
+        .build();
+    let mut stream = state.docker.events(Some(opts));
+    let drain = async {
+        let (mut exit, mut oom) = (None, false);
+        while let Some(Ok(ev)) = stream.next().await {
+            match ev.action.as_deref() {
+                Some("oom") => oom = true,
+                Some("die") if exit.is_none() => {
+                    exit = ev
+                        .actor
+                        .as_ref()
+                        .and_then(|a| a.attributes.as_ref())
+                        .and_then(|m| m.get("exitCode"))
+                        .and_then(|s| s.parse::<i64>().ok());
+                }
+                _ => {}
+            }
+        }
+        (exit, oom)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+        .await
+        .unwrap_or((None, false))
 }
 
 /// 指定した **名前**のコンテナの直近ログ(stdout+stderr、tail 行)。ベストエフォート

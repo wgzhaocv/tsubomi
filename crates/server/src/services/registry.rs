@@ -558,6 +558,24 @@ pub async fn garbage_collect(state: &AppState) -> AppResult<()> {
     }
 }
 
+/// blob 掃除後の registry 再起動(descriptor cache の毒抜き)。[`garbage_collect`] の成功と
+/// **セットで**呼ぶ:掃除は registry コンテナ内の**別プロセス**で走るため、serving プロセスの
+/// `blobdescriptor: inmemory` cache は削除を知らない。掃除済み blob への PUT が cache hit で
+/// 書き込みを省略され **PUT 201 なのに GET 404** の假成功になる(distribution の既知欠陥。
+/// 2026-07-08 本番実証:純基底イメージの子 manifest は digest が全 build で同一のため、
+/// 毒 cache に必中して再 push でも恒久 404 だった)。深夜帯(GC 直後)の数秒断は受容。
+pub async fn restart_registry(state: &AppState) -> AppResult<()> {
+    state
+        .docker
+        .restart_container(
+            REGISTRY_CONTAINER,
+            None::<bollard::query_parameters::RestartContainerOptions>,
+        )
+        .await
+        .context("registry コンテナの再起動に失敗")?;
+    Ok(())
+}
+
 /// 既存アカウントを読んで復号する(無ければ None)。
 async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds>> {
     let row: Option<(String, Vec<u8>)> =

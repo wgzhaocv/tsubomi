@@ -421,12 +421,17 @@ async fn run_digest_inner(
 /// 新コンテナを create+start し、存活(restart_count==0 等)を確認する(route はまだ切らない)。
 /// 失敗は呼び出し側が新コンテナを掃除する(旧は無傷)。
 async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<()> {
+    // 起動前の時刻を控える(-1s は時計の丸め保険):crash_summary が docker events(die/oom)を
+    // この時刻以降で引く。inspect は restart でリセットされるため、events だけが「その退出」の
+    // exit code を保持する。
+    let since = chrono::Utc::now().timestamp() - 1;
     docker::run(state, spec, image_ref).await?;
     if !docker::is_live(state, &spec.container_name).await {
-        // 掃除される前に死んだ新コンテナから終了要因(inspect)とログ末尾を拾い、原因をエラーに
-        // 載せる。これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が空になり、
-        // クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service status に残る。
-        let why = docker::crash_summary(state, &spec.container_name).await;
+        // 掃除される前に死んだ新コンテナから終了要因(events/inspect)とログ末尾を拾い、原因を
+        // エラーに載せる。これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が
+        // 空になり、クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service
+        // status に残る。
+        let why = docker::crash_summary(state, &spec.container_name, since).await;
         let why = why
             .as_deref()
             .unwrap_or("終了要因を取得できませんでした");

@@ -276,8 +276,15 @@ fn spawn_registry_gc(state: AppState) {
             if let Err(e) = crate::services::registry::protect_and_expire_manifests(&state).await {
                 tracing::warn!(error = ?e, "gc: registry manifest 期限切れ failed");
             }
-            if let Err(e) = crate::services::registry::garbage_collect(&state).await {
-                tracing::warn!(error = ?e, "gc: registry garbage-collect failed");
+            match crate::services::registry::garbage_collect(&state).await {
+                Err(e) => tracing::warn!(error = ?e, "gc: registry garbage-collect failed"),
+                // 掃除成功後は registry を再起動して descriptor cache の毒を抜く(理由は
+                // registry::restart_registry のドキュメント — 假 201 の恒久毒を残さない)。
+                Ok(()) => {
+                    if let Err(e) = crate::services::registry::restart_registry(&state).await {
+                        tracing::warn!(error = ?e, "gc: registry 再起動に失敗(掃除済み blob への push が假 201 になり得る — 手動 `docker restart tsubomi-registry` を推奨)");
+                    }
+                }
             }
         }
     });
