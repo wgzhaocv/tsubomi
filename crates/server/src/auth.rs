@@ -73,11 +73,15 @@ impl AuthCtx {
 }
 
 pub fn public_routes() -> Router<AppState> {
+    // 未認証で叩ける認証入口には基礎レート制限を挂ける(AI 審査 R2。総当たり / 濫用の頭打ち)。
+    // route_layer は「それ以前に登録した route」だけに効くので、対象 3 つ → layer → 対象外の順。
+    // /auth/info は無害な公開メタデータ(web が頻繁に読む)なので対象外。
     Router::new()
-        .route("/auth/info", get(google::info))
         .route("/auth/google/start", get(google::start))
         .route("/auth/google/callback", get(google::callback))
         .route("/oauth/token", post(oauth::token))
+        .route_layer(axum::middleware::from_fn(crate::ratelimit::limit_login))
+        .route("/auth/info", get(google::info))
 }
 
 pub fn protected_routes() -> Router<AppState> {

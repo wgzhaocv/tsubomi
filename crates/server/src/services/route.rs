@@ -45,6 +45,27 @@ fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
         .join(format!("svc-{service_id}.yml"))
 }
 
+/// YAML(二重引用符文字列 / Host(`…`) ルール)へ**素で埋めても安全**な文字だけ許す縦深防御
+/// (AI 審査 R3)。route / registry の動的設定は文字列拼接で組むため、値の安全性は従来
+/// 「上游の subdomain 校験が厳格だから」にだけ寄りかかっていた — 上游が緩んだ瞬間に traefik
+/// 設定への YAML 注入(任意 router 定義)になる。書き込み点でも白名単で最終確認する。
+/// 許可集合は現用の全値(subdomain.domain / コンテナ名:port / http:// URL / user:bcrypt)を
+/// 覆う最小限:英数字 + `. - _ : / $ @`。引用符・バックスラッシュ・バッククォート・改行・
+/// 空白を含む値はここで確実に落ちる。
+pub(crate) fn ensure_yaml_embeddable(field: &str, value: &str) -> AppResult<()> {
+    let ok = !value.is_empty()
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b':' | b'/' | b'$' | b'@')
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(crate::error::AppError::Other(anyhow::anyhow!(
+            "{field} に traefik 設定へ埋め込めない文字が含まれています(YAML 注入防御): {value:?}"
+        )))
+    }
+}
+
 /// router + service を 1 ファイル原子的に書く(traefik が watch してホットリロード)。
 /// router/service 名 = `svc-<id>`(安定、ファイルは service ごと 1 枚)、**後端 = 渡された
 /// コンテナ名**。start-first swap では deploy ごとにコンテナ名が変わる(新旧が一瞬共存
@@ -63,6 +84,10 @@ pub fn write(
     let name = format!("svc-{service_id}");
     let host = format!("{}.{}", subdomain, state.config.domain);
     let backend = format!("http://{container_name}:{container_port}");
+    // 値は平台生成(subdomain は作成時校験・コンテナ名は命名規約)だが、書き込み点でも白名単で
+    // 最終確認する(縦深防御 — 上游が緩んでも YAML 注入にしない)。
+    ensure_yaml_embeddable("host", &host)?;
+    ensure_yaml_embeddable("backend", &backend)?;
     let doc = build_service_doc(&name, &host, &backend, ipallow, state.config.tls);
     write_atomic(&route_path(state, service_id), &doc)
 }
@@ -347,6 +372,27 @@ mod tests {
         assert!(tls.contains("entryPoints: [\"websecure\"]"));
         assert!(tls.contains("tls: {}"));
         assert!(!tls.contains("certResolver"));
+    }
+
+    #[test]
+    fn yaml_embed_whitelist_blocks_injection() {
+        use super::ensure_yaml_embeddable as check;
+        // 現用の全値形が通ること。
+        assert!(check("host", "myapp.tsubomi-app.com").is_ok());
+        assert!(check("backend", "http://tsubomi-abc-deadbeef:8080").is_ok());
+        assert!(check("account", "user@x:$2b$12$abc./def").is_ok()); // user:bcrypt
+        // 注入に使われる文字は全部落ちる(引用符 / バッククォート / 改行 / 空白 / バックスラッシュ)。
+        for bad in [
+            "a\"b",
+            "a`b",
+            "a\nb",
+            "a b",
+            "a\\b",
+            "a.com\"\n      middlewares: []",
+            "",
+        ] {
+            assert!(check("f", bad).is_err(), "{bad:?} は拒否されるべき");
+        }
     }
 
     #[test]

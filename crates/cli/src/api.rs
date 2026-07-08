@@ -38,6 +38,9 @@ fn code_for(status: reqwest::StatusCode) -> &'static str {
         // registry / 上流(Cloudflare)の request body 上限超過。CF 経由 registry の単層 ≈100MB
         // 制限が典型(deploy.rs が人話の対処も出す)。AI はこの code でリトライ無意味と判断できる。
         413 => "payload_too_large",
+        // 認証入口のレート制限(server v48+、ratelimit.rs)。server_error に潰すと AI が
+        // 「サーバ障害」と誤判して即座に無駄リトライする(過去の実害型)。待てば直る。
+        429 => "rate_limited",
         _ => "server_error",
     }
 }

@@ -17,6 +17,7 @@ mod ipblock;
 mod mail;
 mod metrics;
 mod owners;
+mod ratelimit;
 mod respond;
 mod routes;
 mod services;

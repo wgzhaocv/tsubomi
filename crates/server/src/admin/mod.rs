@@ -30,7 +30,13 @@ pub fn routes() -> Router<AppState> {
         // 監査ログ閲覧(S4)。
         .route("/admin/audit", get(audit_view::list))
         // 共有パスワード viewer(S5):login = 任意の session、password = owner のみ。
-        .route("/admin/viewer/login", post(viewer::login))
+        // login にはレート制限(AI 審査 R2):bcrypt 検証の総当たり / CPU 消費の頭打ち
+        // (M4 当時「後相」とした失敗レート制限の最小形)。
+        .route(
+            "/admin/viewer/login",
+            post(viewer::login)
+                .route_layer(axum::middleware::from_fn(crate::ratelimit::limit_sensitive)),
+        )
         .route(
             "/admin/viewer/password",
             get(viewer::status).post(viewer::set_password),

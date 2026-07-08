@@ -87,7 +87,10 @@
   `-A FORWARD -j DOCKER-USER` を必ず再付与する = 入口が生き続ける)。
 - **INPUT 側** = `TSUBOMI-INGRESS-HOST`。入口は **INPUT 先頭へ insert**:
   `-I INPUT 1 -j TSUBOMI-INGRESS-HOST`(INPUT は docker が再建しないので安定。reconcile が再断言)。
-- 入口 jump は「存在しなければ追加」で冪等。チェイン中身は reconcile 毎に **flush → refill**。
+- 入口 jump は「存在しなければ追加」で冪等。チェイン中身は reconcile 毎に **A/B 二重バッファへ
+  組み立て → 原子切替**(v48 で flush → refill から変更。下記 §3.3)。外殻チェイン
+  (`TSUBOMI-EGRESS` / `TSUBOMI-INGRESS-HOST`)は「アクティブな内実チェイン(`…-A` / `…-B`)への
+  jump 1 本」だけを持ち、規則本体は内実側にある。
 
 `TSUBOMI-EGRESS`(FORWARD = 容器 → 他網):
 ```
@@ -121,7 +124,14 @@ ipblock と同型「期望状態 → 現実へ収束」:
 
 - **起動時**(main、root のとき)+ **network reconcile tick(30s)**で `egress::reconcile` を呼ぶ。
 - 毎回 **fresh** に生存 service の subnet を docker network inspect で読む(`valkey::reconcile_acls` /
-  `reconcile_networks` と同じ作法 — race 回避)→ 2 チェインを flush → refill。
+  `reconcile_networks` と同じ作法 — race 回避)→ 2 チェインを更新。
+- **更新は A/B swap(v48、AI 審査 R9)**:非アクティブな内実チェインへ全規則を組み立ててから、
+  外殻の jump を `-R`(単一規則の原子置換)で切り替える。旧実装(外殻を直接 flush → 逐条 refill)は
+  refill 途中で iptables が 1 本でも失敗すると **DROP 欠けのまま次 tick まで fail-open**
+  (この窓で pool 源 → 宿主機サービス / クラウドメタデータが可達)だった。swap では組み立て失敗 =
+  切替前 = 旧規則が効き続ける(fail-closed)。旧レイアウトからの移行は「jump を先頭へ insert →
+  残骸を**末尾から逆順**に削除」で無窓に行う(`egress.rs::swap_refill`。逆順なのは inner の
+  RETURN が外殻の残骸も評価するため — 前から消すと DROP 類だけ残る中間態で東西向を丢包する)。
 - **deploy 経路でも同期**:`ensure_service_network` の直後・容器 start の**前**に `egress::reconcile` を
   呼ぶ。新桥の同桥 RETURN が入る前に容器が起きて app→pgbouncer が一瞬 DROP される穴を塞ぐ(背骨「現実は
   容器起動の瞬間に正しく」)。

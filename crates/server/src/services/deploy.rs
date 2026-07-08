@@ -265,7 +265,8 @@ pub async fn run_digest(
     .execute(&state.db)
     .await;
 
-    let outcome = run_digest_inner(state, deploy_id, service_id, image_digest, git_sha).await;
+    let outcome =
+        run_digest_inner(state, deploy_id, service_id, image_digest, git_sha, trigger).await;
     if let Err(e) = &outcome
         && let Err(e2) = mark_failed(state, deploy_id, service_id, &e.to_string()).await
     {
@@ -291,16 +292,19 @@ async fn run_digest_inner(
     service_id: Uuid,
     image_digest: &str,
     git_sha: &str,
+    trigger: DeployTrigger,
 ) -> AppResult<()> {
     // 起動に必要な確定値を引く。
-    let row: Option<(String, i32, i32, i32, String, bool)> = sqlx::query_as(
-        "SELECT subdomain, container_port, memory_mb, cpu_shares, visibility, stateful
+    // (subdomain, container_port, memory_mb, cpu_shares, visibility, stateful, cpu_limit_millis)
+    type LaunchRow = (String, i32, i32, i32, String, bool, Option<i32>);
+    let row: Option<LaunchRow> = sqlx::query_as(
+        "SELECT subdomain, container_port, memory_mb, cpu_shares, visibility, stateful, cpu_limit_millis
            FROM service_details WHERE resource_id = $1",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?;
-    let (subdomain, container_port, memory_mb, cpu_shares, visibility, stateful) =
+    let (subdomain, container_port, memory_mb, cpu_shares, visibility, stateful, cpu_limit_millis) =
         row.ok_or(AppError::NotFound)?;
     let visibility = Visibility::from_db(&visibility);
 
@@ -325,6 +329,7 @@ async fn run_digest_inner(
         container_port,
         memory_mb,
         cpu_shares,
+        cpu_limit_millis,
         env,
         binds,
     };
@@ -346,13 +351,28 @@ async fn run_digest_inner(
     // どちらで失敗しても巻き戻しは同一なので一箇所に畳む:新を片付け、stateful は温存した旧を
     // 再 start して旧版へ自動復旧(§0-E。stateless と違い旧は stopped なので**能動的に**戻す —
     // 設計 §6 地雷 2。stateless は stopped_old が空 = no-op で、旧が走ったまま = 従来どおり)。
+    // readiness 探測を課す条件(どれも欠けたら存活確認のみ):
+    //  - **ユーザ契機のみ**(審査指摘):reconcile の復活対象は一度 succeeded した版 = readiness は
+    //    初回デプロイで検証済み。復活は容器一斉消失後の再建等で Pi が飽和し「健全だが遅い」が
+    //    起きやすく、ここで failed にすると phase=failed で converge_running の候補から永久に
+    //    外れる(自沉静化は壊れたイメージ向けの安全弁で、健全な app の静默停止に使わない)。
+    //  - **company/public、または「M6 リンクの callee になっている private」**(codex 審査):
+    //    素の private は listen しない純 worker を許容する契約なので門を掛けないが、誰かに注入
+    //    されている private は内部リンク先 = listen する契約なので、監听錯 port のまま succeeded →
+    //    attach_as_callee が呼び出し元を不達の新容器へ切り替える穴をここで塞ぐ。
+    let probe = trigger == DeployTrigger::User
+        && (visibility != Visibility::Private || is_linked_callee(state, service_id).await);
     let staged = async {
-        start_container(state, &spec, &image_ref).await?;
+        start_container(state, &spec, &image_ref, probe).await?;
         commit_success(state, deploy_id, service_id, image_digest).await
     }
     .await;
     if let Err(e) = staged {
-        docker::remove_one(state, &new_name).await;
+        // readiness TimedOut では新コンテナは**走行中**のまま消される。stateful は起動期の
+        // WAL 回復 / 迁移中に SIGKILL しないよう 30s 猶予で止める(§0-G。審査指摘 —
+        // stop-first と同じ丁寧さをこの回滚路径にも)。stateless は即殺でよい(データ無共有)。
+        let grace = stateful.then_some(docker::STATEFUL_STOP_GRACE_SECS);
+        docker::remove_one(state, &new_name, grace).await;
         docker::restart_stopped(state, &stopped_old).await;
         return Err(e);
     }
@@ -419,42 +439,96 @@ async fn run_digest_inner(
 }
 
 /// 新コンテナを create+start し、存活(restart_count==0 等)を確認する(route はまだ切らない)。
+/// `probe`(company/public)なら存活の後に **container_port の TCP readiness** も門とする
+/// (AI 審査 R1):監听錯 port / listen 前にクラッシュする app を succeeded にしない。
 /// 失敗は呼び出し側が新コンテナを掃除する(旧は無傷)。
-async fn start_container(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<()> {
+async fn start_container(
+    state: &AppState,
+    spec: &RunSpec,
+    image_ref: &str,
+    probe: bool,
+) -> AppResult<()> {
     // 起動前の時刻を控える(-1s は時計の丸め保険):crash_summary が docker events(die/oom)を
     // この時刻以降で引く。inspect は restart でリセットされるため、events だけが「その退出」の
     // exit code を保持する。
     let since = chrono::Utc::now().timestamp() - 1;
     docker::run(state, spec, image_ref).await?;
     if !docker::is_live(state, &spec.container_name).await {
-        // 掃除される前に死んだ新コンテナから終了要因(events/inspect)とログ末尾を拾い、原因を
-        // エラーに載せる。これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が
-        // 空になり、クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service
-        // status に残る。
-        let why = docker::crash_summary(state, &spec.container_name, since).await;
-        let why = why
-            .as_deref()
-            .unwrap_or("終了要因を取得できませんでした");
-        let tail = docker::logs_by_name(state, &spec.container_name, 40).await;
-        let tail = tail.trim();
-        // logs_by_name は best-effort(取得失敗も空文字)なので「無出力」と断定しない。
-        let detail = if tail.is_empty() {
-            "コンテナログ(stdout+stderr)無し — 何も出力せず終了したか、ログ取得に失敗".to_string()
-        } else {
-            // deploys.error 列に載るので末尾 1500 文字だけに切る(char 境界安全)。
-            let n = tail.chars().count();
-            let clipped: String = if n > 1500 {
-                format!("…{}", tail.chars().skip(n - 1500).collect::<String>())
-            } else {
-                tail.to_string()
-            };
-            format!("コンテナログ末尾(stdout+stderr):\n{clipped}")
-        };
-        return Err(AppError::Other(anyhow::anyhow!(
-            "新コンテナが起動直後に終了しました:{why}。{detail}"
-        )));
+        return Err(crash_error(
+            state,
+            &spec.container_name,
+            since,
+            "新コンテナが起動直後に終了しました",
+        )
+        .await);
     }
-    Ok(())
+    let timeout = std::time::Duration::from_secs(state.config.ready_timeout_secs);
+    if !probe || timeout.is_zero() {
+        return Ok(()); // private / reconcile 復活 / 明示無効化(=0)は存活のみ
+    }
+    match docker::wait_tcp_ready(state, &spec.container_name, spec.container_port, timeout).await {
+        docker::Readiness::Ready => Ok(()),
+        docker::Readiness::Died => Err(crash_error(
+            state,
+            &spec.container_name,
+            since,
+            "新コンテナが readiness 確認中に終了しました",
+        )
+        .await),
+        docker::Readiness::TimedOut => {
+            let port = spec.container_port;
+            let tail = log_tail_detail(state, &spec.container_name).await;
+            Err(AppError::Other(anyhow::anyhow!(
+                "新コンテナは走っていますが、container_port(={port})の TCP 待受を {}s 以内に確認できませんでした。\
+                 app が PORT 環境変数(={port})の値で 0.0.0.0 に listen しているか確認してください。\
+                 listen しない worker なら `tbm service visibility <name> private` に切り替えると探測はスキップされます。{tail}",
+                timeout.as_secs()
+            )))
+        }
+    }
+}
+
+/// この service が M6 内部リンクの callee(他 service に注入されている)か。private の readiness
+/// 探測可否の判定用。best-effort:DB エラー時は false(探測を増やす向きに倒さない — デプロイ自体を
+/// 止めないことを優先し、穴は次のユーザ契機デプロイで再判定される)。
+async fn is_linked_callee(state: &AppState, service_id: Uuid) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM injections WHERE resource_id = $1)")
+        .bind(service_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false)
+}
+
+/// 死んだ / 死につつある新コンテナから終了要因(events/inspect)とログ末尾を拾い、原因を 1 本の
+/// エラーに畳む。これが無いと失敗 deploy で `tbm service logs`(現行=旧コンテナを引く)が
+/// 空になり、クラッシュ原因が一切見えない盲点になる。ここで拾えば deploys.error → service
+/// status に残る。
+async fn crash_error(state: &AppState, name: &str, since: i64, headline: &str) -> AppError {
+    let why = docker::crash_summary(state, name, since).await;
+    let why = why
+        .as_deref()
+        .unwrap_or("終了要因を取得できませんでした");
+    let detail = log_tail_detail(state, name).await;
+    AppError::Other(anyhow::anyhow!("{headline}:{why}。{detail}"))
+}
+
+/// コンテナログ末尾を deploys.error 向けに整形する(best-effort)。
+async fn log_tail_detail(state: &AppState, name: &str) -> String {
+    let tail = docker::logs_by_name(state, name, 40).await;
+    let tail = tail.trim();
+    // logs_by_name は best-effort(取得失敗も空文字)なので「無出力」と断定しない。
+    if tail.is_empty() {
+        return "コンテナログ(stdout+stderr)無し — 何も出力していないか、ログ取得に失敗"
+            .to_string();
+    }
+    // deploys.error 列に載るので末尾 1500 文字だけに切る(char 境界安全)。
+    let n = tail.chars().count();
+    let clipped: String = if n > 1500 {
+        format!("…{}", tail.chars().skip(n - 1500).collect::<String>())
+    } else {
+        tail.to_string()
+    };
+    format!("コンテナログ末尾(stdout+stderr):\n{clipped}")
 }
 
 /// 成功を 1 tx で記録(image_digest=new / phase=running / desired=running / deploys=succeeded)。

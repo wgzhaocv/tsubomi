@@ -42,6 +42,8 @@ pub struct RunSpec {
     pub container_port: i32,
     pub memory_mb: i32,
     pub cpu_shares: i32,
+    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 硬上限なし(cpu_shares のみ)。
+    pub cpu_limit_millis: Option<i32>,
     pub env: Vec<(String, String)>,
     /// volume 注入のバインドマウント(`"<host_path>:<mount_path>"`)。空なら無し。
     pub binds: Vec<String>,
@@ -103,6 +105,9 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         // --memory 硬上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
         memory: Some((spec.memory_mb as i64) * 1024 * 1024),
         cpu_shares: Some(spec.cpu_shares as i64),
+        // 任意の CPU 硬上限(`--cpus` 相当。NanoCpus = millicores × 10^6。AI 審査 R4):
+        // ソフト権重は競合時にしか効かず、単機で CPU を独占する service が隣人を拖らせるため。
+        nano_cpus: spec.cpu_limit_millis.map(|m| (m as i64) * 1_000_000),
         // 容器加固(背骨「隔離は仕組みで守る」。memory 硬上限の隣に並べる宿主機保護):
         //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾で宿主機の PID を食い潰させない。
         //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定は 1024MB — migration 20260620)。
@@ -321,10 +326,24 @@ pub async fn remove_others(state: &AppState, service_id: Uuid, keep_name: &str) 
     remove_service_containers(state, service_id, Some(keep_name), None).await
 }
 
+/// `remove_others` の猶予指定版。中断デプロイ復旧(reconcile::recover_interrupted)専用:
+/// stateful の中断では「掃除対象の孤児新コンテナがまだ走行中」があり得るため、SIGKILL で
+/// データ目録を壊さないよう猶予を渡せる(§0-G。通常の swap 収尾は上の猶予不要が正しい)。
+pub async fn remove_others_grace(
+    state: &AppState,
+    service_id: Uuid,
+    keep_name: &str,
+    grace_secs: Option<i32>,
+) -> AppResult<()> {
+    remove_service_containers(state, service_id, Some(keep_name), grace_secs).await
+}
+
 /// 名前指定で 1 つだけ停止 + 削除(deploy 失敗時の新コンテナ片付け)。best-effort
 /// (失敗しても reconcile が孤児として後で掃除する。ここで失敗を伝播させない)。
-pub async fn remove_one(state: &AppState, name: &str) {
-    let _ = force_remove(state, name, None).await;
+/// `grace_secs`:readiness 探測の TimedOut では**走行中の**新コンテナを消すため、stateful は
+/// `STATEFUL_STOP_GRACE_SECS` を渡す(起動期の WAL 回復 / 迁移中に SIGKILL しない — §0-G)。
+pub async fn remove_one(state: &AppState, name: &str, grace_secs: Option<i32>) {
+    let _ = force_remove(state, name, grace_secs).await;
 }
 
 /// stateful の停止猶予(SIGTERM → SIGKILL 秒数)。docker 既定の 10s だと DB の flush が
@@ -1038,4 +1057,79 @@ pub async fn is_live(state: &AppState, name: &str) -> bool {
         }
     }
     true
+}
+
+/// TCP readiness 探測(`wait_tcp_ready`)の判定結果。
+pub enum Readiness {
+    /// container_port で TCP 接続を受けた(= listen 確認)。
+    Ready,
+    /// 探測中にコンテナが終了 / 再起動した(クラッシュ。呼び出し側は crash_summary へ)。
+    Died,
+    /// 期限内に listen を確認できなかった(コンテナは走っている)。
+    TimedOut,
+}
+
+/// デプロイ門禁の readiness 探測(AI 審査 R1):新コンテナが `container_port` で **TCP を
+/// 受けるまで** 1s 間隔で待つ。`is_live` は「起動直後に死んでいない」だけを見るため、監听錯
+/// port / 起動数秒後のクラッシュ / listen まで到達しない app が `succeeded` になり静默 502 に
+/// なる穴があった — ここが commit_success 前の最後の門。HTTP でなく素の TCP なのは stateful
+/// (postgres / valkey 等)の非 HTTP service も同じ門を通すため(m3-design 決定 E の
+/// deferred readiness の最小形 — `health_path` migration は要らない)。
+///
+/// 探測は server(ホストプロセス)→ コンテナの私網 IP へ直接 connect する。Linux はホストから
+/// docker bridge 配下 IP へ直達できる(応答は conntrack ESTABLISHED で egress の INPUT 遮断に
+/// 巻かれない)。**dev(macOS)は VM 越しで bridge IP に届かないため探測せず Ready 扱い**
+/// (egress::is_active と同じ「prod でのみ実効」の型)。
+pub async fn wait_tcp_ready(
+    state: &AppState,
+    name: &str,
+    port: i32,
+    timeout: std::time::Duration,
+) -> Readiness {
+    if !cfg!(target_os = "linux") {
+        return Readiness::Ready; // dev macOS:ホスト → bridge IP 不達のため探測不能
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match state.docker.inspect_container(name, None).await {
+            Ok(info) => {
+                let st = info.state.as_ref();
+                let running = st.and_then(|s| s.running).unwrap_or(false);
+                let restarting = st.and_then(|s| s.restarting).unwrap_or(false);
+                // is_live と同じ死亡判定:一度でも再起動した = クラッシュ(ループ)。期限まで
+                // 待たずに即返す(呼び出し側が events から exit code を拾える)。
+                if !running || restarting || info.restart_count.unwrap_or(0) > 0 {
+                    return Readiness::Died;
+                }
+                // IP は毎回 inspect から取る(再作成 / 再 attach で変わり得る)。
+                if let Some(ip) = container_ip(&info) {
+                    let connect = tokio::net::TcpStream::connect((ip.as_str(), port as u16));
+                    if let Ok(Ok(_)) =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), connect).await
+                    {
+                        return Readiness::Ready;
+                    }
+                }
+            }
+            Err(_) => return Readiness::Died,
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Readiness::TimedOut;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+/// inspect 結果からコンテナの私網 IP を取り出す(空文字は「未割当」なので弾く)。
+/// **前提**:探測時点の新コンテナは自分の per-service 私網 **のみ** に居る(M6 の callee attach =
+/// `attach_as_callee` は commit_success の後、周期 `reconcile_networks` も成功済み deploy の容器
+/// しか触らない)ため「任意の 1 エントリ」で正しい。callee attach を commit 前へ動かすなら
+/// ここも svc 私網を名指しで選ぶ必要がある。
+fn container_ip(info: &bollard::models::ContainerInspectResponse) -> Option<String> {
+    info.network_settings
+        .as_ref()?
+        .networks
+        .as_ref()?
+        .values()
+        .find_map(|e| e.ip_address.clone().filter(|s| !s.is_empty()))
 }

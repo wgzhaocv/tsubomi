@@ -415,6 +415,10 @@ pub struct ServiceDto {
     /// 「指定値が反映されていない」を正しく検出できる値にしておく。
     #[serde(default)]
     pub memory_mb: i32,
+    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 硬上限なし(cpu_shares のソフト
+    /// 権重のみ)。旧サーバ相手は default(None)。
+    #[serde(default)]
+    pub cpu_limit_millis: Option<i32>,
 }
 
 /// `POST /api/services` のリクエストボディ。name 以外は任意 — 省略時の既定
@@ -435,6 +439,9 @@ pub struct CreateServiceReq {
     /// メモリ硬上限 MiB(省略 = 1024)。
     #[serde(default)]
     pub memory_mb: Option<i32>,
+    /// CPU 硬上限(millicores、1000 = 1 CPU。省略 = 硬上限なし)。
+    #[serde(default)]
+    pub cpu_limit_millis: Option<i32>,
 }
 
 /// service の registry 資格情報(GitHub Actions が docker login + push に使う)。

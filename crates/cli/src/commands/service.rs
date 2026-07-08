@@ -43,6 +43,10 @@ pub enum ServiceCmd {
         /// メモリ硬上限 MiB(省略 = 1024。範囲 128〜4096)
         #[arg(long)]
         memory: Option<i32>,
+        /// CPU 硬上限(コア数。例 0.5 / 2。省略 = 上限なし = 相対権重のみ。範囲 0.1〜16)。
+        /// 単機共有ホストで CPU を食い尽くして隣人を拖らせない保険
+        #[arg(long)]
+        cpus: Option<f64>,
     },
     /// サービス一覧
     List,
@@ -132,6 +136,11 @@ pub enum ServiceCmd {
     Delete {
         /// 対象サービスの表示名
         name: String,
+        /// `--github` 連携で作った GitHub repo(`<gh ユーザ>/<subdomain>`)も連带削除する。
+        /// repo の削除は**即時かつ復元不能**(サービス本体のゴミ箱 3 日復元とは別)。
+        /// gh に delete_repo スコープが要る(無ければ `gh auth refresh -h github.com -s delete_repo`)
+        #[arg(long)]
+        with_repo: bool,
     },
     /// 指定したデプロイに戻す(再ビルドなし。deploy-id は `tbm service status` で確認)
     Rollback {
@@ -326,13 +335,41 @@ pub async fn run(
             run_verify(&c, &server_url, &token, &name, wait, for_sha.as_deref(), timeout, json)
                 .await?;
         }
-        ServiceCmd::Delete { name } => {
+        ServiceCmd::Delete { name, with_repo } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            // repo 連带削除は削除**前**に subdomain(= repo 名)を確定する(削除後は引けない)。
+            let subdomain = if with_repo {
+                Some(api::service_get(&c, &server_url, &token, &id).await?.subdomain)
+            } else {
+                None
+            };
             api::service_delete(&c, &server_url, &token, &id).await?;
+            // service 本体の削除(ゴミ箱へ)は完了済み — 以降の repo 掃除は best-effort で、
+            // 失敗しても削除自体は成功として報告する(repo は後から手動で消せる)。
+            let repo_cleanup = subdomain.map(|sub| delete_github_repo(&sub, &id.to_string()));
             if json {
-                print_json(&json!({ "status": "deleted", "recoverable_days": 3 }))?;
+                let mut out = json!({ "status": "deleted", "recoverable_days": 3 });
+                if let Some(r) = &repo_cleanup {
+                    out["github_repo"] = match r {
+                        Ok(repo) => json!({ "repo": repo, "deleted": true }),
+                        Err(e) => json!({ "deleted": false, "error": e.to_string() }),
+                    };
+                }
+                print_json(&out)?;
             } else {
                 println!("削除しました(ゴミ箱へ。3 日間は復元可能)。");
+                match &repo_cleanup {
+                    Some(Ok(repo)) => println!("GitHub repo {repo} も削除しました。"),
+                    Some(Err(e)) => eprintln!("GitHub repo の削除に失敗: {e}"),
+                    // 明示指定なしの時だけ、repo が残っている可能性をそっと知らせる(gh 不在なら黙る)。
+                    None => {
+                        if gh_ok() {
+                            eprintln!(
+                                "ヒント: `--github` 連携で作った GitHub repo は残ります(`tbm service delete <name> --with-repo` で連带削除、または gh repo delete で手動削除)"
+                            );
+                        }
+                    }
+                }
             }
         }
         ServiceCmd::Visibility { name, visibility } => {
@@ -371,7 +408,16 @@ pub async fn run(
             visibility,
             stateful,
             memory,
+            cpus,
         } => {
+            // CPU 上限はコア数(人間の単位)で受け、wire は millicores(整数)に変換する。
+            let cpu_limit_millis = match cpus {
+                Some(c) if !(0.1..=16.0).contains(&c) => {
+                    bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)")
+                }
+                Some(c) => Some((c * 1000.0).round() as i32),
+                None => None,
+            };
             // GitHub 連携(`gh repo create --source=.` と後の `git push`)は **カレントを git
             // リポジトリとして** GitHub に繋ぐので、repo でなければ service 作成(= サーバ側の
             // 副作用)の **前** に `git init` して半端な状態(service だけ出来て連携が失敗)を防ぐ。
@@ -392,6 +438,7 @@ pub async fn run(
                 visibility: visibility.map(|v| v.as_str().to_owned()),
                 stateful: stateful.then_some(true),
                 memory_mb: memory,
+                cpu_limit_millis,
             };
             let resp = api::service_create(&c, &server_url, &token, &req)
                 .await
@@ -409,10 +456,11 @@ pub async fn run(
             let ignored = port.is_some_and(|p| svc.container_port != p)
                 || visibility.is_some_and(|v| svc.visibility != v.as_str())
                 || (stateful && !svc.stateful)
-                || memory.is_some_and(|m| svc.memory_mb != m);
+                || memory.is_some_and(|m| svc.memory_mb != m)
+                || (cpu_limit_millis.is_some() && svc.cpu_limit_millis != cpu_limit_millis);
             if ignored {
                 bail!(
-                    "サーバがこの作成パラメータ(--port / --visibility / --stateful / --memory)に未対応です(サーバの更新が必要)。\
+                    "サーバがこの作成パラメータ(--port / --visibility / --stateful / --memory / --cpus)に未対応です(サーバの更新が必要)。\
                      サービス '{0}' は既定値で作成済みです — `tbm service delete \"{0}\"` で削除し、サーバ更新後に再作成してください",
                     req.name
                 );
@@ -772,6 +820,38 @@ fn write_workflow_file(yaml: &str) -> Result<()> {
     std::fs::write(path, yaml).with_context(|| format!("{WORKFLOW_PATH} を書けません"))?;
     eprintln!("{WORKFLOW_PATH} を作成しました");
     Ok(())
+}
+
+/// `--with-repo`:`<gh ユーザ>/<subdomain>` の GitHub repo を削除する(成功時は repo 名を返す)。
+/// repo が無い(手動削除済み / `--github` 未使用)は成功扱いにせずエラーで正直に報告する —
+/// 「消したつもりが別名で残っていた」を隠さない。delete_repo スコープ不足には次の一手を添える。
+///
+/// **同名無関係 repo の誤削除防御**(審査指摘):`--local` 運用の service と同名の個人 repo が
+/// 偶然ある(subdomain は "blog" 等の一般語になりやすい)と、名前一致だけで消すのは不可逆事故。
+/// `--github` 連携は作成時に必ず variable `TSUBOMI_SERVICE_ID` を焼く(configure_github)ので、
+/// **それが今削した service の id と一致する repo だけ**を消す。
+fn delete_github_repo(subdomain: &str, service_id: &str) -> Result<String> {
+    if !gh_ok() {
+        bail!("gh が使えません(未インストール / 未ログイン)。`gh auth login` の後に gh repo delete で手動削除してください");
+    }
+    let owner = gh_capture(&["api", "user", "-q", ".login"])?;
+    let repo = format!("{owner}/{subdomain}");
+    if !gh_silent(&["repo", "view", &repo]) {
+        bail!("repo {repo} が見つかりません(既に削除済みか、別名で作られています)");
+    }
+    let linked = gh_capture(&["variable", "get", "TSUBOMI_SERVICE_ID", "-R", &repo])
+        .unwrap_or_default();
+    if linked != service_id {
+        bail!(
+            "repo {repo} はこの service の連携 repo と確認できません(TSUBOMI_SERVICE_ID 不一致 / 未設定)。同名の無関係な repo を誤削除しないため中止しました — 本当に消すなら `gh repo delete {repo}` を手動で実行してください"
+        );
+    }
+    run_gh(&["repo", "delete", &repo, "--yes"]).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}。delete_repo スコープが無い場合は `gh auth refresh -h github.com -s delete_repo` を実行してから再試行してください(repo: {repo})"
+        )
+    })?;
+    Ok(repo)
 }
 
 // ===== gh ヘルパ =====

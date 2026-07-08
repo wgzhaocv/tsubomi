@@ -88,8 +88,8 @@ async fn recover_interrupted(state: &AppState) {
         // deploy_lock の中で状態を読み直し、再起動直後に割り込んだ stop / 新 deploy と競合しない。
         let lock = state.deploy_lock(id);
         let _guard = lock.lock().await;
-        let cur: Option<(String, String, String)> = match sqlx::query_as(
-            "SELECT s.desired_state, s.phase, s.visibility FROM service_details s
+        let cur: Option<(String, String, String, bool)> = match sqlx::query_as(
+            "SELECT s.desired_state, s.phase, s.visibility, s.stateful FROM service_details s
                JOIN resources r ON r.id = s.resource_id
               WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
         )
@@ -103,7 +103,7 @@ async fn recover_interrupted(state: &AppState) {
                 continue;
             }
         };
-        let Some((desired, phase, visibility)) = cur else {
+        let Some((desired, phase, visibility, stateful)) = cur else {
             continue;
         }; // 削除済み
         if phase != "deploying" {
@@ -130,10 +130,26 @@ async fn recover_interrupted(state: &AppState) {
         if desired == "running"
             && let Some(sdid) = succeeded_id
         {
-            // 旧(routed)コンテナを残し、孤児の新コンテナだけ掃除する(ダウンタイム無し)。
+            // 旧(routed)コンテナを残し、孤児の新コンテナだけ掃除する(stateless はダウンタイム無し)。
+            // **stateful の中断は特別**(codex 審査 2026-07-08):stop-first なので「旧は停止済み・
+            // 走っているのは未 commit の新だけ」があり得る。その新は孤児として掃除する(DB の正は
+            // 旧 digest — 失敗デプロイの契約どおり旧版で着地)が、①走行中の stateful を消すので
+            // 30s 猶予で止め(§0-G)、②温存されている旧コンテナを再 start して復旧する
+            // (run_digest_inner の失敗回滚と同じ「旧版自動復旧」をクラッシュ跨ぎでも成立させる)。
             let keep = container_name(id, sdid);
-            if let Err(e) = docker::remove_others(state, id, &keep).await {
+            let keep_running = match docker::presence(state, id).await {
+                Ok((_, running)) => running.iter().any(|n| n == &keep),
+                Err(_) => true, // 確認不能なら再 start を試みない(走行中に start は 304 で無害だが騒がしい)
+            };
+            let grace = stateful.then_some(docker::STATEFUL_STOP_GRACE_SECS);
+            if let Err(e) = docker::remove_others_grace(state, id, &keep, grace).await {
                 tracing::warn!(error = ?e, %id, "reconcile: 中断デプロイの孤児コンテナ掃除に失敗");
+            }
+            if !keep_running {
+                // stateful stop-first の途中で死んだ場合:旧は stopped で温存されている。再 start で
+                // 旧版復旧(best-effort — コンテナ自体が無ければ start 失敗 → phase=running のまま
+                // converge_running が直近成功 digest で作り直す)。
+                docker::restart_stopped(state, std::slice::from_ref(&keep)).await;
             }
             // private は「route ファイル無し」が期望状態:中断が route 撤去の前後どちらでも陳腐
             // ファイルが残り得るので、起動時にここで確実に掃く(周期 converge の実行順序に依存
@@ -430,7 +446,7 @@ async fn cleanup_orphans(state: &AppState) {
         let Some(sid) = sid else {
             // service_id を欠く管理コンテナ(手動 docker run / ラベル破損)→ 個別削除(best-effort)。
             tracing::warn!(container = %container_id, "reconcile: service_id ラベル無しの管理コンテナを削除");
-            docker::remove_one(state, &container_id).await;
+            docker::remove_one(state, &container_id, None).await;
             continue;
         };
         if !handled.insert(sid) {

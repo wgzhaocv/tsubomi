@@ -52,6 +52,9 @@ const CONTAINER_PORT_RANGE: std::ops::RangeInclusive<i32> = 1..=65535;
 /// 下限は最小級の app、上限は 16GB 共有ホストの節度。
 const DEFAULT_MEMORY_MB: i32 = 1024;
 const MEMORY_MB_RANGE: std::ops::RangeInclusive<i32> = 128..=4096;
+/// CPU 硬上限の許容範囲(millicores)。下限 100 = 0.1 CPU(それ未満は実用にならない)、
+/// 上限 16000 = 16 CPU(単機の物理上限を超えた指定は docker がエラーにするだけなので緩く)。
+const CPU_LIMIT_MILLIS_RANGE: std::ops::RangeInclusive<i32> = 100..=16000;
 
 /// 公開範囲(`service_details.visibility`)。DB の CHECK と対を成す単一真源 —
 /// API 入力検証(不正値は 400)と route 分岐(ipallow 有無)をここに集約する。
@@ -148,6 +151,7 @@ type ServiceRow = (
     String,                // visibility
     bool,                  // stateful
     i32,                   // memory_mb
+    Option<i32>,           // cpu_limit_millis
 );
 
 fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
@@ -168,6 +172,7 @@ fn service_row_to_dto(r: ServiceRow, config: &Config) -> ServiceDto {
         visibility: r.10,
         stateful: r.11,
         memory_mb: r.12,
+        cpu_limit_millis: r.13,
     }
 }
 
@@ -179,7 +184,7 @@ pub async fn list(
     let rows: Vec<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
-                s.visibility, s.stateful, s.memory_mb
+                s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.user_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL
           ORDER BY r.anon_seq",
@@ -203,7 +208,7 @@ pub async fn get_one(
     let row: Option<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
-                s.visibility, s.stateful, s.memory_mb
+                s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis
            FROM resources r JOIN service_details s ON s.resource_id = r.id
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
@@ -1241,6 +1246,16 @@ pub async fn create(
         None => default_visibility(container_port),
     };
     let stateful = req.stateful.unwrap_or(false);
+    // CPU 硬上限は任意(None = 従来どおりソフト権重のみ)。指定時だけ範囲を検証。
+    if let Some(cpu) = req.cpu_limit_millis
+        && !CPU_LIMIT_MILLIS_RANGE.contains(&cpu)
+    {
+        return Err(AppError::BadRequest(format!(
+            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
+            CPU_LIMIT_MILLIS_RANGE.start(),
+            CPU_LIMIT_MILLIS_RANGE.end()
+        )));
+    }
 
     // 同名チェック(ゴミ箱内含む)。UNIQUE が最終ガードだが、先に弾いて分かりやすく。
     let exists: bool = sqlx::query_scalar(
@@ -1272,6 +1287,7 @@ pub async fn create(
         visibility,
         stateful,
         memory_mb,
+        cpu_limit_millis: req.cpu_limit_millis,
     };
 
     // subdomain は display_name の slug を第一候補に、衝突 / 予約語なら乱数語を付けて再試行
@@ -1317,6 +1333,7 @@ pub async fn create(
             "visibility": visibility.as_str(),
             "stateful": stateful,
             "memory_mb": memory_mb,
+            "cpu_limit_millis": req.cpu_limit_millis,
         }),
         auth.client_ip.as_deref(),
     )
@@ -1351,6 +1368,7 @@ struct NewService<'a> {
     visibility: Visibility,
     stateful: bool,
     memory_mb: i32,
+    cpu_limit_millis: Option<i32>,
 }
 
 /// insert_attempt の失敗は 2 種:subdomain の UNIQUE 違反(呼び出し側でリトライ)と
@@ -1418,8 +1436,8 @@ async fn insert_attempt(
 
     sqlx::query(
         "INSERT INTO service_details
-                (resource_id, subdomain, deploy_key_enc, container_port, visibility, stateful, memory_mb)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                (resource_id, subdomain, deploy_key_enc, container_port, visibility, stateful, memory_mb, cpu_limit_millis)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(id)
     .bind(subdomain)
@@ -1428,6 +1446,7 @@ async fn insert_attempt(
     .bind(new.visibility.as_str())
     .bind(new.stateful)
     .bind(new.memory_mb)
+    .bind(new.cpu_limit_millis)
     .execute(&mut *tx)
     .await
     .map_err(classify)?;
@@ -1449,6 +1468,7 @@ async fn insert_attempt(
         visibility: new.visibility.as_str().into(),
         stateful: new.stateful,
         memory_mb: new.memory_mb,
+        cpu_limit_millis: new.cpu_limit_millis,
     })
 }
 

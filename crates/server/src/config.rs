@@ -172,6 +172,10 @@ pub struct Config {
     /// gc の周期(1h)で `df` を見て判定し、platform_config の状態で去重する(§4.2)。
     pub disk_warn_pct: u8,
     pub disk_critical_pct: u8,
+    /// デプロイ門禁の TCP readiness 探測の期限(秒。`TSUBOMI_READY_TIMEOUT_SECS`、既定 60)。
+    /// **0 = 探測無効の退路**(存活確認のみ = v47 までの挙動)。company/public のユーザ契機
+    /// deploy にだけ効く(private / reconcile 復活は元々探測しない — deploy.rs)。
+    pub ready_timeout_secs: u64,
     /// **危険操作の確認コードを log に出すことを明示的に許す**(`TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES`、
     /// 既定 false)。dev で Resend 未契約のとき owner がコードを使えるようにする退路。**本番では絶対に
     /// 立てない** — log アクセス権だけで owner の危険操作(他人資源の stop/delete)を完遂できてしまう。
@@ -521,6 +525,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(90);
+        let ready_timeout_secs: u64 = std::env::var("TSUBOMI_READY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
         // 危険操作コードの log 出力許可(dev 退路。本番では立てない — §admin/actions.rs)。
         let dev_insecure_log_action_codes = std::env::var("TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES")
             .map(|v| v == "true" || v == "1")
@@ -577,6 +585,7 @@ impl Config {
             mail_from,
             disk_warn_pct,
             disk_critical_pct,
+            ready_timeout_secs,
             dev_insecure_log_action_codes,
         })
     }

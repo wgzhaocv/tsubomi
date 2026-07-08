@@ -436,6 +436,12 @@ received
 ```
 1. 新コンテナ(deploy 一意名 tsubomi-<id>-<短码>)を create + start
 2. 存活確認(inspect の State.Running。HTTP ready 探针は持たない — 決定 E)
+2'. TCP readiness 探測(server v48+、AI 審査 R1。決定 E の deferred readiness の最小形):
+    company/public の service は container_port が TCP を受けるまで待つ(既定 60s、
+    `TSUBOMI_READY_TIMEOUT_SECS` で調整・0 で無効)。素の TCP なので非 HTTP の stateful も
+    同じ門を通り、`health_path` の migration は不要。private は listen しない worker を許容
+    する契約なので探測しない。監听錯 port / listen 前クラッシュはここで failed になり、
+    「succeeded なのに静默 502」が消える(dev macOS はホスト→bridge IP 不達のため探測スキップ)
 3. route(svc-<id>.yml の後端)を新コンテナへ切替
 4. 旧コンテナ(同 service の他の管理コンテナ)を stop + remove
 ```

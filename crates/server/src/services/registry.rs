@@ -113,7 +113,15 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
         let pass = state.crypto.decrypt(&pass_enc)?;
         let hash = bcrypt::hash(&pass, bcrypt::DEFAULT_COST)
             .map_err(|e| AppError::Other(anyhow::anyhow!("bcrypt に失敗: {e}")))?;
-        users.push(format!("{user}:{hash}"));
+        let line = format!("{user}:{hash}");
+        // 書き込み点の縦深防御(AI 審査 R3):username は平台生成・bcrypt は `$ . /` と英数字のみ
+        // だが、素で YAML に埋めるため白名単で最終確認する(route.rs と同じ門)。
+        crate::services::route::ensure_yaml_embeddable("registry account", &line)?;
+        users.push(line);
+    }
+    crate::services::route::ensure_yaml_embeddable("registry push host", state.config.registry_host())?;
+    if let Some(direct) = state.config.registry_direct_host() {
+        crate::services::route::ensure_yaml_embeddable("registry direct host", direct)?;
     }
 
     let target = state.config.traefik_dynamic_dir.join("registry.yml");
