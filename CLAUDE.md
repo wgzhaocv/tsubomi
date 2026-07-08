@@ -130,6 +130,22 @@ gh はユーザ自身)/(C3)`logs --follow/--since`・`service metrics/deploys/op
 本番 e2e 済み(2026-07-03、server v43 / tbm 1.0.21):metrics 実値・logs --follow 実時流式・
 db --param/--csv、無瞬断展開(全 app 200 継続)。実装は各切片の commit と本段落。
 
+**1.0.21 後の追加(マイルストーン外):デプロイ可観測性 + --watch QoL(server v45 / tbm 1.0.24)**。
+AI 重度利用フィードバック第三弾。発端の「ログが stdout しか出ない」は**実証の結果誤診**
+(logs は当初から stdout+stderr 両取り — 同構成コンテナ + 同版 bollard で実測。真因は空バイナリが
+exit 0 で無出力 + 失敗コンテナ掃除後の logs は旧コンテナを指す)で、本丸は「秒退時に退出コードが
+見えない」方。**server**:`docker::crash_summary`(失敗 deploy のエラーに exit code / OOMKilled /
+再起動回数 + exit code 別ヒントを併載。restart 済みは exit=0 リセットを誤診しないよう crash-loop
+文言に切替、OOM は true のときだけ添える)。**CLI**:`deploy --watch` の ① upstream 未設定は実
+remote で自動 `push -u`(選好:`@{push}` → pushRemote/pushDefault → tsubomi → origin → 唯一。
+origin 固定案内は tsubomi remote で失敗していた)② 複数サービスでも repo の `TSUBOMI_SERVICE_ID`
+variable から自動推断 ③ `--for-sha`(verify と同型。`^{commit}` 実在検証・過去 sha 追跡時は HEAD の
+WIP を巻き込み push しない)④ gh 呼び出しに `-R` 貫通(複数 remote の既定解決エラー回避)。
+**skill**:「起動直後にクラッシュする」playbook(exit code 速查 → 観察モード → exec 調査。2>&1
+不要を明記)。品質検証は 4 simplify agents + codex 二輪(計 21 findings、真バグ 6 件を出荷前後に
+回収 — clap の `--local --for-sha` 静默受理 / 偽 sha の timeout 空費 / crash-loop の exit=0 誤報 等)。
+本番展開済み(2026-07-08、Docker Hub v44/v45 双架 + Pi 無瞬断 + CLI 4 平台)。
+
 **stateful 後の追加(マイルストーン外):CLI の AI フレンドリ改善(tbm 1.0.20)**。AI 利用の
 フィードバック起点の CLI 純粋な磨き込み(server はほぼ不変)。(1)**`tbm db query --tsv`**:
 JSON の `results[0].rows[0][0]` を毎回 jq/node で剥く手間を無くす行だけのタブ区切り出力
