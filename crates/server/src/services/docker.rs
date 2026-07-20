@@ -12,8 +12,9 @@ use crate::state::AppState;
 use anyhow::anyhow;
 use tsubomi_shared::{ExecResult, ServiceMetricsDto};
 use bollard::models::{
-    ContainerCreateBody, ContainerStatsResponse, ContainerSummary, ContainerSummaryStateEnum,
-    HostConfig, HostConfigLogConfig, RestartPolicy, RestartPolicyNameEnum,
+    ContainerCreateBody, ContainerMemoryStats, ContainerStatsResponse, ContainerSummary,
+    ContainerSummaryStateEnum, HostConfig, HostConfigLogConfig, RestartPolicy,
+    RestartPolicyNameEnum,
 };
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
@@ -1102,9 +1103,29 @@ async fn sample_stats(state: &AppState, name_or_id: &str) -> Option<Sample> {
     let mem = sample.memory_stats.as_ref();
     Some(Sample {
         cpu_pct: compute_cpu_pct(&sample),
-        mem_bytes: mem.and_then(|m| m.usage).unwrap_or(0),
+        mem_bytes: mem.map(mem_working_set).unwrap_or(0),
         mem_limit: mem.and_then(|m| m.limit),
     })
+}
+
+/// `docker stats` と同じ「キャッシュ抜きワーキングセット」を算出する。cgroup の生 usage
+/// (`memory.current`)は回収可能なページキャッシュを含み実メモリの何倍にも膨らむ(例:server
+/// 本体は anon 16MB なのに usage は 150MB=大半が inactive_file のファイルキャッシュ)。docker CLI と
+/// 同式で inactive_file を差し引く:cgroup v1 は `total_inactive_file`、v2 は `inactive_file`。
+/// キーが無い(dev macOS 等)/ inactive >= usage の異常時は生 usage にフォールバック(docker と同挙動)。
+fn mem_working_set(m: &ContainerMemoryStats) -> u64 {
+    let usage = m.usage.unwrap_or(0);
+    let inactive = m
+        .stats
+        .as_ref()
+        .and_then(|s| s.get("total_inactive_file").or_else(|| s.get("inactive_file")))
+        .copied()
+        .unwrap_or(0);
+    if inactive < usage {
+        usage - inactive
+    } else {
+        usage
+    }
 }
 
 /// 指定 service の 1 発メトリクス(`tbm service metrics`)。稼働中なら stats を、常に inspect を
