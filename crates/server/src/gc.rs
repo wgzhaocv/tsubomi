@@ -200,6 +200,21 @@ async fn sweep_auth(state: &AppState) {
             "deploy_nonces",
             "DELETE FROM deploy_nonces WHERE seen_at < now() - interval '1 hour'",
         ),
+        // 危険操作の 6 桁コード。消費 / 再発行では**同一対象の行しか**消えないので
+        // (admin/actions.rs)、別対象の未使用コードが期限切れ後も残り続ける。
+        // `expires_at` の index は migration が既に張っている。
+        (
+            "admin_action_codes",
+            "DELETE FROM admin_action_codes WHERE expires_at <= now()",
+        ),
+        // 監査ログの保持期限。体積は小さい(利用者の操作回数ぶんだけ増える。reconcile 等の
+        // 自動処理は書かない)が、無期限に持つ理由も無いので上限を切る。**90 日**は
+        // 「事後追跡には短すぎない / 無期限より運用が読める」の折衷(業界の下限が概ね 90 日)。
+        // 監査は owner ガバナンスの唯一の一次情報なので、これ以上短くしないこと。
+        (
+            "audit_log",
+            "DELETE FROM audit_log WHERE created_at < now() - interval '90 days'",
+        ),
     ] {
         match sqlx::query(sql).execute(&state.db).await {
             Ok(r) if r.rows_affected() > 0 => {
@@ -209,7 +224,55 @@ async fn sweep_auth(state: &AppState) {
             Err(e) => tracing::warn!(what, error = ?e, "gc sweep failed"),
         }
     }
+    sweep_old_deploys(state).await;
 }
+
+/// 古い deploys 行を掃除する。**`registry` の keep 窓に要る行は必ず残す**。
+///
+/// 素朴に「90 日より古い行を消す」とすると **rollback が壊れる**:
+/// `registry::protect_and_expire_one` の keep 窓(現役 ∪ 直近
+/// [`KEEP_SUCCEEDED_DEPLOYS`] distinct 成功版)は**この表から算出**されるので、行が消えると
+/// 対応 manifest が「窓外」と判定されて registry から消え、宿主イメージも消え、戻る先が無くなる。
+/// 逆に版数だけで切るのも駄目(低頻度デプロイの service が保護されない)。よって
+/// **「90 日超」かつ「keep 窓の外」かつ「terminal」**の 3 条件が揃った行だけを消す。
+///
+/// 時間と版数のどちらか一方では正しくならない、というのがここの要点。
+async fn sweep_old_deploys(state: &AppState) {
+    let sql = "
+        DELETE FROM deploys d
+         WHERE d.created_at < now() - make_interval(days => $1)
+           AND d.status IN ('succeeded','failed')
+           AND NOT EXISTS (
+             SELECT 1 FROM (
+               SELECT service_id, image_digest,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY service_id ORDER BY MAX(created_at) DESC
+                      ) AS rn
+                 FROM deploys
+                WHERE status = 'succeeded'
+                GROUP BY service_id, image_digest
+             ) k
+              WHERE k.service_id = d.service_id
+                AND k.image_digest = d.image_digest
+                AND k.rn <= $2
+           )";
+    match sqlx::query(sql)
+        .bind(DEPLOY_RETAIN_DAYS as i32)
+        .bind(crate::services::registry::KEEP_SUCCEEDED_DEPLOYS as i64)
+        .execute(&state.db)
+        .await
+    {
+        Ok(r) if r.rows_affected() > 0 => {
+            tracing::info!(rows = r.rows_affected(), "gc: 古い deploys 行を掃除した");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = ?e, "gc: deploys の掃除に失敗"),
+    }
+}
+
+/// deploys 行の保持日数。**rollback 窓(直近 5 版)はこれとは独立に守られる** —
+/// `sweep_old_deploys` の 3 条件を参照。
+const DEPLOY_RETAIN_DAYS: i64 = 90;
 
 /// purge_after <= now() のゴミ箱を物理削除(reconcile の自動 purge)。
 async fn sweep_trash(state: &AppState) {
@@ -393,10 +456,23 @@ async fn run_backup(state: &AppState) -> anyhow::Result<()> {
     }
 
     // volumes の rsync スナップショット(§8)。失敗は log のみ(他を止めない)。
-    if state.config.volumes_dir.exists()
-        && let Err(e) = rsync_dir(&state.config.volumes_dir, &dir.join("volumes")).await
-    {
-        tracing::warn!(error = ?e, "gc: volumes backup failed");
+    // **前日のスナップショットを `--link-dest` の基準に渡す**:変わっていないファイルは
+    // ハードリンクになるので、7 世代でもディスクは「実体 1 部 + 差分」に収まる
+    // (無しだと live + 7 フルコピー = 常時 8 倍。Pi の共有 NVMe では効く)。
+    if state.config.volumes_dir.exists() {
+        let prev = (chrono::Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let link_dest = state.config.backup_dir.join(&prev).join("volumes");
+        if let Err(e) = rsync_dir(
+            &state.config.volumes_dir,
+            &dir.join("volumes"),
+            link_dest.is_dir().then_some(link_dest.as_path()),
+        )
+        .await
+        {
+            tracing::warn!(error = ?e, "gc: volumes backup failed");
+        }
     }
 
     prune_old_backups(state);
@@ -411,17 +487,26 @@ async fn run_backup(state: &AppState) -> anyhow::Result<()> {
 
 /// `rsync -a` でディレクトリ全体をバックアップ先へ複製する。pg_dump と同様に
 /// 外部コマンドを TCP/ファイル経由で叩く(docker exec ではない)。
-async fn rsync_dir(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result<()> {
+async fn rsync_dir(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    link_dest: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     std::fs::create_dir_all(dest)?;
     // 末尾スラッシュ = 「src の中身を dest 直下へ」。--delete は付けない
     // (同日の再実行で消えても、削除済みファイルを残す方がバックアップとして保守的)。
     let src_arg = format!("{}/", src.display());
-    let status = tokio::process::Command::new("rsync")
-        .arg("-a")
-        .arg(&src_arg)
-        .arg(dest)
-        .status()
-        .await?;
+    let mut cmd = tokio::process::Command::new("rsync");
+    cmd.arg("-a");
+    // `--link-dest`:基準ディレクトリと同一内容のファイルはコピーせず**ハードリンク**にする。
+    // 世代間で変わらないファイル(volume の大半)がディスクを二重に食わなくなる。基準が
+    // 存在しない初回 / 欠番日は None で渡され、通常のフルコピーに倒れる(自己修復的)。
+    // 注意:リンク先は**世代を跨いで共有される実体**なので、復元時に書き戻すなら必ず
+    // コピーしてから触る(バックアップ側を直接編集すると他世代も変わる)。
+    if let Some(base) = link_dest {
+        cmd.arg(format!("--link-dest={}", base.display()));
+    }
+    let status = cmd.arg(&src_arg).arg(dest).status().await?;
     if !status.success() {
         anyhow::bail!("rsync が異常終了しました: {status}");
     }

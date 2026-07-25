@@ -168,6 +168,17 @@ mod imp {
             let _ = unlinkat(&self.parent, &*self.tmp, AtFlags::empty());
         }
     }
+    /// **`commit` / `abort` に到達しなかった時の保険。** axum はクライアント切断時に
+    /// ハンドラの future を await 点で drop するので、明示の `abort()` だけでは取りこぼし、
+    /// `.tbm-upload-<uuid>.tmp` がユーザの volume に残る(dotfile だがファイルブラウザに
+    /// 見えるし、最大 `max_upload_bytes` を食う)。掃除する sweeper も無かった。
+    /// `commit` 済みなら tmp は rename 済みで ENOENT = 無害(親 fd を持っているので
+    /// 他のパスを消す危険もない)。
+    impl Drop for UploadCommit {
+        fn drop(&mut self) {
+            let _ = unlinkat(&self.parent, &*self.tmp, AtFlags::empty());
+        }
+    }
 
     /// root ディレクトリの fd を開く(以後の openat2 の基点)。
     fn open_root(root: &Path) -> AppResult<OwnedFd> {
@@ -410,6 +421,13 @@ mod imp {
             Ok(())
         }
         pub fn abort(self) {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+    /// linux 版と同じ保険(理由はそちらのコメント参照):クライアント切断で future が drop され
+    /// `commit`/`abort` に到達しなかった場合に tmp を残さない。
+    impl Drop for UploadCommit {
+        fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.tmp);
         }
     }

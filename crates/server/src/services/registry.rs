@@ -30,7 +30,7 @@ const REGISTRY_CONTAINER: &str = "tsubomi-registry";
 
 /// GC が service ごとに温存する成功版の数(現役 digest は別枠で常に温存)。rollback の実効窓 =
 /// この数(それより古い版の manifest は回収済み = rollback は pull 404。ディスクとの取引)。
-const KEEP_SUCCEEDED_DEPLOYS: usize = 5;
+pub(crate) const KEEP_SUCCEEDED_DEPLOYS: usize = 5;
 
 /// buildx は multi-arch で OCI image index を push し得る。schema2 / OCI の両系統を Accept して
 /// 頂点 manifest(index か単一 manifest)を扱う(delete_repo / GC 保護の共有)。
