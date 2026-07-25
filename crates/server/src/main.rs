@@ -54,6 +54,16 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let state = AppState::new(config).await?;
+    // ディスク指標(admin のリソース概要)と水位警告は `df <volumes_dir>` を見る
+    // (metrics::disk_metrics — gc の警告と共有)。目録が無いと df が失敗して None になり、
+    // 概要が「—」になるだけでなく **警告メールも一切飛ばない**(gc は None で早期 return)。
+    // volumes_dir / trash_dir は「最初の volume 作成 / 最初の削除」まで作られないので、
+    // 全新初期化の直後は必ず不在 = その窓の間だけ監視が黙る。起動時に作って窓を閉じる。
+    for dir in [&state.config.volumes_dir, &state.config.trash_dir] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            tracing::warn!(dir = ?dir, error = ?e, "目録を作成できませんでした(best-effort)");
+        }
+    }
     gc::spawn(state.clone());
     // 現実(コンテナ/route)を期望状態へ収束させる第二の保険(restart=unless-stopped が第一)。
     // 起動時フル + 30s ライト(S8)。serve はブロックしない(初回フルは spawn 内の 0 tick)。

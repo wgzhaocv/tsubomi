@@ -1154,6 +1154,13 @@ pub(crate) async fn run_verify(
         }
         if report.ok {
             println!("OK:根 + 子リソース {} 件すべて 2xx。", report.resources.len());
+        } else if report.landed_noservice.is_some() {
+            // catch-all 落地 = そもそも公開されていない。assets の話をしても混乱するだけ。
+            println!(
+                "NG:この子域に生きた route がありません(平台の /noservice に着地)。未デプロイ / 停止中 / 削除済み、または route 反映待ちです(`tbm service status {name}` で phase と最新デプロイを確認。停止中なら `tbm service start {name}`)。"
+            );
+            std::io::stdout().flush().ok();
+            std::process::exit(1);
         } else {
             // 白画面の典型原因と次の一手(AI / 人間の自己修正用)。
             println!(
@@ -1323,6 +1330,10 @@ struct VerifyReport {
     root_status: u16,
     /// 根 HTML が参照する js / css 子リソースの検証結果。
     resources: Vec<VerifyResource>,
+    /// 平台の catch-all(`<server_url>/noservice`)に着地した = その子域に生きた route が
+    /// 無い(未デプロイ / 停止 / 削除済み / route 反映待ち)。出ているときは必ず ok=false。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    landed_noservice: Option<String>,
     /// いま serving 中のデプロイ(service.image_digest に一致する直近成功 deploy)。
     /// 「見ているのが自分の新版か」を機械判別する材料(`--for-sha` と併用で端到端)。
     /// 特定できない(未デプロイ等)ときは省略。
@@ -1381,7 +1392,33 @@ async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
     let root_status = resp.status().as_u16();
     // リダイレクト後の最終 URL を基準に相対パスを解決する(`/assets/x.js` の解決先を实体に揃える)。
     let base = url::Url::parse(resp.url().as_str())?;
+    // **平台の catch-all に落ちたら NG**。生きた route の無い子域(未デプロイ / 停止 / 削除済み /
+    // route 反映待ち)は `<server_url>/noservice` へ 302 する(server の route::write_catchall)。
+    // reqwest は既定でリダイレクトを追うので、素直に書くと root_status は落地ページの 200・
+    // base も平台ドメインになり、**平台自身の assets を「app の子リソース」として全部 2xx 判定 =
+    // 假成功**になる(停止中の service が curl では 502 なのに verify は ok:true を返す実害を確認)。
+    // 判定は「別ホストの /noservice に着地」= app 自身の正当な外部リダイレクト(path が違う)を
+    // 誤検出しない形にする。
+    let requested_host = url::Url::parse(root)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from));
+    let landed_noservice = (base.path() == "/noservice"
+        && base.host_str() != requested_host.as_deref())
+    .then(|| base.to_string());
     let body = resp.text().await.unwrap_or_default();
+
+    // catch-all 落地は即 NG で返す。body は平台のページなので、そこから抜いた参照を
+    // 「app の子リソース」として報告すると誤導になる(全部 2xx で出る)= 空で返す。
+    if let Some(landed) = landed_noservice {
+        return Ok(VerifyReport {
+            ok: false,
+            url: root.to_string(),
+            root_status,
+            resources: Vec::new(),
+            landed_noservice: Some(landed),
+            serving: None,
+        });
+    }
 
     // HTML でなければ根の 2xx だけで判定(API サービスなど)。雑な判定で十分:
     // 抽出器はタグが無ければ空を返すので、誤検出しても「子リソース 0 件」に落ちるだけ。
@@ -1415,6 +1452,7 @@ async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
         url: root.to_string(),
         root_status,
         resources: results,
+        landed_noservice: None,
         serving: None, // 呼び出し側の attach_serving が別途埋める(補助情報)。
     })
 }
