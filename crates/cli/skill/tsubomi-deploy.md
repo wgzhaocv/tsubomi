@@ -291,6 +291,9 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    非零終了する(接続失敗ではない = サーバ障害と誤読しない)。動作確認は `tbm service logs` /
    `tbm service exec`、または内部リンク先の caller コンテナから
    `tbm service exec <caller> -- wget -qO- http://<subdomain>:<port>` で行う。
+   **`landed_noservice` が付いていたら「その子域に生きた route が無い」**(未デプロイ / 停止中 /
+   削除済み / route 反映待ち)= 必ず `ok:false`。app の中身の問題ではないので、assets を疑わず
+   `tbm service status <名前>` で phase と最新デプロイを見る(停止中なら `tbm service start`)。
    **これが重要な理由**:`status=succeeded` + 根 200 でも、`index.html` が参照する `/assets/*.js` が
    404 だと**画面は真っ白**になる。根への素の `curl` はこれを見逃す。verify は子リソースまで見る。
    - **`succeeded` なのに 502**(verify の root_status が 502)→ ほぼ「アプリが `container_port`
