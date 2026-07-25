@@ -327,6 +327,34 @@ pub(crate) async fn purge_resource(
         // (これをしないと削除済み service の旧イメージが registry に永久に堆積する)。
         // 失敗時は行を残す(上と同じ規律 → 次 tick で再試行。registry 一時障害で自己修復)。
         crate::services::registry::delete_repo(state, id).await?;
+        // **宿主 docker のイメージは registry とは別実体**なので、ここで併せて消す
+        // (registry の manifest を消しても pull 済みの宿主イメージは残り続ける = 1 版で数百 MB)。
+        // keep 表を空で渡す = この service の全参照が対象。年齢下限も掛けない(0)— service ごと
+        // 消える瞬間なので「失敗イメージを 48h 残す」理由がもう無い。コンテナは直前の
+        // `stop_remove` で消えているので、掴まれていて消せない参照は通常無い。
+        // best-effort:ディスクの解放が遅れるだけで正しさには影響しないので、失敗しても
+        // 永久削除は進める(行を残すと「消したのに残っている」状態が続く方が害が大きい)。
+        // 回収できなかった分は prune_host_images が warn を出す(この service は二度と
+        // 訪れないので日次の再試行が効かない = 手動 `docker rmi` が必要)。
+        crate::services::docker::prune_host_images(
+            state,
+            &std::collections::HashMap::new(),
+            &std::collections::HashSet::new(),
+            Some(id),
+            0,
+        )
+        .await;
+        // **外部イメージ(`--image` の pgvector 等)は敢えて消さない。** 一見「用済み」だが:
+        //  (1) 同居する他プロジェクトや他 service が同じ upstream ref を使っていることがあり、
+        //      untag は相手の `docker run` を再 pull に落とす(`force=false` でも、内部 tag が
+        //      付いている間は docker のコンテナ参照チェックが発火しないので**止められない** —
+        //      Engine 29.4 で実測)。
+        //  (2) `source_kind`/`source_spec` は provenance で、GitHub / `--local` 経路は**書き換えない**。
+        //      昔一度 `--image nginx:alpine` を使った service を今 purge すると、陳腐な記録が
+        //      宿主の `nginx:alpine` を消す = 破壊操作が古い情報で駆動される。
+        //  (3) 同じ ref は上書きされるので**時間で累積しない**(一度きり数百 MB)。
+        // 得(一度の数百 MB)より失(他人のイメージを消す)が大きいので回収しない。要るときは
+        // 運用者が `docker rmi <ref>` で判断して消す。
     } else if kind == "cache" {
         // cache の永久削除:ACL ユーザを消し(冪等)、namespace の key を SCAN+UNLINK で
         // 確実に解放してから行を消す(掃除が失敗したら行を残す = 取り残し防止)。§7.2。

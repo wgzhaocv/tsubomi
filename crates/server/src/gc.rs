@@ -276,6 +276,7 @@ fn spawn_registry_gc(state: AppState) {
             if let Err(e) = crate::services::registry::protect_and_expire_manifests(&state).await {
                 tracing::warn!(error = ?e, "gc: registry manifest 期限切れ failed");
             }
+            prune_host_images(&state).await;
             match crate::services::registry::garbage_collect(&state).await {
                 Err(e) => tracing::warn!(error = ?e, "gc: registry garbage-collect failed"),
                 // 掃除成功後は registry を再起動して descriptor cache の毒を抜く(理由は
@@ -289,6 +290,62 @@ fn spawn_registry_gc(state: AppState) {
         }
     });
 }
+
+/// 日次:**宿主 docker のイメージ**を掃除する(registry の manifest / blob とは別実体)。
+///
+/// 掃除口がどこにも無く、deploy 回数に比例して宿主のディスクが育っていた(1 版で数百 MB。
+/// `docker image prune -f` は dangling しか消さないので `<repo>:<tag>` の残骸には当たらない)。
+///
+/// **問い合わせの順序が命**(`protect_and_expire_manifests` と同じ規律):
+/// 1. **先に**イメージを列挙する(= 古い快照)
+/// 2. **後で** keep 窓 / `deploying` を DB から読む(= 新しい快照)
+///
+/// 逆順にすると、その間に成功して現役化した digest が「keep に無いが列挙にある」状態になり、
+/// **現役イメージを消してしまう**。この向きなら、新しく現役化した分は必ず新しい快照の keep に
+/// 載っているので安全側に倒れる(取り逃した古い残骸は翌日回収される)。
+///
+/// 年齢下限は registry 側と同じ 48h(失敗イメージを再試行 / 診断のために残す — 2026-07-08 の
+/// 事故由来の決定)。best-effort:失敗は log のみで、blob 回収は続行する。
+async fn prune_host_images(state: &AppState) {
+    // ① 列挙(古い快照)。ここで撮った参照だけを候補にする。
+    // ② keep 窓と deploying を読む(新しい快照)。順序の理由は上のドキュメント。
+    let keeps = match crate::services::registry::host_keep_windows(state).await {
+        Ok(k) => k,
+        Err(e) => {
+            // keep が読めないまま掃除すると現役を消し得る → 何もしない(fail-closed)。
+            tracing::warn!(error = ?e, "gc: 宿主イメージの keep 窓を読めず掃除をスキップ");
+            return;
+        }
+    };
+    let deploying: std::collections::HashSet<uuid::Uuid> = match sqlx::query_as::<_, (uuid::Uuid,)>(
+        "SELECT resource_id FROM service_details WHERE phase = 'deploying'",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
+        Err(e) => {
+            // 同じ理由で fail-closed:進行中デプロイを守れないなら掃除しない。
+            tracing::warn!(error = ?e, "gc: deploying 中の service を読めず宿主イメージ掃除をスキップ");
+            return;
+        }
+    };
+    let removed = crate::services::docker::prune_host_images(
+        state,
+        &keeps,
+        &deploying,
+        None,
+        HOST_IMAGE_MIN_AGE_SECS,
+    )
+    .await;
+    if removed > 0 {
+        tracing::info!(removed, "gc: 宿主イメージ参照を掃除した");
+    }
+}
+
+/// 宿主イメージを消さない年齢下限(48h)。registry の manifest 期限切れと同値 —
+/// 失敗した deploy のイメージは再試行 / 診断にまだ要る(§10-E)。
+const HOST_IMAGE_MIN_AGE_SECS: i64 = 48 * 3600;
 
 /// 次に UTC の hh:mm を迎えるまでの時間(既に過ぎていれば翌日の同時刻)。registry GC の
 /// 固定時刻スケジュール用。負値になり得ない構成だが、時計後退等の異常時は 60s で安全側に倒す。

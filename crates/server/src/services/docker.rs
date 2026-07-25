@@ -18,13 +18,13 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     BuildImageOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
-    ListContainersOptionsBuilder, LogsOptionsBuilder, PushImageOptionsBuilder,
-    RemoveContainerOptionsBuilder, StatsOptionsBuilder, StopContainerOptionsBuilder,
-    TagImageOptionsBuilder,
+    ListContainersOptionsBuilder, ListImagesOptionsBuilder, LogsOptionsBuilder,
+    PushImageOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
+    StatsOptionsBuilder, StopContainerOptionsBuilder, TagImageOptionsBuilder,
 };
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// 平台が付ける管理ラベル(reconcile / 孤児検出 / swap がこれで引く)。
@@ -473,7 +473,22 @@ async fn force_remove(
 ) -> AppResult<()> {
     let opts = grace_secs.map(|t| StopContainerOptionsBuilder::default().t(t).build());
     let _ = state.docker.stop_container(name_or_id, opts).await;
-    let rm = RemoveContainerOptionsBuilder::default().force(true).build();
+    // `v(true)` = **このコンテナの匿名 volume も一緒に消す**。基底イメージが `VOLUME` を宣言して
+    // いて、その path が volume 注入の bind で覆われていない場合、docker は**コンテナ生成ごとに
+    // 匿名 volume を作る**(`FROM postgres` 等では必中。postgres なら初回 initdb で数十 MB が
+    // 実際に書かれる)。これを消さないと **deploy 回数に比例して匿名 volume が溜まる**
+    // (コードベースに volume を消す処理は他に一つも無い)。
+    // 安全性:平台は service の永続化に named volume を一切使わない(volume 注入はホストの
+    // bind mount)。`v=true` が消すのは**そのコンテナ固有の匿名 volume だけ**で、bind mount の
+    // 実体(ユーザの volume)にも named volume にも触れない。新コンテナは毎回新しい匿名 volume を
+    // もらうので、そこに残す価値のあるデータは元々存在しない。
+    // 補足:`source.rs` の白名単は Dockerfile の `VOLUME` 命令を拒否するが、**基底イメージが
+    // 継承する `VOLUME` は検出できず**、経路 1/2(GitHub / `--local`)のユーザ Dockerfile には
+    // そもそも制限が無い = 宣言側では塞げないので、回収側で受け止める。
+    let rm = RemoveContainerOptionsBuilder::default()
+        .force(true)
+        .v(true)
+        .build();
     state
         .docker
         .remove_container(name_or_id, Some(rm))
@@ -550,6 +565,180 @@ pub async fn remove_others_grace(
 /// `STATEFUL_STOP_GRACE_SECS` を渡す(起動期の WAL 回復 / 迁移中に SIGKILL しない — §0-G)。
 pub async fn remove_one(state: &AppState, name: &str, grace_secs: Option<i32>) {
     let _ = force_remove(state, name, grace_secs).await;
+}
+
+/// 宿主 docker 上にある「平台が管理する service イメージ」への 1 参照。
+///
+/// docker のイメージは**実体(image id)と参照(tag / digest)が多対 1** で、実測では 1 つの実体が
+/// **別 service の tag と外部イメージの tag を同時に**持っていた(基底が同じなら層ごと実体を共有 —
+/// `traefik/whoami:latest` が 2 service の tag と同居、`pgvector/pgvector:pg17` も同様)。
+/// だから掃除の単位は**実体ではなく参照**でなければならない(実体を id 指定で消すと他 service や
+/// 他プロジェクトの名前まで道連れになる。Engine 29 で実測確認済み)。
+pub struct ServiceImageRef {
+    /// 参照名が指す service(repo 名 `<registry_pull>/<uuid>` から解析)。
+    pub service_id: Uuid,
+    /// docker に渡す参照そのもの(`<repo>:<tag>` / `<repo>@sha256:…`)。
+    pub reference: String,
+    /// digest 形の参照なら `sha256:…`(tag 形は None)。keep 窓との突き合わせに使う。
+    pub digest: Option<String>,
+    /// 実体の作成時刻(unix 秒)。**年齢下限**の判定に使う。
+    pub created: i64,
+}
+
+/// 宿主上の service イメージ参照を**一度の `list_images` で**列挙する。
+///
+/// deploy は毎回 [`pull`] で新しい digest を宿主へ落とすが、**古い宿主イメージを消す口が
+/// どこにも無かった**:reconcile はコンテナ / route / 私網だけ、日次 GC は registry の
+/// manifest / blob だけ、`ship.sh` の `docker image prune -f` は `<none>:<none>` の dangling
+/// だけ(残骸は `<repo>:<tag>` や `<repo>@sha256:…` なので当たらない)。結果、宿主のディスクが
+/// **deploy 回数に比例して無限に育つ**(1 版で数百 MB — 2026-07-25 に実測)。ここが列挙側。
+///
+/// **共有ホスト前提の安全策**:`<registry_pull>/<uuid>` 前缀 + 直後が `:` か `@` の参照だけを
+/// 拾う(この機は他プロジェクトのイメージと同居しているので `image prune -a` のような
+/// グローバル掃除は**絶対に使わない**)。`filters` で daemon 側に絞らせないのも意図的 —
+/// reference filter の一致は Engine の版 / image store 実装に依存し、変わると**静かに 0 件**に
+/// なって掃除が止まる(この repo は Engine 29 で docker provider が壊れた前例がある)。
+pub async fn list_service_image_refs(state: &AppState) -> Vec<ServiceImageRef> {
+    let prefix = format!("{}/", state.config.registry_pull);
+    let opts = ListImagesOptionsBuilder::default().all(false).build();
+    let images = match state.docker.list_images(Some(opts)).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = ?e, "イメージ一覧の取得に失敗(宿主イメージの掃除をスキップ)");
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::new();
+    for img in images {
+        for r in img.repo_tags.iter().chain(img.repo_digests.iter()) {
+            // `<registry_pull>/<uuid>` の後に `:` か `@` が続く形だけを対象にする
+            // (区切りを確認するので `<uuid>` への部分一致では当たらない)。
+            let Some(rest) = r.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Some(sep) = rest.find([':', '@']) else {
+                continue;
+            };
+            let Ok(service_id) = rest[..sep].parse::<Uuid>() else {
+                continue; // 平台以外が同名前缀で置いたもの = 触らない
+            };
+            out.push(ServiceImageRef {
+                service_id,
+                reference: r.clone(),
+                digest: r.rsplit_once('@').map(|(_, d)| d.to_string()),
+                created: img.created,
+            });
+        }
+    }
+    out
+}
+
+/// 宿主イメージ参照 1 件を消すべきか。**判断だけを担う純関数**(docker に触らないので単体テスト
+/// 可能 — 分岐の取り違えが「現役を消す」に直結する箇所なので表で固定する)。
+///
+/// 順序に意味がある:対象外 → 年齢 → keep 窓。
+fn should_remove_host_image(
+    r: &ServiceImageRef,
+    keeps: &HashMap<Uuid, HashSet<String>>,
+    skip: &HashSet<Uuid>,
+    only: Option<Uuid>,
+    min_age_secs: i64,
+    now: i64,
+) -> bool {
+    // `only` 指定時はその service だけ。`skip`(phase='deploying')は絶対に触らない。
+    if only.is_some_and(|id| id != r.service_id) || skip.contains(&r.service_id) {
+        return false;
+    }
+    // 年齢下限。purge は対象 service ごと消える瞬間なので呼び出し側が 0 を渡す。
+    if now - r.created < min_age_secs {
+        return false;
+    }
+    // keeps に載っていない service = もう居ない(purge 済み / ゴミ箱 / 中断残骸)= 全部消す。
+    let Some(keep) = keeps.get(&r.service_id) else {
+        return true;
+    };
+    // 生きている service は keep 窓内の digest 参照だけ温存する。
+    //
+    // **tag 形の参照(digest=None)は温存しない。** これは deploy-source が取得時に打つ一時 tag
+    // `<repo>:<deploy_id>` で、完走後は用済み(`run_digest` は digest 参照でコンテナを起こす)。
+    // ここで「窓と突き合わせられないから安全側に残す」とすると **deploy-source のたびに tag が
+    // 1 つ積み増して永久に残る** = 塞ぎたかった穴が形を変えて復活する。取得中の保護は 2 枚で
+    // 足りている:`skip`(phase='deploying' を丸ごと除外)と年齢下限。
+    match &r.digest {
+        Some(d) => !keep.contains(d),
+        None => true,
+    }
+}
+
+/// 宿主イメージ参照 1 件を消す(**untag 意味論**)。同一実体に他の参照が残っていれば untag だけで
+/// 済み、最後の参照が消えたときに docker が実体と層を回収する。
+///
+/// `force` は使わない:実測では `force=true` が **他プロジェクトの停止中コンテナの conflict も
+/// 踏み越えて**実体ごと消し、その名前まで untag してしまう(Engine 29.4 で確認)。ここでは
+/// 「消せるものだけ消す」で十分 — 走行中 / 停止中コンテナが掴んでいる分は次の tick に回る。
+///
+/// 戻り値は成功したか。呼び出し側がログの粒度(purge は恒久リークなので warn、日次は debug)を決める。
+async fn remove_image_ref(state: &AppState, reference: &str) -> AppResult<()> {
+    let rm = RemoveImageOptionsBuilder::default()
+        .force(false)
+        .noprune(false)
+        .build();
+    state
+        .docker
+        .remove_image(reference, Some(rm), None)
+        .await
+        .map(|_| ())
+        .map_err(|e| AppError::Other(anyhow!("宿主イメージ参照の削除に失敗({reference}): {e}")))
+}
+
+/// 宿主イメージの掃除本体。**計画(keep 窓)を受け取り、参照単位で消す**。
+///
+/// - `keeps`:service_id → 温存する digest 集合。**この表に無い service_id は「もう居ない」**
+///   (purge 済み / ゴミ箱 / 中断残骸)= 全参照を削除対象にする。ゴミ箱の 3 日間も消して構わない —
+///   restore しても [`pull`] が registry から引き直す(`deploy.rs` は毎回必ず pull する)。
+/// - `skip`:**触ってはいけない** service(`phase='deploying'`)。deploy は
+///   「pull → (stateful なら 30s の stop 猶予) → create」の順で進み、その窓では新 digest を
+///   **参照するコンテナが存在しない**。ここで消すと `create_container` が "No such image" で
+///   落ちる。deploy-source の取得は分単位で、しかも `deploy_lock` の**外**・deploys 行の digest は
+///   `'pending'` 占位のままローカル tag `<repo>:<deploy_id>` が先に生えるので、digest ベースの
+///   keep 判定では原理的に守れない = **phase による除外が必須**(codex 監査 2026-07-25)。
+/// - `only`:`Some(id)` でその service だけを対象にする(purge の単発掃除)。
+///
+/// `min_age_secs`:この秒数より新しい実体は消さない。registry 側の 48h 年齢下限(失敗イメージを
+/// 再試行 / 診断のために残す — 2026-07-08 の事故由来の決定)を宿主側にも揃える。
+///
+/// 戻り値 = 削除に成功した参照の数(**解放したディスク量ではない**:untag だけで実体が残る場合も
+/// 数に入る)。
+pub async fn prune_host_images(
+    state: &AppState,
+    keeps: &HashMap<Uuid, HashSet<String>>,
+    skip: &HashSet<Uuid>,
+    only: Option<Uuid>,
+    min_age_secs: i64,
+) -> usize {
+    let now = chrono::Utc::now().timestamp();
+    let mut removed = 0usize;
+    for r in list_service_image_refs(state).await {
+        if !should_remove_host_image(&r, keeps, skip, only, min_age_secs, now) {
+            continue;
+        }
+        match remove_image_ref(state, &r.reference).await {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(service_id = %r.service_id, image = %r.reference, "宿主イメージ参照を削除した");
+            }
+            // 走行中 / 停止中コンテナが掴んでいる間は消せない。日次はまた来るので debug、
+            // purge は**この service を二度と訪れない**(行が消える)ので恒久リーク = warn。
+            Err(e) if only.is_some() => {
+                tracing::warn!(error = ?e, service_id = %r.service_id, image = %r.reference, "宿主イメージ参照を回収できませんでした(永久削除なので再試行されません — 手動 `docker rmi` が必要)");
+            }
+            Err(e) => {
+                tracing::debug!(error = ?e, service_id = %r.service_id, image = %r.reference, "宿主イメージ参照の削除をスキップ(次の tick で再試行)");
+            }
+        }
+    }
+    removed
 }
 
 /// stateful の停止猶予(SIGTERM → SIGKILL 秒数)。docker 既定の 10s だと DB の flush が
@@ -1406,5 +1595,56 @@ mod tests {
         let mut short = "hi".to_string();
         clip_tail_in_place(&mut short, 2000);
         assert_eq!(short, "hi");
+    }
+
+    /// 宿主イメージ掃除の判断表。**誤りが「現役イメージを消す」に直結する**ので全分岐を固定する。
+    #[test]
+    fn should_remove_host_image_table() {
+        const NOW: i64 = 1_000_000;
+        const DAY: i64 = 86_400;
+        let svc = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let r = |service_id: Uuid, digest: Option<&str>, age: i64| ServiceImageRef {
+            service_id,
+            reference: "ref".into(),
+            digest: digest.map(str::to_string),
+            created: NOW - age,
+        };
+        let keeps = |id: Uuid, digests: &[&str]| {
+            HashMap::from([(
+                id,
+                digests.iter().map(|d| d.to_string()).collect::<HashSet<_>>(),
+            )])
+        };
+        let none = HashMap::new();
+        let no_skip = HashSet::new();
+        let check = |r: &ServiceImageRef,
+                     k: &HashMap<Uuid, HashSet<String>>,
+                     s: &HashSet<Uuid>,
+                     only,
+                     min| should_remove_host_image(r, k, s, only, min, NOW);
+
+        // 現役 digest は消さない / 窓外の digest は消す。
+        let keep1 = keeps(svc, &["sha256:cur"]);
+        assert!(!check(&r(svc, Some("sha256:cur"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+        assert!(check(&r(svc, Some("sha256:old"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+
+        // 年齢下限内は消さない(48h 未満 = 失敗イメージの診断窓)。
+        assert!(!check(&r(svc, Some("sha256:old"), DAY), &keep1, &no_skip, None, 2 * DAY));
+
+        // `skip`(phase='deploying')は窓外でも触らない。
+        let skip = HashSet::from([svc]);
+        assert!(!check(&r(svc, Some("sha256:old"), 3 * DAY), &keep1, &skip, None, 2 * DAY));
+
+        // keeps に無い service(purge 済み / ゴミ箱 / 残骸)は全部消す — tag 形も digest 形も。
+        assert!(check(&r(other, Some("sha256:x"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+        assert!(check(&r(other, None, 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+
+        // tag 形の参照は生きている service でも消す(deploy-source の一時 tag を溜めない)。
+        assert!(check(&r(svc, None, 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+
+        // purge 経路:only 指定 + keeps 空 + 年齢下限 0 → 対象 service は全部、他は無傷。
+        assert!(check(&r(svc, Some("sha256:cur"), 0), &none, &no_skip, Some(svc), 0));
+        assert!(!check(&r(other, Some("sha256:cur"), 0), &none, &no_skip, Some(svc), 0));
     }
 }

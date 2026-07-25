@@ -462,7 +462,57 @@ async fn protect_and_expire_one(
             }
         }
     }
+
     Ok(())
+}
+
+/// 宿主イメージ掃除のための **keep 窓の表**(service_id → 温存する digest 集合)。
+///
+/// 宿主イメージは registry の manifest とは別実体で、こちらは「rollback のための保管」を担わない
+/// (`deploy::run_digest` は**毎回必ず** `docker::pull` するので、rollback は registry から引き直す
+/// = 宿主に古い版を置いておく意味が無い)。だから窓は registry 側の 5 版ではなく
+/// **現役 ∪ in-flight** だけに絞る:同じ内容を同じディスクに 2 系統 × 5 版持つのを避ける
+/// (20 service × 5 版 × 300MB ≈ 30GB → 6GB 相当の差)。
+///
+/// in-flight(非 terminal な deploys 行の digest)を含めるのが要点 — 取得〜起動の途中で消すと
+/// `create_container` が "No such image" で落ちる。`'pending'` 占位のような digest 形でない値は
+/// 集合に入れても無害(どの参照とも一致しないだけ。取得中の tag 参照は phase による除外が守る)。
+///
+/// **ゴミ箱の service は載せない**(`deleted_at IS NULL` で絞る)= 呼び出し側で「表に無い =
+/// 全部消してよい」に倒れる。restore しても pull で戻るので構わない。
+pub async fn host_keep_windows(
+    state: &AppState,
+) -> AppResult<std::collections::HashMap<Uuid, std::collections::HashSet<String>>> {
+    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+        "SELECT r.id, s.image_digest
+           FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.kind = 'service' AND r.deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut out: std::collections::HashMap<Uuid, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for (sid, current) in rows {
+        let mut keep = std::collections::HashSet::new();
+        if let Some(c) = current {
+            keep.insert(c);
+        }
+        out.insert(sid, keep);
+    }
+    // in-flight を後から union する(1 クエリで全 service ぶん)。
+    let inflight: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT service_id, image_digest FROM deploys
+          WHERE status NOT IN ('succeeded','failed')",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    for (sid, digest) in inflight {
+        if let Some(keep) = out.get_mut(&sid) {
+            keep.insert(digest);
+        }
+    }
+    Ok(out)
 }
 
 /// index(manifest list)の子 manifest digest を列挙する。単一 manifest(`manifests` 配列なし)や
