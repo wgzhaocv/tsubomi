@@ -581,8 +581,6 @@ pub struct ServiceImageRef {
     pub reference: String,
     /// digest 形の参照なら `sha256:…`(tag 形は None)。keep 窓との突き合わせに使う。
     pub digest: Option<String>,
-    /// 実体の作成時刻(unix 秒)。**年齢下限**の判定に使う。
-    pub created: i64,
 }
 
 /// 宿主上の service イメージ参照を**一度の `list_images` で**列挙する。
@@ -627,7 +625,6 @@ pub async fn list_service_image_refs(state: &AppState) -> Vec<ServiceImageRef> {
                 service_id,
                 reference: r.clone(),
                 digest: r.rsplit_once('@').map(|(_, d)| d.to_string()),
-                created: img.created,
             });
         }
     }
@@ -643,18 +640,17 @@ fn should_remove_host_image(
     keeps: &HashMap<Uuid, HashSet<String>>,
     skip: &HashSet<Uuid>,
     only: Option<Uuid>,
-    min_age_secs: i64,
-    now: i64,
 ) -> bool {
     // `only` 指定時はその service だけ。`skip`(phase='deploying')は絶対に触らない。
     if only.is_some_and(|id| id != r.service_id) || skip.contains(&r.service_id) {
         return false;
     }
-    // 年齢下限。purge は対象 service ごと消える瞬間なので呼び出し側が 0 を渡す。
-    if now - r.created < min_age_secs {
-        return false;
-    }
-    // keeps に載っていない service = もう居ない(purge 済み / ゴミ箱 / 中断残骸)= 全部消す。
+    // keeps に載っていない service = **物理削除済み**(purge 済み)= 全部消す。
+    // 「並行して作られた新 service を取り逃した」ケースと混ざらないことが前提で、それは
+    // (a) 計画を単一トランザクションで組む(`registry::host_image_plan`)と
+    // (b) **イメージ列挙を DB 読み取りより先**に済ませる(新しい service のイメージは
+    //     そもそも列挙に載らない)の 2 点で保証する。`only`(purge)では呼び出し側が
+    // 空の keeps を渡すので、この分岐が「対象 service を全部消す」意味になる。
     let Some(keep) = keeps.get(&r.service_id) else {
         return true;
     };
@@ -705,22 +701,29 @@ async fn remove_image_ref(state: &AppState, reference: &str) -> AppResult<()> {
 ///   keep 判定では原理的に守れない = **phase による除外が必須**(codex 監査 2026-07-25)。
 /// - `only`:`Some(id)` でその service だけを対象にする(purge の単発掃除)。
 ///
-/// `min_age_secs`:この秒数より新しい実体は消さない。registry 側の 48h 年齢下限(失敗イメージを
-/// 再試行 / 診断のために残す — 2026-07-08 の事故由来の決定)を宿主側にも揃える。
+/// **`refs` は呼び出し側が先に列挙したもの**を受け取る(この関数は列挙しない)。理由:
+/// 「イメージ列挙 → DB 読み取り」の順序が安全の要で、逆順だとその隙間に現役化した digest が
+/// 「keep に無いが列挙にある」状態になり現役を消す。順序を関数の外に出して、呼び出し側の
+/// コードを読めば順序が分かる形にする(codex 監査 2026-07-25 #3 — 以前は doc が
+/// 「先に列挙」と謳いながら実装は逆だった)。
+///
+/// 年齢下限は**この層では扱わない**。「最近の deploy のイメージは消さない」判断は
+/// `registry::host_image_plan` が `deploys.created_at` を見て keep 集合に織り込む
+/// (docker の `ImageSummary.created` はイメージ自身のビルド時刻で本機の取得時刻ではないため、
+/// 外部イメージでは年齢下限が即座に無効になる = 時間源に使えない。codex 監査 #8)。
 ///
 /// 戻り値 = 削除に成功した参照の数(**解放したディスク量ではない**:untag だけで実体が残る場合も
 /// 数に入る)。
 pub async fn prune_host_images(
     state: &AppState,
+    refs: &[ServiceImageRef],
     keeps: &HashMap<Uuid, HashSet<String>>,
     skip: &HashSet<Uuid>,
     only: Option<Uuid>,
-    min_age_secs: i64,
 ) -> usize {
-    let now = chrono::Utc::now().timestamp();
     let mut removed = 0usize;
-    for r in list_service_image_refs(state).await {
-        if !should_remove_host_image(&r, keeps, skip, only, min_age_secs, now) {
+    for r in refs {
+        if !should_remove_host_image(r, keeps, skip, only) {
             continue;
         }
         match remove_image_ref(state, &r.reference).await {
@@ -1600,15 +1603,12 @@ mod tests {
     /// 宿主イメージ掃除の判断表。**誤りが「現役イメージを消す」に直結する**ので全分岐を固定する。
     #[test]
     fn should_remove_host_image_table() {
-        const NOW: i64 = 1_000_000;
-        const DAY: i64 = 86_400;
         let svc = Uuid::from_u128(1);
         let other = Uuid::from_u128(2);
-        let r = |service_id: Uuid, digest: Option<&str>, age: i64| ServiceImageRef {
+        let r = |service_id: Uuid, digest: Option<&str>| ServiceImageRef {
             service_id,
             reference: "ref".into(),
             digest: digest.map(str::to_string),
-            created: NOW - age,
         };
         let keeps = |id: Uuid, digests: &[&str]| {
             HashMap::from([(
@@ -1618,33 +1618,33 @@ mod tests {
         };
         let none = HashMap::new();
         let no_skip = HashSet::new();
-        let check = |r: &ServiceImageRef,
-                     k: &HashMap<Uuid, HashSet<String>>,
-                     s: &HashSet<Uuid>,
-                     only,
-                     min| should_remove_host_image(r, k, s, only, min, NOW);
+        let check =
+            |r: &ServiceImageRef, k: &HashMap<Uuid, HashSet<String>>, s: &HashSet<Uuid>, only| {
+                should_remove_host_image(r, k, s, only)
+            };
 
-        // 現役 digest は消さない / 窓外の digest は消す。
+        // 現役(および直近 deploy)の digest は消さない / 窓外の digest は消す。
+        // 年齢窓は `registry::host_image_plan` が keep 集合に織り込むので、この層は集合だけを見る。
         let keep1 = keeps(svc, &["sha256:cur"]);
-        assert!(!check(&r(svc, Some("sha256:cur"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
-        assert!(check(&r(svc, Some("sha256:old"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
-
-        // 年齢下限内は消さない(48h 未満 = 失敗イメージの診断窓)。
-        assert!(!check(&r(svc, Some("sha256:old"), DAY), &keep1, &no_skip, None, 2 * DAY));
+        assert!(!check(&r(svc, Some("sha256:cur")), &keep1, &no_skip, None));
+        assert!(check(&r(svc, Some("sha256:old")), &keep1, &no_skip, None));
 
         // `skip`(phase='deploying')は窓外でも触らない。
         let skip = HashSet::from([svc]);
-        assert!(!check(&r(svc, Some("sha256:old"), 3 * DAY), &keep1, &skip, None, 2 * DAY));
+        assert!(!check(&r(svc, Some("sha256:old")), &keep1, &skip, None));
 
-        // keeps に無い service(purge 済み / ゴミ箱 / 残骸)は全部消す — tag 形も digest 形も。
-        assert!(check(&r(other, Some("sha256:x"), 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
-        assert!(check(&r(other, None, 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+        // keeps に無い service(= 物理削除済み)は全部消す — tag 形も digest 形も。
+        assert!(check(&r(other, Some("sha256:x")), &keep1, &no_skip, None));
+        assert!(check(&r(other, None), &keep1, &no_skip, None));
+
+        // 空の keep 集合(ゴミ箱の service)も全部消す — restore は pull で戻る。
+        assert!(check(&r(svc, Some("sha256:cur")), &keeps(svc, &[]), &no_skip, None));
 
         // tag 形の参照は生きている service でも消す(deploy-source の一時 tag を溜めない)。
-        assert!(check(&r(svc, None, 3 * DAY), &keep1, &no_skip, None, 2 * DAY));
+        assert!(check(&r(svc, None), &keep1, &no_skip, None));
 
-        // purge 経路:only 指定 + keeps 空 + 年齢下限 0 → 対象 service は全部、他は無傷。
-        assert!(check(&r(svc, Some("sha256:cur"), 0), &none, &no_skip, Some(svc), 0));
-        assert!(!check(&r(other, Some("sha256:cur"), 0), &none, &no_skip, Some(svc), 0));
+        // purge 経路:only 指定 + keeps 空 → 対象 service は全部、他は無傷。
+        assert!(check(&r(svc, Some("sha256:cur")), &none, &no_skip, Some(svc)));
+        assert!(!check(&r(other, Some("sha256:cur")), &none, &no_skip, Some(svc)));
     }
 }

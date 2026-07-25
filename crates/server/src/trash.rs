@@ -336,12 +336,13 @@ pub(crate) async fn purge_resource(
         // 永久削除は進める(行を残すと「消したのに残っている」状態が続く方が害が大きい)。
         // 回収できなかった分は prune_host_images が warn を出す(この service は二度と
         // 訪れないので日次の再試行が効かない = 手動 `docker rmi` が必要)。
+        let refs = crate::services::docker::list_service_image_refs(state).await;
         crate::services::docker::prune_host_images(
             state,
+            &refs,
             &std::collections::HashMap::new(),
             &std::collections::HashSet::new(),
             Some(id),
-            0,
         )
         .await;
         // **外部イメージ(`--image` の pgvector 等)は敢えて消さない。** 一見「用済み」だが:

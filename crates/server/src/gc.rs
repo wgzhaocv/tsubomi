@@ -298,54 +298,53 @@ fn spawn_registry_gc(state: AppState) {
 ///
 /// **問い合わせの順序が命**(`protect_and_expire_manifests` と同じ規律):
 /// 1. **先に**イメージを列挙する(= 古い快照)
-/// 2. **後で** keep 窓 / `deploying` を DB から読む(= 新しい快照)
+/// 2. **後で** keep 窓 / `deploying` を DB から読む(= 新しい快照。単一トランザクション)
 ///
 /// 逆順にすると、その間に成功して現役化した digest が「keep に無いが列挙にある」状態になり、
-/// **現役イメージを消してしまう**。この向きなら、新しく現役化した分は必ず新しい快照の keep に
-/// 載っているので安全側に倒れる(取り逃した古い残骸は翌日回収される)。
+/// **現役イメージを消してしまう**。この向きなら、列挙より後に作られた service / 現役化した
+/// digest は必ず新しい快照の keep に載る(あるいはそもそも列挙に居ない)ので安全側に倒れる
+/// — 取り逃した古い残骸は翌日回収される。
 ///
-/// 年齢下限は registry 側と同じ 48h(失敗イメージを再試行 / 診断のために残す — 2026-07-08 の
-/// 事故由来の決定)。best-effort:失敗は log のみで、blob 回収は続行する。
+/// 「最近の deploy のイメージを消さない」年齢窓は `host_image_plan` が `deploys.created_at` で
+/// 判断する(registry 側の 48h 下限と同じ時間源。docker の `ImageSummary.created` は
+/// イメージ自身のビルド時刻なので使えない)。best-effort:失敗は log のみで blob 回収は続行する。
 async fn prune_host_images(state: &AppState) {
-    // ① 列挙(古い快照)。ここで撮った参照だけを候補にする。
-    // ② keep 窓と deploying を読む(新しい快照)。順序の理由は上のドキュメント。
-    let keeps = match crate::services::registry::host_keep_windows(state).await {
-        Ok(k) => k,
-        Err(e) => {
-            // keep が読めないまま掃除すると現役を消し得る → 何もしない(fail-closed)。
-            tracing::warn!(error = ?e, "gc: 宿主イメージの keep 窓を読めず掃除をスキップ");
-            return;
+    // ① 列挙(古い快照)。ここで撮った参照だけが候補。**空でも先に進む** — ④の孤児 repo 掃除は
+    //    宿主イメージの有無とは無関係(宿主が綺麗でも registry に孤児が残り得る)。
+    let refs = crate::services::docker::list_service_image_refs(state).await;
+    // ② 計画を読む(新しい快照・単一トランザクション)。読めないなら**何もしない**
+    //    (現役を守れないまま消すより残す方が安全 = fail-closed)。
+    let plan =
+        match crate::services::registry::host_image_plan(state, HOST_IMAGE_RECENT_SECS).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = ?e, "gc: 宿主イメージの掃除計画を読めずスキップ(現役を守れないため何もしない)");
+                return;
+            }
+        };
+    // ③ 参照単位で掃除。
+    if !refs.is_empty() {
+        let removed =
+            crate::services::docker::prune_host_images(state, &refs, &plan.keeps, &plan.skip, None)
+                .await;
+        if removed > 0 {
+            tracing::info!(removed, "gc: 宿主イメージ参照を掃除した");
         }
-    };
-    let deploying: std::collections::HashSet<uuid::Uuid> = match sqlx::query_as::<_, (uuid::Uuid,)>(
-        "SELECT resource_id FROM service_details WHERE phase = 'deploying'",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => rows.into_iter().map(|(id,)| id).collect(),
-        Err(e) => {
-            // 同じ理由で fail-closed:進行中デプロイを守れないなら掃除しない。
-            tracing::warn!(error = ?e, "gc: deploying 中の service を読めず宿主イメージ掃除をスキップ");
-            return;
-        }
-    };
-    let removed = crate::services::docker::prune_host_images(
-        state,
-        &keeps,
-        &deploying,
-        None,
-        HOST_IMAGE_MIN_AGE_SECS,
-    )
-    .await;
-    if removed > 0 {
-        tracing::info!(removed, "gc: 宿主イメージ参照を掃除した");
+    }
+    // ④ DB に service 行が無い registry repo(deploy-source の取得が purge を追い越した残骸など)。
+    //    `plan.keeps` のキーが「存在する service」の単一快照なので、それを既知集合として使う。
+    let known: Vec<uuid::Uuid> = plan.keeps.keys().copied().collect();
+    match crate::services::registry::delete_orphan_repos(state, &known).await {
+        Ok(n) if n > 0 => tracing::info!(removed = n, "gc: 孤児 registry repo を掃除した"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = ?e, "gc: 孤児 registry repo の掃除に失敗"),
     }
 }
 
-/// 宿主イメージを消さない年齢下限(48h)。registry の manifest 期限切れと同値 —
-/// 失敗した deploy のイメージは再試行 / 診断にまだ要る(§10-E)。
-const HOST_IMAGE_MIN_AGE_SECS: i64 = 48 * 3600;
+/// 「直近この秒数の deploy の digest は宿主から消さない」窓(48h)。registry の manifest
+/// 期限切れと同値・**同じ時間源**(`deploys.created_at`)— 失敗した deploy のイメージは
+/// 再試行 / 診断にまだ要る(§10-E、2026-07-08 事故由来)。
+const HOST_IMAGE_RECENT_SECS: i64 = 48 * 3600;
 
 /// 次に UTC の hh:mm を迎えるまでの時間(既に過ぎていれば翌日の同時刻)。registry GC の
 /// 固定時刻スケジュール用。負値になり得ない構成だが、時計後退等の異常時は 60s で安全側に倒す。

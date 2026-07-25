@@ -466,53 +466,137 @@ async fn protect_and_expire_one(
     Ok(())
 }
 
-/// 宿主イメージ掃除のための **keep 窓の表**(service_id → 温存する digest 集合)。
+/// 宿主イメージ掃除の**計画**(`docker::prune_host_images` に渡す)。
+pub struct HostImagePlan {
+    /// **存在する** service(ゴミ箱の soft delete 済みも含む)→ 温存する digest 集合。
+    /// ゴミ箱の service は空集合になる(= 参照は全部消える。restore しても `pull` で戻る)。
+    ///
+    /// **この表に無い id は「物理削除済み(purge 済み)」と断定できる**のが要点。単一
+    /// トランザクションの快照なので「並行して作られた新 service を取り逃した」ケースと
+    /// 区別が付く(取り逃しを "已削除" と誤断すると現役イメージを消す)。
+    pub keeps: std::collections::HashMap<Uuid, std::collections::HashSet<String>>,
+    /// 触ってはいけない service(`phase='deploying'`)。keeps と同一快照で読む。
+    pub skip: std::collections::HashSet<Uuid>,
+}
+
+/// 宿主イメージ掃除のための計画を **単一トランザクションの快照**で組む。
 ///
 /// 宿主イメージは registry の manifest とは別実体で、こちらは「rollback のための保管」を担わない
 /// (`deploy::run_digest` は**毎回必ず** `docker::pull` するので、rollback は registry から引き直す
 /// = 宿主に古い版を置いておく意味が無い)。だから窓は registry 側の 5 版ではなく
-/// **現役 ∪ in-flight** だけに絞る:同じ内容を同じディスクに 2 系統 × 5 版持つのを避ける
-/// (20 service × 5 版 × 300MB ≈ 30GB → 6GB 相当の差)。
+/// **現役 ∪ in-flight ∪ 直近 `recent_secs` の deploys** に絞る:同じ内容を同じディスクに
+/// 2 系統 × 5 版持つのを避ける(20 service × 5 版 × 300MB ≈ 30GB → 6GB 相当の差)。
 ///
-/// in-flight(非 terminal な deploys 行の digest)を含めるのが要点 — 取得〜起動の途中で消すと
-/// `create_container` が "No such image" で落ちる。`'pending'` 占位のような digest 形でない値は
-/// 集合に入れても無害(どの参照とも一致しないだけ。取得中の tag 参照は phase による除外が守る)。
+/// **3 つのクエリを 1 トランザクションで読む**のが要点(codex 監査 2026-07-25 #2)。別々に読むと
+/// その隙間で「新 service が作られる / deploy が完走して current が変わる / deploy が始まる」が
+/// 起き、**現役 digest が keep に載らない**まま掃除が走る。
 ///
-/// **ゴミ箱の service は載せない**(`deleted_at IS NULL` で絞る)= 呼び出し側で「表に無い =
-/// 全部消してよい」に倒れる。restore しても pull で戻るので構わない。
-pub async fn host_keep_windows(
-    state: &AppState,
-) -> AppResult<std::collections::HashMap<Uuid, std::collections::HashSet<String>>> {
-    let rows: Vec<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT r.id, s.image_digest
+/// `recent_secs` は「最近の deploy の digest は消さない」窓。registry 側の 48h 年齢下限
+/// (失敗イメージを再試行 / 診断のために残す — 2026-07-08 事故由来)と**同じ時間源**
+/// (`deploys.created_at`)で揃える。docker の `ImageSummary.created` は**イメージ自身の
+/// ビルド時刻**で本機が取得した時刻ではないため、外部イメージ(数ヶ月前ビルド)では年齢下限が
+/// 即座に無効になる = 時間源として使えない(codex 監査 #8)。
+pub async fn host_image_plan(state: &AppState, recent_secs: i64) -> AppResult<HostImagePlan> {
+    let mut tx = state.db.begin().await?;
+
+    // ① 存在する service(ゴミ箱含む)+ 現役 digest + phase。
+    let rows: Vec<(Uuid, Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT r.id, s.image_digest, s.phase, r.deleted_at IS NOT NULL
            FROM resources r JOIN service_details s ON s.resource_id = r.id
-          WHERE r.kind = 'service' AND r.deleted_at IS NULL",
+          WHERE r.kind = 'service'",
     )
-    .fetch_all(&state.db)
+    .fetch_all(&mut *tx)
     .await?;
 
-    let mut out: std::collections::HashMap<Uuid, std::collections::HashSet<String>> =
+    // ② in-flight(非 terminal)∪ 直近 `recent_secs` の deploys の digest。
+    let digests: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT service_id, image_digest FROM deploys
+          WHERE status NOT IN ('succeeded','failed')
+             OR created_at > now() - make_interval(secs => $1)",
+    )
+    .bind(recent_secs as f64)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let mut keeps: std::collections::HashMap<Uuid, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    for (sid, current) in rows {
+    let mut skip = std::collections::HashSet::new();
+    for (sid, current, phase, trashed) in rows {
         let mut keep = std::collections::HashSet::new();
-        if let Some(c) = current {
+        // ゴミ箱の service は現役 digest も温存しない(コンテナは停止済み。restore は pull で戻る)。
+        if !trashed && let Some(c) = current {
             keep.insert(c);
         }
-        out.insert(sid, keep);
+        keeps.insert(sid, keep);
+        if phase == "deploying" {
+            skip.insert(sid);
+        }
     }
-    // in-flight を後から union する(1 クエリで全 service ぶん)。
-    let inflight: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT service_id, image_digest FROM deploys
-          WHERE status NOT IN ('succeeded','failed')",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    for (sid, digest) in inflight {
-        if let Some(keep) = out.get_mut(&sid) {
+    for (sid, digest) in digests {
+        // 存在しない service の deploys 行は cascade で消えているはずなので、get_mut の失敗は
+        // 「①の後に purge された」= 消えて構わない。
+        if let Some(keep) = keeps.get_mut(&sid) {
             keep.insert(digest);
         }
     }
-    Ok(out)
+    Ok(HostImagePlan { keeps, skip })
+}
+
+/// DB に対応する service が居ない registry repo を掃除する(**孤児 repo**)。
+///
+/// 通常 repo は purge の [`delete_repo`] で消える。だが deploy-source の取得は
+/// `deploy_lock` の**外**で分単位走る(`source.rs::acquire_and_deploy`)ので、purge が
+/// 先に完走した後で取得タスクが tag / push を完了させ得る = **もう `delete_repo` の入口が
+/// 無い manifest が永久に残る**(codex 監査 2026-07-25 #7)。ここが最終回収。
+///
+/// 対象は「catalog にあるが DB に service 行(ゴミ箱含む)が無い」repo だけ。判定は
+/// `host_image_plan` と同じ「存在する id の表」に基づく(単一快照)。
+pub async fn delete_orphan_repos(state: &AppState, known: &[Uuid]) -> AppResult<usize> {
+    let url = format!("http://{}/v2/_catalog?n=1000", state.config.registry_pull);
+    let resp = state
+        .http
+        .get(&url)
+        .send()
+        .await
+        .context("registry catalog の取得に失敗")?;
+    if !resp.status().is_success() {
+        return Err(AppError::Other(anyhow!(
+            "registry catalog が {} を返しました",
+            resp.status()
+        )));
+    }
+    #[derive(serde::Deserialize)]
+    struct Catalog {
+        repositories: Option<Vec<String>>,
+    }
+    let repos = resp
+        .json::<Catalog>()
+        .await
+        .context("registry catalog の解析に失敗")?
+        .repositories
+        .unwrap_or_default();
+
+    let known: std::collections::HashSet<&Uuid> = known.iter().collect();
+    let mut removed = 0usize;
+    for repo in repos {
+        // repo 名は service の UUID。それ以外(手で置かれたもの等)は触らない。
+        let Ok(id) = repo.parse::<Uuid>() else {
+            continue;
+        };
+        if known.contains(&id) {
+            continue;
+        }
+        match delete_repo(state, id).await {
+            Ok(()) => {
+                removed += 1;
+                tracing::info!(%id, "孤児 registry repo を掃除した(DB に service 行が無い)");
+            }
+            Err(e) => tracing::warn!(error = ?e, %id, "孤児 registry repo の掃除に失敗"),
+        }
+    }
+    Ok(removed)
 }
 
 /// index(manifest list)の子 manifest digest を列挙する。単一 manifest(`manifests` 配列なし)や
