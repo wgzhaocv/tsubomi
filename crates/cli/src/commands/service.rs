@@ -1145,7 +1145,14 @@ pub(crate) async fn run_verify(
         }
     } else {
         let mark = |s: u16| if (200..300).contains(&s) { "✓" } else { "✗" };
-        println!("{} {} (根 HTML)", mark(report.root_status), svc.url);
+        // catch-all 落地時の root_status は「平台の落地ページ」の 200 なので、そのまま mark すると
+        // 「✓ 根 HTML」の直後に「NG」が出て自己矛盾する。着地している間は根も ✗ 扱いにする。
+        let root_mark = if report.landed_noservice.is_some() {
+            "✗"
+        } else {
+            mark(report.root_status)
+        };
+        println!("{} {} (根 HTML)", root_mark, svc.url);
         for r in &report.resources {
             println!("  {} {} {}", mark(r.status), r.status, r.url);
         }
