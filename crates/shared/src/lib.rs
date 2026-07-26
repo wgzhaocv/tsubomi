@@ -588,6 +588,11 @@ pub struct InjectionDto {
     /// 一覧(`GET`)では常に `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// **今動いているコンテナにこの注入がまだ反映されていない**(= 再デプロイが要る)。
+    /// 値はコンテナ起動の瞬間に解決されるので、起動より後に作られた注入は効いていない。
+    /// 停止中 / 未デプロイなら false(反映すべき相手が居ない)。旧サーバ相手は default(false)。
+    #[serde(default)]
+    pub needs_redeploy: bool,
 }
 
 /// `POST /api/services/:id/injections` のリクエスト。env_var / mount_path 省略時は kind 既定。

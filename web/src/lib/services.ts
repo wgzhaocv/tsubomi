@@ -126,6 +126,8 @@ export type Injection = {
   valid: boolean;
   /** 作成時のみ:同名の静的 env が注入で上書きされる等の非破壊の注意喚起。 */
   warning?: string | null;
+  /** 今動いているコンテナにまだ反映されていない(= 再デプロイが要る)。 */
+  needs_redeploy?: boolean;
 };
 
 // detail(id) = ["services", id] は deploys/injections/env/logs の prefix なので、

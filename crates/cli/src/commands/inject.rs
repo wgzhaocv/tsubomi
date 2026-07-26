@@ -60,7 +60,16 @@ pub async fn run_inject(
     if json {
         print_json(&inj)?;
     } else {
-        eprintln!("注入しました。反映には再デプロイ(または `tbm service start`)が必要です。");
+        // 走行中に注入した場合が事故の本番:env は**起動の瞬間**に解決されるので、今動いている
+        // コンテナには入らない。症状(env が無い)が原因(順序)を指さないので、ここで強く言う。
+        if inj.needs_redeploy {
+            eprintln!(
+                "注入しました。**今動いているコンテナには入っていません** — \
+                 `tbm deploy` で再デプロイするまで env は現れません(値は起動の瞬間に解決されます)。"
+            );
+        } else {
+            eprintln!("注入しました。反映には再デプロイ(または `tbm service start`)が必要です。");
+        }
         if let Some(w) = &inj.warning {
             eprintln!("⚠ {w}");
         }

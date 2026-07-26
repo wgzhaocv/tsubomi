@@ -336,6 +336,20 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので
    rotate 後は要再デプロイ。
 
+### 順序:**注入 → デプロイ**(逆にすると env が現れない)
+
+値は**コンテナ起動の瞬間**に解決される(注入表はバインディングしか持たない)。つまり:
+
+- **走っている service に後から注入しても、そのコンテナには入らない**。`tbm deploy`(または
+  `tbm service stop && start`)で作り直すまで env は現れない。`tbm inject` は走行中なら
+  「今動いているコンテナには入っていません」と言い、`-o json` では `needs_redeploy: true` を返す。
+- **同じ理由で `tbm db rotate` / `tbm cache rotate` の後も再デプロイが要る**(古い資格情報を
+  握ったまま動き続ける → ある日突然 認証エラー、ではなく即座に切れる)。
+- **症状が原因を指さない**:app からは「env が無い」「接続できない」としか見えないので、
+  **まず `tbm env list <名前> --resolved` と `tbm service status`(注入一覧に `未反映` が付く)を見る**。
+  env が resolved には在るのにコンテナに無い = この順序問題。再デプロイで直る。
+- 逆順にしないコツ:**`tbm service create` → 注入を全部済ませる → 最初の `tbm deploy`**。
+
 ### 起動直後にクラッシュする(deploy failed)— 当てずっぽうで再デプロイしない
 
 コンテナが起動即 exit した失敗デプロイは、**エラーに終了要因(exit code / OOM。server v47+ —
@@ -389,7 +403,7 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict` | 名前が既出 | 別名にする |
 | `code: validation` | 入力不正 | メッセージに従う |
-| 注入が効かない | デプロイ前に注入していない / rotate 後に再デプロイしていない | 注入を確認 → 再デプロイ |
+| 注入が効かない / env が無い | 走行中に注入した(値は起動の瞬間に解決)/ rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
 | 平台 DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 自帯コンテナ(§3.2:`--port` + `--stateful` + volume) |
 | 自帯 DB が再デプロイでデータ全損 | データ目録を volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ(既成イメージ / 無 context Dockerfile なら `--image`・`--dockerfile`) |

@@ -783,10 +783,36 @@ pub async fn rollback(
 
 // ===== 注入(database / volume → service。バインディングだけ保存、値は起動時解決)=====
 
-/// 注入一覧の行(id, resource_id, kind, display_name, env_var, mount_path, valid)。
-type InjectionRow = (Uuid, Uuid, String, String, String, Option<String>, bool);
+/// 注入一覧の行(id, resource_id, kind, display_name, env_var, mount_path, valid, created_at)。
+type InjectionRow = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    String,
+    Option<String>,
+    bool,
+    DateTime<Utc>,
+);
 
-fn injection_row_to_dto(r: InjectionRow) -> InjectionDto {
+/// 今動いているコンテナが起動した時刻(= 注入値が解決された瞬間)。走っていなければ None。
+/// これより後に作られた注入は**まだ効いていない** — 値は起動の瞬間に解決される(決定 #5)。
+async fn serving_since(state: &AppState, id: Uuid) -> Option<DateTime<Utc>> {
+    // 走行確認(docker)を先にやらない — 未デプロイ / 停止中は SQL だけで抜ける。
+    serving_container(state, id).await?;
+    sqlx::query_scalar(
+        "SELECT COALESCE(finished_at, created_at) FROM deploys
+          WHERE service_id = $1 AND status = 'succeeded'
+          ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+}
+
+fn injection_row_to_dto(r: InjectionRow, serving_since: Option<DateTime<Utc>>) -> InjectionDto {
     InjectionDto {
         id: r.0,
         resource_id: r.1,
@@ -796,6 +822,9 @@ fn injection_row_to_dto(r: InjectionRow) -> InjectionDto {
         mount_path: r.5,
         valid: r.6,
         warning: None, // 一覧では出さない(作成時のみの注意喚起)
+        // 走っているコンテナより後に作られた注入 = 未反映。停止中(None)なら反映すべき相手が
+        // 居ないので false。既存行の created_at は '-infinity'(migration)なので誤報しない。
+        needs_redeploy: serving_since.is_some_and(|since| r.7 > since),
     }
 }
 
@@ -808,7 +837,7 @@ pub async fn list_injections(
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<InjectionRow> = sqlx::query_as(
         "SELECT i.id, i.resource_id, r.kind, r.display_name, i.env_var, i.mount_path,
-                (r.deleted_at IS NULL) AS valid
+                (r.deleted_at IS NULL) AS valid, i.created_at
            FROM injections i JOIN resources r ON r.id = i.resource_id
           WHERE i.service_id = $1
           ORDER BY i.env_var",
@@ -816,7 +845,17 @@ pub async fn list_injections(
     .bind(id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows.into_iter().map(injection_row_to_dto).collect()))
+    // service 単位で 1 度だけ解決する(注入ごとに docker を叩かない)。
+    let since = if rows.is_empty() {
+        None
+    } else {
+        serving_since(&state, id).await
+    };
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| injection_row_to_dto(r, since))
+            .collect(),
+    ))
 }
 
 /// `POST /api/services/:id/injections`:database / volume / cache / **別 service** を注入する
@@ -955,6 +994,8 @@ pub async fn create_injection(
             mount_path,
             valid: true,
             warning,
+            // 作った瞬間は「走っているコンテナがあれば必ず未反映」(この注入より前に起動している)。
+            needs_redeploy: serving_container(&state, id).await.is_some(),
         }),
     ))
 }

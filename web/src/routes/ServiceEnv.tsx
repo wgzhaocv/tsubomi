@@ -168,6 +168,13 @@ export default function ServiceEnv() {
                   <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs font-bold text-accent-foreground">
                     注入
                   </span>
+                  {/* 値は起動の瞬間に解決されるので、今動いているコンテナより後に作られた注入は
+                      まだ効いていない。症状(env が無い)が原因を指さないのでここで明示する。 */}
+                  {inj.needs_redeploy && (
+                    <span className="shrink-0 rounded-full bg-[#f5e6c8] px-2 py-0.5 text-xs font-bold text-[#8a6d1f]">
+                      未反映(要デプロイ)
+                    </span>
+                  )}
                 </div>
                 {/* 2 行目:注入元のリソース(クリックで該当リソースへ)+ 値の説明。
                     volume はマウント先パス、service は内部 URL、その他は接続文字列(値は表示しない)。 */}

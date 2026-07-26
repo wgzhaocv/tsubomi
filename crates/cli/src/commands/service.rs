@@ -551,9 +551,16 @@ fn print_status(
         println!("  注入(反映には再デプロイ):");
         for i in injections {
             let stale = if i.valid { "" } else { "  [失効]" };
+            // 走行中コンテナより後に作られた注入 = まだ効いていない。「env が無い」症状の真因が
+            // これなので、status で目に付くようにする(§「順序:注入 → デプロイ」)。
+            let pending = if i.needs_redeploy {
+                "  [未反映:要デプロイ]"
+            } else {
+                ""
+            };
             println!(
-                "    {} ← {} ({}){}  id={}",
-                i.env_var, i.resource_name, i.resource_kind, stale, i.id
+                "    {} ← {} ({}){}{}  id={}",
+                i.env_var, i.resource_name, i.resource_kind, stale, pending, i.id
             );
         }
     }
