@@ -836,8 +836,12 @@ pub async fn list_injections(
 ) -> AppResult<Json<Vec<InjectionDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<InjectionRow> = sqlx::query_as(
+        // created_at は **必ず有限値に丸めて**取り出す:Postgres の infinity は `DateTime<Utc>` に
+        // 読み込めず sqlx が panic する(20260726000002 で実データは直したが、SQL 側でも塞いで
+        // 二度と端点を落とさない)。epoch より前の deploy は存在しないので判定は変わらない。
         "SELECT i.id, i.resource_id, r.kind, r.display_name, i.env_var, i.mount_path,
-                (r.deleted_at IS NULL) AS valid, i.created_at
+                (r.deleted_at IS NULL) AS valid,
+                GREATEST(i.created_at, 'epoch'::timestamptz) AS created_at
            FROM injections i JOIN resources r ON r.id = i.resource_id
           WHERE i.service_id = $1
           ORDER BY i.env_var",
