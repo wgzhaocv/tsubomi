@@ -54,6 +54,8 @@ export default function ServiceEnv() {
   const [resourceId, setResourceId] = useState("");
   const [injEnvVar, setInjEnvVar] = useState("");
   const [mount, setMount] = useState("");
+  // 注入直後の非破壊の注意喚起(server の warning)。次の注入まで出しておく。
+  const [injNotice, setInjNotice] = useState<string | null>(null);
   // 環境変数 Modal のフォーム。
   const [envOpen, setEnvOpen] = useState(false);
   const [key, setKey] = useState("");
@@ -79,11 +81,13 @@ export default function ServiceEnv() {
         mount_path: isVolume ? mount.trim() || undefined : undefined,
       },
       {
-        onSuccess: () => {
+        onSuccess: (inj) => {
           setInjOpen(false);
           setResourceId("");
           setInjEnvVar("");
           setMount("");
+          // server の非破壊警告(静的 env に譲った派生 env 等)は捨てずに出す。
+          setInjNotice(inj.warning ?? null);
         },
       },
     );
@@ -130,14 +134,17 @@ export default function ServiceEnv() {
       <p className="text-sm font-medium text-muted-foreground">
         コンテナに渡す環境変数の全体像です。「注入」付きは database / volume / service
         の注入由来で、接続情報・マウント先・別 app の内部 URL
-        が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。 service 注入は URL
-        に加えて <code className="font-mono">〜_HOST</code> /{" "}
-        <code className="font-mono">〜_PORT</code> も渡されます(データベース等の非 HTTP
-        コンテナへ自分で接続文字列を組む用)。
+        が環境変数として渡されます(「リソースを注入」で追加・「外す」で解除)。 database / service
+        注入は URL に加えて素材(<code className="font-mono">〜_HOST</code> /{" "}
+        <code className="font-mono">〜_PORT</code>、database はさらに{" "}
+        <code className="font-mono">〜_USER</code> / <code className="font-mono">〜_PASSWORD</code>{" "}
+        / <code className="font-mono">〜_NAME</code> / <code className="font-mono">〜_SSLMODE</code>
+        )も渡されます(URL を受け取らないライブラリ用)。
         その他はここで追加した静的変数です(値は表示されません=上書きのみ)。
         <strong>反映には再デプロイ(または開始)が必要</strong>です。
       </p>
 
+      {injNotice && <p className="text-sm font-semibold text-[#b5862a]">⚠ {injNotice}</p>}
       {injError && <p className="text-sm font-semibold text-[#e05a5a]">{injError.message}</p>}
       {envError && <p className="text-sm font-semibold text-[#e05a5a]">{envError.message}</p>}
 

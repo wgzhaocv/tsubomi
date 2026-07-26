@@ -795,6 +795,7 @@ fn injection_row_to_dto(r: InjectionRow) -> InjectionDto {
         env_var: r.4,
         mount_path: r.5,
         valid: r.6,
+        warning: None, // 一覧では出さない(作成時のみの注意喚起)
     }
 }
 
@@ -878,6 +879,43 @@ pub async fn create_injection(
     };
     validate_env_key(&env_var)?;
 
+    // 注入は env_var 本体に加えて**派生 env**(database の `_HOST`/`_PASSWORD` 等)も生む。既存注入の
+    // 占用名(本体 + 派生)と 1 つでも被ると、deploy の後勝ちで「URL は A・パスワードは B」のような
+    // 静かな取り違えになる(env_var 自体の重複は UNIQUE が弾くが、派生は素通りする)。ここで断る。
+    // 検査と INSERT は**同一 tx + service 行の行ロック**で行う:別々にやると、空の service へ
+    // `X` と `X_URL` を同時 POST した 2 本が互いを見ずに両方通り(env_var が違うので UNIQUE も
+    // 効かない)、派生名が混線する(codex 深審の TOCTOU)。
+    let mut tx = state.db.begin().await?;
+    sqlx::query("SELECT 1 FROM resources WHERE id = $1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let occupied = injection_env_names(&mut tx, id).await?;
+    let mine = inject::occupied_env_keys(&kind, &env_var);
+    if let Some((clash, owner)) = mine
+        .iter()
+        .find_map(|k| occupied.get(k).map(|owner| (k.clone(), owner.clone())))
+    {
+        return Err(AppError::BadRequest(format!(
+            "env 変数 '{clash}' が既存の注入 '{owner}' と衝突します(注入は派生 env も生みます)。\
+             --as で別の名前を指定してください"
+        )));
+    }
+
+    // 静的 env と同名の**派生** env は注入しない(静的が勝つ = 既存 app を静かに壊さない。
+    // inject.rs の push_derived)。ただし黙っていると「素材 env が来ない」ことに気付けないので、
+    // どの名前が静的側に譲られたかを非破壊の警告で知らせる(set_env の warning と同型)。
+    let derived = inject::derived_env_keys(&kind, &env_var);
+    let shadowed = shadowed_static_env(&mut tx, id, &derived).await?;
+    let warning = (!shadowed.is_empty()).then(|| {
+        format!(
+            "静的 env {} が既に在るため、同名の派生 env は注入しません(静的側が有効)。\
+             注入値を使うなら `tbm env unset <サービス> {}` で消してください",
+            shadowed.join(", "),
+            shadowed.join(" ")
+        )
+    });
+
     let new_id: Uuid = sqlx::query_scalar(
         "INSERT INTO injections (service_id, resource_id, env_var, mount_path)
               VALUES ($1, $2, $3, $4) RETURNING id",
@@ -886,7 +924,7 @@ pub async fn create_injection(
     .bind(req.resource_id)
     .bind(&env_var)
     .bind(&mount_path)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         map_unique(
@@ -894,6 +932,7 @@ pub async fn create_injection(
             format!("env 変数 '{env_var}' はこの service で既に使われています"),
         )
     })?;
+    tx.commit().await?;
 
     audit(
         &state.db,
@@ -915,8 +954,48 @@ pub async fn create_injection(
             env_var,
             mount_path,
             valid: true,
+            warning,
         }),
     ))
+}
+
+/// この service の既存注入が**占用している env 名** → その持ち主の env_var。
+/// 占用 = 注入の env_var 本体 + そこから生える派生名(`inject::occupied_env_keys`)。
+async fn injection_env_names(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: Uuid,
+) -> AppResult<std::collections::HashMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT i.env_var, r.kind FROM injections i JOIN resources r ON r.id = i.resource_id
+          WHERE i.service_id = $1",
+    )
+    .bind(service_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .flat_map(|(env_var, kind)| {
+            inject::occupied_env_keys(&kind, &env_var)
+                .into_iter()
+                .map(move |k| (k, env_var.clone()))
+        })
+        .collect())
+}
+
+/// `names` のうち、この service に静的 env として既に在るもの(= 注入で上書きされる分)。
+async fn shadowed_static_env(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    service_id: Uuid,
+    names: &[String],
+) -> AppResult<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT key FROM service_env WHERE service_id = $1 AND key = ANY($2) ORDER BY key",
+    )
+    .bind(service_id)
+    .bind(names)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(|(k,)| k).collect())
 }
 
 /// `DELETE /api/injections/:id`:注入を外す(所有権は service 経由で確認)。service 注入なら
@@ -1002,6 +1081,17 @@ pub async fn list_env_resolved(
     .fetch_all(&state.db)
     .await?;
     let inj_kinds: std::collections::HashMap<String, String> = inj_kinds.into_iter().collect();
+    // 派生キー(`_HOST` 等 = 注入 env_var 本体ではない)→ 由来 kind。注入側から**前向きに**名前を
+    // 作るので、後缀から kind を逆推する必要がない(= service `FOO_URL` と cache `FOO` が併存しても
+    // 構造的に取り違えない)。派生名の単一真源は inject.rs::derived_env_keys。
+    let derived_kinds: std::collections::HashMap<String, String> = inj_kinds
+        .iter()
+        .flat_map(|(env_var, kind)| {
+            inject::derived_env_keys(kind, env_var)
+                .into_iter()
+                .map(move |k| (k, kind.clone()))
+        })
+        .collect();
 
     // resolve は静的 env → 注入の順で並ぶ(inject.rs)。由来は**出現位置**で判定する:
     // 同じキーの初出が静的 / 2 度目以降は注入(deploy の後勝ちで実際に効く方)。キーだけで
@@ -1017,15 +1107,19 @@ pub async fn list_env_resolved(
             } else if let Some(kind) = inj_kinds.get(&key) {
                 kind.clone()
             } else {
-                // 注入 env_var の対応表に無い = 派生キー(cache の `_KEY_PREFIX` / service の
-                // `_HOST`・`_PORT`)。基底(`_URL` を付けた形 or そのまま)で注入元 kind を引く。
-                derived_env_source(&key, &inj_kinds)
+                // 注入 env_var の対応表に無い = 派生キー(database/service の `_HOST` 等、cache の
+                // `_KEY_PREFIX`)。既知の限界(受容):明示注入の env_var が他の注入の派生名と同じだと、
+                // 表示ラベルは明示注入側に倒れる(値は後勝ちで正しい)。create_injection がこの衝突を
+                // 400 で弾くので、新規に作られることはない(既存データのみ)。
+                derived_kinds
+                    .get(&key)
+                    .cloned()
                     .unwrap_or_else(|| "injection".to_string())
             };
             let value = if source == "static" {
                 "***".to_string()
             } else {
-                mask_url_password(&value)
+                mask_injected_value(&key, &value)
             };
             ResolvedEnvDto { key, value, source }
         })
@@ -1040,6 +1134,16 @@ pub async fn list_env_resolved(
     list.reverse();
     // 秘密(接続文字列の断片等)を含み得るので no-store(respond.rs の契約)。
     Ok(crate::respond::no_store(list))
+}
+
+/// 注入由来の値の表示用マスク。`_PASSWORD` で終わるキーは**値そのものが秘密**なので全伏せ
+/// (database の派生 env は裸のパスワード = URL 形ではないので `mask_url_password` では素通り
+/// してしまう)。それ以外は URL のパスワード部だけ伏せる。
+fn mask_injected_value(key: &str, value: &str) -> String {
+    if key.ends_with("_PASSWORD") {
+        return "***".to_string();
+    }
+    mask_url_password(value)
 }
 
 /// URL 形(`scheme://user:pass@host…`)の値のパスワード部だけを `***` に伏せる。
@@ -1089,32 +1193,6 @@ pub async fn set_env(
     .await?;
     let warning = public_db_env_warning(&state, id, &req.key, &req.value).await;
     Ok(Json(SetEnvResp { warning }))
-}
-
-/// 派生キー(注入 env_var 本体ではない)の由来 kind を引く:`X_KEY_PREFIX` → cache /
-/// `X_HOST`・`X_PORT` → service。注入 env_var は基底そのまま(`FOO`)か `_URL` 付き
-/// (`FOO_URL`)のどちらかなので両方を引き、**その後缀を生み得る kind の注入だけ**を採用する
-/// (service `FOO_URL` と cache `FOO` が併存しても `FOO_KEY_PREFIX` は cache に帰属 —
-/// codex review 2026-07-03)。派生キーを生むのは inject.rs の `key_prefix_env` /
-/// `host_port_base` だけ — 新しい派生元を足すときはここも更新すること。
-/// 既知の限界(受容):明示注入の env_var が派生名そのもの(例 `FOO_HOST`)と衝突すると、
-/// 表示ラベルは明示注入側に倒れる(実際に効く値は後勝ちで正しい — 表示のみの病理ケース。
-/// 根治は resolve が kind を外帯する改修 = deploy 熱路径に死データを背負わせるため見送り)。
-fn derived_env_source(
-    key: &str,
-    inj_kinds: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    let (base, want_kind) = if let Some(b) = key.strip_suffix("_KEY_PREFIX") {
-        (b, "cache")
-    } else if let Some(b) = key.strip_suffix("_HOST").or_else(|| key.strip_suffix("_PORT")) {
-        (b, "service")
-    } else {
-        return None;
-    };
-    [format!("{base}_URL"), base.to_string()]
-        .iter()
-        .find_map(|k| inj_kinds.get(k).filter(|kind| *kind == want_kind))
-        .cloned()
 }
 
 /// 静的 env の値が公開 DB ホストを指していれば注意文を返す(非破壊の footgun 検知)。
@@ -1552,30 +1630,51 @@ mod tests {
     }
 
     #[test]
-    fn derived_env_source_maps_back_to_injection_kind() {
-        let inj: std::collections::HashMap<String, String> = [
-            ("REDIS_URL".to_string(), "cache".to_string()),
-            ("MYPG_URL".to_string(), "service".to_string()),
-            ("BARE".to_string(), "service".to_string()), // --as で `_URL` 無しの注入名
-            // 混在:service FOO_URL + cache FOO(裸名)。派生は後缀を生む kind に帰属する。
-            ("FOO_URL".to_string(), "service".to_string()),
-            ("FOO".to_string(), "cache".to_string()),
-        ]
-        .into();
-        // cache の派生(`_KEY_PREFIX`)→ `_URL` 形の基底で引ける。
-        assert_eq!(derived_env_source("REDIS_KEY_PREFIX", &inj), Some("cache".into()));
-        // service の派生(`_HOST` / `_PORT`)→ 同上。
-        assert_eq!(derived_env_source("MYPG_HOST", &inj), Some("service".into()));
-        assert_eq!(derived_env_source("MYPG_PORT", &inj), Some("service".into()));
-        // 裸名注入(`FOO`)の派生 `FOO_HOST` → `FOO_URL` が無ければ裸名で引く。
-        assert_eq!(derived_env_source("BARE_HOST", &inj), Some("service".into()));
-        // 混在ケース:`FOO_KEY_PREFIX` は cache(裸名 FOO)に、`FOO_HOST` は service
-        // (FOO_URL)に、それぞれ「後缀を生み得る kind」で正しく帰属する(codex review)。
-        assert_eq!(derived_env_source("FOO_KEY_PREFIX", &inj), Some("cache".into()));
-        assert_eq!(derived_env_source("FOO_HOST", &inj), Some("service".into()));
-        // 派生後缀を持たない / 対応する注入が無い → None(呼び出し側が中立ラベルに倒す)。
-        assert_eq!(derived_env_source("FOO", &inj), None);
-        assert_eq!(derived_env_source("UNKNOWN_HOST", &inj), None);
+    fn derived_env_keys_are_generated_per_kind() {
+        // database は URL の他に接続の素材を 6 本。基底は `_URL` を剥いだ形。
+        assert_eq!(
+            inject::derived_env_keys("database", "DATABASE_URL"),
+            [
+                "DATABASE_HOST",
+                "DATABASE_PORT",
+                "DATABASE_USER",
+                "DATABASE_PASSWORD",
+                "DATABASE_NAME",
+                "DATABASE_SSLMODE"
+            ]
+        );
+        // `--as` の裸名(`_URL` 無し)はそのまま基底になる。
+        assert_eq!(inject::derived_env_keys("service", "BARE"), ["BARE_HOST", "BARE_PORT"]);
+        assert_eq!(inject::derived_env_keys("cache", "REDIS_URL"), ["REDIS_KEY_PREFIX"]);
+        // volume は派生しない(mount_path を env_var に入れるだけ)。未知 kind も同様。
+        assert!(inject::derived_env_keys("volume", "STORAGE_PATH").is_empty());
+        assert!(inject::derived_env_keys("nope", "X_URL").is_empty());
+        // 占用名 = 本体 + 派生(create_injection の衝突検査が引く集合)。
+        let occupied = inject::occupied_env_keys("cache", "REDIS_URL");
+        assert!(occupied.contains(&"REDIS_URL".to_string()));
+        assert!(occupied.contains(&"REDIS_KEY_PREFIX".to_string()));
+        // 基底が同じ 2 件(`X` と `X_URL`)は派生名が丸ごと衝突する = 検査が拾える形になっている。
+        let a = inject::occupied_env_keys("database", "X");
+        let b = inject::occupied_env_keys("database", "X_URL");
+        assert!(a.iter().any(|k| b.contains(k)));
+    }
+
+    #[test]
+    fn injected_password_is_masked_by_key() {
+        // database 派生の裸パスワードは URL 形ではないので、キー後缀で全伏せする(安全)。
+        assert_eq!(super::mask_injected_value("DATABASE_PASSWORD", "s3cret"), "***");
+        assert_eq!(super::mask_injected_value("MYDB2_PASSWORD", "s3cret"), "***");
+        // 秘密でない派生はそのまま見せる(ホスト / 形を知るのが env/resolved の目的)。
+        assert_eq!(
+            super::mask_injected_value("DATABASE_HOST", "tsubomi-pgbouncer"),
+            "tsubomi-pgbouncer"
+        );
+        assert_eq!(super::mask_injected_value("DATABASE_USER", "app_ab12"), "app_ab12");
+        // URL 本体は従来どおりパスワード部だけ伏せる。
+        assert_eq!(
+            super::mask_injected_value("DATABASE_URL", "postgres://app:secret@pgb:6432/db"),
+            "postgres://app:***@pgb:6432/db"
+        );
     }
 
     #[test]

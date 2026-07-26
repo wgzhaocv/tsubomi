@@ -51,8 +51,10 @@
     **同じ** `db.<ドメイン>:6432` の文字列。
   - Docker が ufw を素通りするのは有名な穴。CIDR 制限は DOCKER-USER に置くこと。
     ufw のルールだけでは効かない。
-  - **ワイヤは client TLS(自己署名、`sslmode=require`)で暗号化済み**(M1 で実装):
-    pgbouncer が起動時に証明書を生成し、平文接続(`sslmode=disable`)を拒否する。
+  - **ワイヤは client TLS(`sslmode=require`)で暗号化済み**(M1 で実装):
+    pgbouncer が起動時に自己署名の**種**を作り、平文接続(`sslmode=disable`)を拒否する。
+    本番はその種を acme.sh が公開名の LE 証書で上書きして運用する(注入ホスト名も証書に揃える —
+    `doc/paas-db-public-design.md`「証書名は仕組みの一部」)。
     接続文字列も `sslmode=require` で出す。CIDR 制限と二重で LAN 上の受動的盗聴も塞ぐ。
 - ファイアウォール:80/443(traefik)、6432(CIDR 制限)、22。他は全部閉じる。
   tsubomi-server は `127.0.0.1:9090` で待ち(8080 は同居の amber)、traefik 経由 `paas.<ドメイン>`

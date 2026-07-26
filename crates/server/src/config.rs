@@ -59,8 +59,13 @@ pub struct Config {
     pub db_public_host: String,
     pub db_public_port: u16,
     /// **内部**(service へ注入する app role)接続文字列の sslmode。dev=disable、prod=require。
-    /// 内部は `db_internal_host`(=`tsubomi-pgbouncer`)へ docker DNS で繋ぐので、pgbouncer 証明書の
-    /// SAN(`db.<域名>`)とホスト名が一致しない → verify-full は使えず **require 据え置き**。
+    /// `require` 据え置きなのは意図的:**駆動系で意味が違う**(libpq = 暗号化するが証書を検証
+    /// しない / node-postgres = 厳格に検証)ので、`require` のまま**両方が通る状態**を作る方に
+    /// 倒す。そのために `db_internal_host` を pgbouncer 証書の名前(`db.<域名>`)に揃え、その名前を
+    /// **per-service 私網の** docker 網別名として生やす(`services/network.rs::pgbouncer_aliases`。
+    /// テナント容器は私網にしか居ないので compose の edge に付けても見えない)。verify-full へ
+    /// 上げないのは、libpq 側に `sslrootcert=system` が必要になり**それが今度は node で壊れる**
+    /// (接続文字列のパスとして読まれる)= 非互換を別の駆動系へ移すだけだから。
     pub db_internal_sslmode: String,
     /// **外部**(human が手にする公開)接続文字列の sslmode。既定は内部に追従(未設定時)、
     /// 公網 VPS 中継 + 公開 LE 証明書の部署では `verify-full` にする(`TSUBOMI_DB_SSLMODE_EXTERNAL`)。
@@ -215,6 +220,22 @@ fn load_master_key() -> anyhow::Result<[u8; 32]> {
             "master key must decode to exactly 32 bytes (got {})",
             bytes.len()
         )
+    })
+}
+
+/// DNS ホスト名として妥当か。**IP 字面量は拒否**(docker 網別名は DNS 名でしか効かず、証書にも
+/// IP SAN が無いため)。label は 1〜63 文字の `[a-zA-Z0-9-]` で、先頭末尾にハイフンを許さない
+/// (空 label = `..` や末尾ドット、全体 253 文字超も弾く)。`localhost` のような単一 label も可。
+fn is_dns_hostname(s: &str) -> bool {
+    if s.is_empty() || s.len() > 253 || s.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    s.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     })
 }
 
@@ -380,8 +401,20 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         // 注入する内部入口(コンテナ → edge 上の pgbouncer を docker DNS で)。§7.2。
+        // **prod は pgbouncer 証書の名前(`db.<域名>`)にする** — compose がその名前を edge の
+        // 網別名として生やすので、公網に出ないまま厳格検証も通る(上の db_internal_sslmode 参照)。
+        // 既定は容器名 = TLS 無しの dev / 旧部署の従来動作。
         let db_internal_host = std::env::var("TSUBOMI_DB_INTERNAL_HOST")
             .unwrap_or_else(|_| "tsubomi-pgbouncer".to_string());
+        // **DNS ホスト名のみ**を許す(fail-fast)。この値は接続文字列 URL・派生 env の `_HOST`・
+        // docker 網別名の 3 箇所に埋まるので、壊れた値は**全テナントに**配られてから発覚する:
+        // `:` を含めると `postgres://u:p@host:6432:6432/db`、**IP 字面量**は DNS を介さないので
+        // 網別名が効かず(かつ証書に IP SAN が無いので厳格検証も落ちる)。port は別変数が持つ。
+        if !is_dns_hostname(&db_internal_host) {
+            anyhow::bail!(
+                "TSUBOMI_DB_INTERNAL_HOST must be a DNS hostname (IP 不可・port 不可): {db_internal_host}"
+            );
+        }
         let db_internal_port: u16 = std::env::var("TSUBOMI_DB_INTERNAL_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -588,5 +621,27 @@ impl Config {
             ready_timeout_secs,
             dev_insecure_log_action_codes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dns_hostname;
+
+    #[test]
+    fn dns_hostname_accepts_real_names_and_rejects_ip_and_port() {
+        // 実際に使う 3 値(dev の容器名 / localhost / 本番の証書名)は通る。
+        for ok in ["tsubomi-pgbouncer", "localhost", "db.tsubomi-app.com"] {
+            assert!(is_dns_hostname(ok), "{ok}");
+        }
+        // port 混入は全テナントの URL を壊すので拒否(`@host:6432:6432/db` になる)。
+        assert!(!is_dns_hostname("tsubomi-pgbouncer:6432"));
+        // IP 字面量は DNS を介さない = 網別名が効かず証書にも IP SAN が無いので拒否。
+        assert!(!is_dns_hostname("127.0.0.1"));
+        assert!(!is_dns_hostname("::1"));
+        // 空 label / 末尾ドット / 単独ドット / 先頭末尾ハイフン。
+        for bad in ["", ".", "db..example.com", "db.example.com.", "-db.example.com", "db-.com"] {
+            assert!(!is_dns_hostname(bad), "{bad}");
+        }
     }
 }

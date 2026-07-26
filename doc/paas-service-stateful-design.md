@@ -85,8 +85,19 @@
 - **§0-H `_HOST`/`_PORT` の名前は `_URL` の作法を踏襲**:注入 env_var の末尾 `_URL` を剥いだ
   BASE に `_HOST` / `_PORT` を付ける(cache の `key_prefix_env` と同型)。値:HOST = callee の
   subdomain(docker 網別名)、PORT = callee の container_port。**`_URL` は温存**(HTTP app の互換)。
-  派生名が別注入の env_var と衝突したら dedup_env_last の後勝ち(cache `_KEY_PREFIX` と同じ
-  既知ギャップ、受容)。
+  - **2026-07-26:database にも一般化**(`_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`。
+    動機は `sslmode` の駆動系差 = `doc/paas-db-public-design.md`)。派生名の単一真源は
+    `inject::derived_env_keys` — 後缀を足すときはここと衝突検査・由来ラベルが同じ関数を引く。
+  - **後缀集が 6 本に増えたので衝突の受容度を改めた**:`DATABASE_HOST` / `_USER` / `_PASSWORD` /
+    `_NAME` は Rails/Django 系が昔から使う**ありふれた名前**で、`_KEY_PREFIX` のような珍しい名前とは
+    爆発半径が違う。よって:
+    - (a)**注入同士の衝突は create 時に 400 で拒否**(基底が同じ `X` と `X_URL` のような組は
+      「URL は A・パスワードは B」という静かな取り違えになるため)。検査と INSERT は同一 tx +
+      service 行の `FOR UPDATE` で行う(同時 POST の TOCTOU を塞ぐ)。
+    - (b)**派生 env は静的 env に道を譲る**(後勝ちを止めた)。注入の env_var 本体は従来どおり
+      静的を上書きするが、派生は便利品なので、既に静的 `DATABASE_HOST` を置いている app を
+      **次の deploy で黙って別 DB へ繋ぎ替えない**方を選ぶ。譲った名前は作成時に警告で列挙する。
+      cache `_KEY_PREFIX` / service `_HOST`・`_PORT` も同じ規則に揃えた。
 - **§0-I PORT env は従来どおり注入**:非 HTTP ソフト(postgres 等)は無視するだけ = 無害。
   分岐を増やさない。
 
@@ -199,8 +210,10 @@ env.push((format!("{base}_PORT"), port.to_string()));            // 追加
    同じ受容 — phase は reconcile が failed に寄せ、logs で診断(既存機構)。
 5. **非 8080 + company/public の組は乱码/502**(traefik HTTP → 非 HTTP 後端)。穴ではなく
    噪音(traefik は HTTP しか話さない)。既定 private が防ぎ、明示で開けた人の自己裁量(§0-B)。
-6. **`_HOST`/`_PORT` の衝突は後勝ち**(§0-H)。UNIQUE(service_id, env_var) は `_URL` にしか
-   効かない。cache `_KEY_PREFIX` と同じ受容。
+6. **派生名の衝突**(§0-H):**注入同士**は create 時に 400 で拒否する(2026-07-26。UNIQUE(service_id,
+   env_var) は env_var 本体にしか効かないので、派生名は自前で照合する)。**静的 env とは静的が勝つ**
+   (派生を注入しない)+ 作成時に譲った名前を警告で列挙。既存データの注入同士の衝突は遡って直さない
+   (作成時検査は新規のみ。表示ラベルが明示注入側に倒れる病理ケースが残り得る = 受容)。
 7. **推導を CLI / web で二重実装しない**(§0-B)。server が唯一の真源。CLI は None を送るだけ。
 8. **旧容器再 start 後のデータ目録**:失敗した新容器がデータを触った後(例:pg 大版本升級の
    途中死)の再 start は救えないことがある。自管 DB の升級リスクとして受容(managed database

@@ -12,6 +12,9 @@ use crate::config;
 /// database / volume / cache / 別 service を service に注入(バインディングを保存。値は起動の瞬間に解決)。
 /// service 注入は内部直連 URL `http://<subdomain>:<port>` に加え `_HOST` / `_PORT`(素材)を渡す
 /// (公網を通らない。同一 owner 限定。非 HTTP ソフトは HOST/PORT で自分のスキームの接続文字列を組む)。
+/// database も同様に URL + 素材(`_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`)を渡す:
+/// `sslmode` の解釈が駆動系で違う(libpq は証書を検証しない / node-postgres は厳格)ため、
+/// URL が使えない側は素材から自分の作法で接続する。
 #[derive(Args)]
 pub struct InjectArgs {
     /// 注入するリソースの表示名(database / volume / cache / service)
@@ -19,9 +22,9 @@ pub struct InjectArgs {
     /// 注入先サービスの表示名
     #[arg(long)]
     pub into: String,
-    /// env 変数名(既定:database=DATABASE_URL / volume=STORAGE_PATH / cache=REDIS_URL。
-    /// cache は加えて REDIS_KEY_PREFIX(--as 指定時は <ENV>_KEY_PREFIX)、service は加えて
-    /// <名前>_HOST / <名前>_PORT(--as 指定時は <ENV> の _URL を剥いだ基底 + _HOST/_PORT)も注入される)
+    /// env 変数名(既定:database=DATABASE_URL / volume=STORAGE_PATH / cache=REDIS_URL)。
+    /// 素材の派生 env も同じ基底(<ENV> の _URL を剥いだ形)に付く:
+    /// database=_HOST/_PORT/_USER/_PASSWORD/_NAME/_SSLMODE、cache=_KEY_PREFIX、service=_HOST/_PORT
     #[arg(long = "as")]
     pub env_as: Option<String>,
     /// volume のコンテナ内マウント先(既定 /data/<名前>)
@@ -58,6 +61,9 @@ pub async fn run_inject(
         print_json(&inj)?;
     } else {
         eprintln!("注入しました。反映には再デプロイ(または `tbm service start`)が必要です。");
+        if let Some(w) = &inj.warning {
+            eprintln!("⚠ {w}");
+        }
         println!(
             "{} ← {} ({})",
             inj.env_var, inj.resource_name, inj.resource_kind

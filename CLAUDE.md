@@ -312,6 +312,37 @@ password`、リセットで旧 grant 全失効)。bcrypt は `spawn_blocking`、
 **否決(後相)**:owner 管理 UI(2 人目追加削除は env 種子のまま §10-H)/ viewer login の失敗レート制限
 (今は bcrypt + 最小長 8 のみ)。実装級は **`doc/paas-m4-design.md`**。
 
+**AI フィードバック第 4 弾(2026-07-26、server v53 / tbm 1.0.32):`sslmode` の駆動系差を仕組みで消す**。
+発端は「注入された `DATABASE_URL` が Go では繋がるのに Node で落ちる」。**`sslmode=require` の意味が
+駆動系で割れている**(libpq = 暗号化するが証書を検証しない / node-postgres = **厳格に検証**)ため、
+利用側は「URL から sslmode を削って `ssl:{rejectUnauthorized:false}` を渡す」という文書必読の回避を
+強いられていた。**真因は自己署名ではなく hostname mismatch**(本番 pgbouncer は acme.sh が置いた LE 証書
+`CN=db.tsubomi-app.com` を出すのに、注入ホストは容器名 `tsubomi-pgbouncer`)— 実機の
+`openssl s_client` で確定。
+**不変式「注入ホスト名 = pgbouncer 証書の公開名」**を立て、その名前を **per-service 私網の docker 網別名**
+として pgbouncer に付ける(`network.rs::pgbouncer_aliases`。公網 DNS は docker 内蔵 DNS が遮蔽 = 通信は
+網内のまま)。**別名を付ける場所が要点** — テナント容器は M6 網隔離で私網にしか居らず `tsubomi-edge` は
+残骸なので、compose で edge に付けても**見えない**(最初これで踏んだ。codex 相当の審査で捕獲)。別名は初回
+connect でしか付かないため、既存私網には起動時に `migrate_pgbouncer_aliases` が後付けする(disconnect →
+別名付き reconnect)。`verify-full` へ上げる案は却下(libpq に `sslrootcert=system` が要り、それが今度は
+Node で壊れる = 非互換を移すだけ)。**引き受けたコスト:LE 証書が全テナント app の生命線**になった
+(以前は検証されないので切れても内部注入は動いた)⇒ 更新 hook の正本を `deploy/db-public/reload-pgb-cert.sh`
+に留め置き、DR runbook に **§E(証書失効)**と前提・演練を追加。**分離**:`db_internal_host` は「証書の身元」
+であって配管先ではないので、公開 DB の traefik 後端(`ipblock.rs`)は**容器名**で引く(公開名を書くと引けない
+瞬間に traefik が自分へ転送する自環)。値は**ホスト名のみ**を起動時検証(port 混入で全テナントの URL が壊れる)。
+併せて **database 注入に素材 env** を追加(`_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE` = M6 の
+`_HOST`/`_PORT` の一般化。URL を受け取らない ORM 用)。派生名の単一真源は `inject::derived_env_keys`(衝突検査と
+web の由来ラベルが同じ関数を引く = 手書きの対応表を廃止)。後缀が 6 本に増え `DATABASE_HOST` 等の**ありふれた
+名前**に当たるので、**注入同士の衝突は create 時に 400**(基底が同じ `X`/`X_URL` は「URL は A・パスワードは B」の
+静かな取り違えになる。検査と INSERT は同一 tx + 行ロックで TOCTOU を塞ぐ)/ **静的 env とは静的が勝つ**
+(派生は便利品なので後勝ちを止めた — 既存 app を次の deploy で黙って別 DB へ繋ぎ替えない。譲った名前は
+警告で列挙し、web も応答 body を捨てずに表示する)。裸 `_PASSWORD` が
+`env/resolved` に平文で出る穴も同時に塞いだ(旧マスクは URL 形しか見ていなかった)。skill §3.1 は
+**`DATABASE_HOST` を見て分岐する**形に書き換え(dev / 旧部署は容器名のままなので無条件断言にしない)。
+実装級・却下理由・受容は **`doc/paas-db-public-design.md`「証書名は仕組みの一部」**(正本)+ m3 設計 §11 決定 A'。
+同日の小修正:web のデプロイ履歴で**稼働中の版**に出ていた「このデプロイに戻す」を隠す(digest 一致 +
+running のときだけ「稼働中」表示)。
+
 ## 重要な約束事
 
 - **ドキュメント(md)もコードコメントも日本語で書く**(設計議論の中国語

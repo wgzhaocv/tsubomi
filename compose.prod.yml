@@ -99,8 +99,10 @@ services:
       timeout: 3s
       retries: 20
 
-  # クライアント TLS 用の自己署名証明書を 1 度だけ生成して volume に置く。
-  # sslmode=require は証明書を検証しない(LAN・受動的盗聴対策)ので自己署名で十分。
+  # クライアント TLS 用の証明書を **起動可能にするための種**(bootstrap)として 1 度だけ生成する。
+  # 本番はこの自己署名を acme.sh が公開名(`db.<ドメイン>`)の LE 証明書で**上書き**して運用する
+  # (更新 hook = `deploy/db-public/reload-pgb-cert.sh`)。`if [ ! -f ]` なので上書き後は触らない。
+  # ※種のままでは厳格検証する駆動系が繋がらない(自己署名 = CA 不信頼)ので acme.sh 上書きは必須。
   # postgres:18 を流用(openssl 同梱、別イメージ不要)。鍵は volume 内のみ・git に残さない。
   pgbouncer-certgen:
     image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
@@ -141,8 +143,12 @@ services:
         target: /etc/pgbouncer/pgbouncer.ini
       - source: pgbouncer_userlist
         target: /etc/pgbouncer/userlist.txt
-    # default = pg-tenant への到達。tsubomi-edge = ユーザコンテナが `tsubomi-pgbouncer:6432`
-    # (docker DNS)で内部入口に届くため(M3 注入。dev の infra/docker-compose.yml と同じ)。
+    # default = pg-tenant への到達。tsubomi-edge は**居るだけ**(M6 網隔離の前は注入 app の
+    # 内部入口だったが、今テナント容器は per-service 私網にしか居ない — `config.rs` の
+    # svc_network_prefix 参照)。**注入 app への到達は平台が私網へ on-demand attach する経路**で、
+    # そこで付ける docker 網別名(= 注入ホスト名 = pgbouncer 証書の公開名)が
+    # `services/network.rs::pgbouncer_aliases` に在る。compose で edge に別名を生やしても
+    # テナントからは見えないので、ここには書かない(m3 設計 §11 決定 A')。
     networks: [default, tsubomi-edge]
 
   # M3:ユーザ app イメージの置き場。平台は digest 指定で 127.0.0.1:5000(ループバック・無認証)
@@ -235,7 +241,7 @@ services:
 
   server:
     # 公開イメージ(既定)。別タグにしたいときだけ環境変数 TSUBOMI_IMAGE で上書き。
-    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v52}
+    image: ${TSUBOMI_IMAGE:-docker.io/wgzhaofumi/tsubomi:v53}
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host

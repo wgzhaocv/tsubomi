@@ -8,6 +8,8 @@
 #     TSUBOMI_DB_PUBLIC_HOST=<VPS 公開名>    # 接続文字列(build_url)の host
 #     TSUBOMI_DB_PUBLIC_PORT=6432
 #     TSUBOMI_DB_SSLMODE=require             # pgbouncer が client TLS を終端
+#     TSUBOMI_DB_INTERNAL_HOST=db.<域名>     # 注入ホスト = pgbouncer 証書の名前に揃える
+#                                            # (server がこの名前を per-service 私網の網別名に生やす)
 #     (+ db.<域名> 等の A レコードを VPS 公網 IP へ。:6432 が公網到達できること)
 #   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.db-public.yml up -d
 #
@@ -28,8 +30,8 @@
 #
 # ※ `command`(リスト)は後勝ちで全置換なので base(compose.prod.yml)の行も再掲する。`ports` はマージ
 #   (:6432 が base に足される)。pgbouncer の host publish は `!reset` で落とす — 公開 6432 は Traefik が
-#   単独で持つ(二重 bind 回避)。pgbouncer へは Traefik も注入 app も docker DNS `tsubomi-pgbouncer:6432`
-#   で内部到達するので host publish は不要。
+#   単独で持つ(二重 bind 回避)。pgbouncer へは Traefik も注入 app も **docker DNS で内部到達する**
+#   (名前は `TSUBOMI_DB_INTERNAL_HOST` = 容器名か、証書に揃えた網別名 `db.<域名>`)ので host publish は不要。
 services:
   traefik:
     command:

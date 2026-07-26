@@ -50,6 +50,22 @@ fn infra_containers(state: &AppState) -> [&str; 3] {
     ]
 }
 
+/// pgbouncer を私網へ attach するときに付ける docker 網別名。**注入する接続文字列の host**
+/// (`db_internal_host`)が容器名と違う部署では、その名前で引けないと繋がらない — 名前を
+/// pgbouncer の client TLS 証書の公開名に揃える設計(m3 設計 §11 決定 A')の実体はここ。
+/// 容器名と同じ(dev / 旧部署)なら別名は不要 = 空。
+///
+/// **なぜ compose ではここなのか**:テナント容器は per-service 私網にしか居らず(M6 網隔離、
+/// `docker.rs` の `network_mode`)、`tsubomi-edge` は平台コードから参照されない残骸。compose 側で
+/// edge に別名を生やしてもテナントからは見えない。
+fn pgbouncer_aliases(state: &AppState) -> Vec<String> {
+    let cfg = &state.config;
+    if cfg.db_internal_host == cfg.pgbouncer_container {
+        return Vec::new();
+    }
+    vec![cfg.db_internal_host.clone()]
+}
+
 /// bollard の Error が指定 HTTP ステータスか(冪等化のための分岐に使う)。
 fn is_status(e: &bollard::errors::Error, code: u16) -> bool {
     matches!(
@@ -179,7 +195,12 @@ pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -
     // infra を attach。失敗は伝播させる(infra 不達のまま app を起こすと注入/route が壊れた
     // service になる — 黙って成功させない。reconcile から呼ばれた時は呼び出し側が per-item で log)。
     for container in infra_containers(state) {
-        connect(state, &name, container, &[]).await?;
+        let aliases = if container == state.config.pgbouncer_container {
+            pgbouncer_aliases(state)
+        } else {
+            Vec::new()
+        };
+        connect(state, &name, container, &aliases).await?;
     }
 
     // この service が注入する別 service(callee)を私網へ客人 attach(別名=callee.subdomain)。
@@ -283,10 +304,113 @@ async fn network_exists(state: &AppState, name: &str) -> bool {
         .is_ok()
 }
 
+/// 平台が作った per-service 私網の**名前**の集合(`tsubomi.managed=true` ラベルで確定)。
+/// 名前接頭辞での判定と違い、compose の網や共有網を絶対に掴まない。
+async fn managed_network_names(state: &AppState) -> AppResult<std::collections::HashSet<String>> {
+    let mut filters: HashMap<String, Vec<String>> = HashMap::new();
+    filters.insert("label".into(), vec![format!("{LABEL_MANAGED}=true")]);
+    let opts = ListNetworksOptionsBuilder::default().filters(&filters).build();
+    let networks = state
+        .docker
+        .list_networks(Some(opts))
+        .await
+        .map_err(|e| AppError::Other(anyhow!("網一覧の取得に失敗: {e}")))?;
+    Ok(networks.into_iter().filter_map(|n| n.name).collect())
+}
+
+/// 既に在る私網の pgbouncer endpoint に**別名を後付けする**(起動時 1 回)。docker の網別名は
+/// **初回 connect 時にしか確定しない**ので、`pgbouncer_aliases` を導入する前から在った私網は
+/// `connect` の 403(既接続)で冪等に握り潰されて別名が永遠に生えない。そこを塞ぐ移行処理。
+///
+/// 手順は endpoint 単位の disconnect → 別名付き reconnect。その service の DB 接続は一瞬切れるが
+/// (プールが張り直す)、放置すると**注入ホスト名が私網で引けない** = 公網 DNS に落ちて通信が網外へ
+/// 出る / 届かない、という遥かに悪い状態が続く。別名が要らない部署(容器名と同じ = dev / 旧部署)は
+/// 何もしない。best-effort:失敗しても起動は続け、次の deploy / この関数の次回起動で再試行される。
+pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
+    let aliases = pgbouncer_aliases(state);
+    let Some(want) = aliases.first().cloned() else {
+        return; // 容器名と同じ = 別名不要
+    };
+    let container = state.config.pgbouncer_container.clone();
+    // **対象は平台が作った per-service 私網だけ**をラベルで確定する(名前接頭辞で判定すると
+    // `TSUBOMI_SVC_NETWORK_PREFIX` の設定次第で `tsubomi-edge` や compose の `..._default` まで
+    // 掴み、pgbouncer を pg-tenant への網から切って**全 DB を落とす**。codex 深審 2026-07-26)。
+    let managed = match managed_network_names(state).await {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!(error = ?e, "網一覧を取れません(網別名の移行を飛ばす)");
+            return;
+        }
+    };
+    let Ok(info) = state.docker.inspect_container(&container, None).await else {
+        tracing::warn!(container, "pgbouncer を inspect できません(網別名の移行を飛ばす)");
+        return;
+    };
+    // pgbouncer が今居る網のうち、平台管理の私網で **want を持っていない**ものだけを直す。
+    let stale: Vec<String> = info
+        .network_settings
+        .and_then(|s| s.networks)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(net, ep)| {
+            managed.contains(net) && !ep.aliases.as_deref().unwrap_or_default().contains(&want)
+        })
+        .map(|(net, _)| net)
+        .collect();
+    if stale.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = stale.len(),
+        alias = %want,
+        "既存の per-service 私網に pgbouncer の網別名を後付けします(一瞬 DB が切れます)"
+    );
+    for net in stale {
+        disconnect(state, &net, &container).await;
+        // connect の 403(既接続)は冪等成功なので、**disconnect が失敗していると成功に見えてしまう**
+        // (別名は付いていない)。周期 reconcile も同じ 403 を握るため、黙って次の再起動まで直らない。
+        // よって「別名が実際に付いたか」を inspect で確かめるまでを 1 セットにする(codex 深審)。
+        let connected = connect(state, &net, &container, &aliases).await;
+        match connected {
+            Ok(()) if endpoint_has_alias(state, &container, &net, &want).await => {
+                tracing::info!(network = %net, alias = %want, "網別名を付け直しました");
+            }
+            Ok(()) => tracing::error!(
+                network = %net, alias = %want,
+                "網別名が付きませんでした(disconnect が効かず既接続のまま = この service の DB 注入は\
+                 旧ホスト名でしか引けません)。手で `docker network disconnect` してから再起動してください"
+            ),
+            Err(e) => tracing::error!(
+                network = %net, error = ?e,
+                "網別名の付け直しに失敗(この service の DB 注入は繋がりません。再デプロイで復旧)"
+            ),
+        }
+    }
+}
+
+/// `container` の `network` 上の endpoint が `alias` を持っているか(移行の閉環確認)。
+/// inspect できない = 確認できない → false(成功を騙らない)。
+async fn endpoint_has_alias(
+    state: &AppState,
+    container: &str,
+    network: &str,
+    alias: &str,
+) -> bool {
+    let Ok(info) = state.docker.inspect_container(container, None).await else {
+        return false;
+    };
+    info.network_settings
+        .and_then(|s| s.networks)
+        .and_then(|n| n.get(network).cloned())
+        .and_then(|ep| ep.aliases)
+        .is_some_and(|a| a.iter().any(|x| x == alias))
+}
+
 /// コンテナを私網へ接続(既接続=403 は冪等に握り潰す)。`aliases` 非空なら docker 網別名を付ける
 /// (callee を caller の subdomain で引けるようにする。infra は別名なし `&[]` で呼ぶ)。
-/// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できないが、callee は両 attach 経路とも
-/// 最初から別名付きで繋ぐので問題にならない(infra は元々別名不要)。
+/// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できない。callee は両 attach 経路とも
+/// 最初から別名付きで繋ぐので問題にならないが、pgbouncer は別名導入前から接続済みの私網が在り得るので
+/// 起動時に `migrate_pgbouncer_aliases` が後付けする。
 async fn connect(state: &AppState, network: &str, container: &str, aliases: &[String]) -> AppResult<()> {
     let endpoint_config = (!aliases.is_empty()).then(|| EndpointSettings {
         aliases: Some(aliases.to_vec()),

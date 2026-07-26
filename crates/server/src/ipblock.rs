@@ -248,9 +248,14 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     // 許可リストを流用。HTTP は pgbouncer 直結を通らないので別途 tcp: で被せる)。HTTP 書き込みが失敗して
     // 早期 return しても、その時は DB 入口を書かない = fail-closed 側に倒れる(安全)。
     if open_db {
+        // 後端は **容器名**で引く(`db_internal_host` ではない)。両者は別の関心事:
+        // db_internal_host は「注入する接続文字列の host = 証書の名前」= **TLS の身元**、
+        // ここで要るのは「traefik から pgbouncer への配管先」= **経路**。証書の公開名を後端に
+        // 書くと、その名前が traefik 視点で引けない瞬間(pgbouncer 再作成の窓など)に公網 DNS へ
+        // 落ちて **traefik が自分自身へ転送する自環**になる。容器名は共有網が在れば常に解ける。
         let backend = format!(
             "{}:{}",
-            state.config.db_internal_host, state.config.db_internal_port
+            state.config.pgbouncer_container, state.config.db_internal_port
         );
         let tmp = dir.join(".db-tcp.yml.tmp");
         tokio::fs::write(&tmp, render_db_tcp_yaml(&cidrs, &backend)).await?;
@@ -326,7 +331,8 @@ fn render_yaml(cidrs: &[String]) -> String {
 /// = 公開 DB は fail-closed(DB を空リストで 0.0.0.0/0 に晒さない。HTTP service の空=fail-open とは別)。
 /// pgbouncer が client TLS を終端するので Traefik は **素の TCP passthrough**(`HostSNI(*)`・TLS 無し)=
 /// client の `sslmode=require` は pgbouncer と端到端で TLS を張る。`backend` = 内部 pgbouncer の
-/// `host:port`(db_internal_host:db_internal_port。値は平台生成なのでそのまま埋めて安全)。
+/// `host:port`(**容器名**:db_internal_port。注入用の証書名ではない — 呼び出し側のコメント参照。
+/// 値は平台生成なのでそのまま埋めて安全)。
 fn render_db_tcp_yaml(cidrs: &[String], backend: &str) -> String {
     let ranges = fail_open_ranges(cidrs);
 

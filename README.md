@@ -108,9 +108,10 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    - **M1 の DB 入口(pgbouncer :6432)を必ず会社 CIDR に絞る**(iptables の
      `DOCKER-USER` チェーン。ufw だけでは Docker を素通りする — design v2 §1)。
      `PGBOUNCER_BIND_ADDR=0.0.0.0` は「受ける」だけで、送信元制限はこの柵が担う。
-   - DB ワイヤ自体は **client TLS(自己署名、`sslmode=require`)で暗号化済み** ——
-     pgbouncer が起動時に証明書を生成し、平文接続(`sslmode=disable`)は拒否する。
-     CIDR 制限と合わせて二重(LAN 盗聴も塞ぐ)。
+   - DB ワイヤ自体は **client TLS(`sslmode=require`)で暗号化済み** ——
+     pgbouncer が起動時に自己署名の種を作り、平文接続(`sslmode=disable`)は拒否する。
+     CIDR 制限と合わせて二重(LAN 盗聴も塞ぐ)。本番は種を acme.sh の LE 証書で上書きし、
+     注入ホスト名もその証書名に揃える(`doc/paas-db-public-design.md`)。
 7. **確認 / ログ**:
 
    ```bash

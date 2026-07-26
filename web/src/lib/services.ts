@@ -124,6 +124,8 @@ export type Injection = {
   env_var: string;
   mount_path: string | null;
   valid: boolean;
+  /** 作成時のみ:同名の静的 env が注入で上書きされる等の非破壊の注意喚起。 */
+  warning?: string | null;
 };
 
 // detail(id) = ["services", id] は deploys/injections/env/logs の prefix なので、
@@ -295,11 +297,26 @@ export function useSetServiceVisibility(id: string) {
   );
 }
 
+// 他の mutation と違い**応答 body を返す** — server が `warning`(静的 env に譲った派生 env 等)を
+// 載せてくるので、黙って捨てると web 利用者だけが気付けない。
 export function useCreateInjection(id: string) {
-  return useServiceAction<{ resource_id: string; env_var?: string; mount_path?: string }>(
-    (req) => ({ url: `/api/services/${id}/injections`, method: "POST", body: req }),
-    () => serviceKeys.injections(id),
-  );
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (req: {
+      resource_id: string;
+      env_var?: string;
+      mount_path?: string;
+    }): Promise<Injection> => {
+      const res = await fetch(`/api/services/${id}/injections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      });
+      if (!res.ok) return failBody(res);
+      return res.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.injections(id) }),
+  });
 }
 
 export function useEjectInjection(id: string) {

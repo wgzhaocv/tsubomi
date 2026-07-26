@@ -6,14 +6,25 @@ import {
   deployStatusLabel,
   shortDigest,
   useRollbackService,
+  useService,
   useServiceDeploys,
 } from "@/lib/services";
 
-// デプロイ履歴。各 succeeded 行は「このデプロイに戻す」(rollback = 旧 digest を再起動、再 build なし)。
+// デプロイ履歴。succeeded 行から同じ digest を再起動できる(rollback = 再 build なし)。
+// **今動いている版はボタンの文言を変える** — 自分へ「戻す」は意味不明だが、**同じイメージの
+// 再デプロイは必要な操作**(rotate 後・env / 注入の変更後は起動時解決をやり直す必要がある)なので
+// 消さずに残す(codex 深審)。
 export default function ServiceDeploys() {
   const { id = "" } = useParams();
   const { data: deploys, isPending, error } = useServiceDeploys(id);
+  const { data: svc } = useService(id);
   const rollback = useRollbackService(id);
+  // 今動いている digest。これと同じ版へ「戻す」のは無意味なのでボタンを出さない。
+  // digest で見るのは、rollback が新しい deploy 行を作る = 同 digest の行が複数在り得るため
+  // (最新行だけ隠すと、戻した先の行に無意味なボタンが残る)。**running の時だけ**判定する —
+  // 停止中は image_digest が最後の版を保持したままなので、それを「稼働中」と呼ぶと嘘になるし、
+  // その版を選び直して起こすのは有効な操作。未デプロイ時も undefined = 全行にボタン。
+  const servingDigest = svc?.phase === "running" ? svc.image_digest : undefined;
 
   return (
     <div className="flex flex-col gap-4">
@@ -48,14 +59,21 @@ export default function ServiceDeploys() {
                 {d.error && <span className="text-xs font-semibold text-[#e05a5a]">{d.error}</span>}
               </div>
               {d.status === "succeeded" && (
-                <Button
-                  type="default"
-                  size="small"
-                  loading={rollback.isPending}
-                  onClick={() => rollback.mutate(d.id)}
-                >
-                  このデプロイに戻す
-                </Button>
+                <div className="flex items-center gap-2">
+                  {d.image_digest === servingDigest && (
+                    <span className="text-xs font-semibold text-muted-foreground">稼働中</span>
+                  )}
+                  <Button
+                    type="default"
+                    size="small"
+                    loading={rollback.isPending}
+                    onClick={() => rollback.mutate(d.id)}
+                  >
+                    {d.image_digest === servingDigest
+                      ? "このイメージで再デプロイ"
+                      : "このデプロイに戻す"}
+                  </Button>
+                </div>
               )}
             </li>
           ))}

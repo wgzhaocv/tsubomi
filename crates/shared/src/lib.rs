@@ -576,12 +576,18 @@ pub struct InjectionDto {
     pub resource_kind: String,
     pub resource_name: String,
     /// 注入先 env 変数名(database 既定 DATABASE_URL / volume 既定 STORAGE_PATH)。
+    /// この名前の `_URL` を剥いだ基底に**素材の派生 env** も付く(database=`_HOST`/`_PORT`/
+    /// `_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`、cache=`_KEY_PREFIX`、service=`_HOST`/`_PORT`)。
     pub env_var: String,
     /// volume のみ:コンテナ内マウント先。
     #[serde(default)]
     pub mount_path: Option<String>,
     /// 注入元が生きているか(ソフト削除済み = false = 失効。service は起動するが env は出ない)。
     pub valid: bool,
+    /// 作成時(`POST`)の非破壊の注意喚起。今は「同名の静的 env が注入で上書きされる」の 1 種。
+    /// 一覧(`GET`)では常に `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// `POST /api/services/:id/injections` のリクエスト。env_var / mount_path 省略時は kind 既定。

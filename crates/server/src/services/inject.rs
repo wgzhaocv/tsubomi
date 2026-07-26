@@ -14,6 +14,10 @@
 //!
 //! database は **app role**(human ではない)を内部入口 `tsubomi-pgbouncer` 経由で注入する
 //! (§7.2):外部 key の rotate が走る service を切らない。コンテナは edge 網のみで社外に出ない。
+//!
+//! **派生 env**:URL を受け取らない利用側のために、database と service は接続の素材も併注する
+//! (cache は `_KEY_PREFIX`)。名前は `host_port_base` で `_URL` を剥いだ基底 + 後缀で、
+//! **単一真源は `derived_env_keys`**(衝突検査と web の由来ラベルが同じ関数を引く)。
 
 use crate::error::AppResult;
 use crate::state::AppState;
@@ -34,9 +38,20 @@ pub async fn resolve(
             .bind(service_id)
             .fetch_all(&state.db)
             .await?;
+    let mut static_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (key, value_enc) in static_env {
+        static_keys.insert(key.clone());
         env.push((key, state.crypto.decrypt(&value_enc)?));
     }
+    // **派生 env(便利品)は静的 env に道を譲る**。注入の env_var 本体は従来どおり後勝ちで静的を
+    // 上書きする(ユーザが明示的に注入した契約だから)が、`DATABASE_HOST` / `_NAME` のような派生名は
+    // Rails/Django 系が昔から使うありふれた名前で、静かに上書きすると**既存 app が別 DB へ繋ぐ**。
+    // 2026-07-26 に database の派生が 6 本に増えた時点で「後勝ちで受容」は割に合わなくなった(codex 深審)。
+    let push_derived = |env: &mut Vec<(String, String)>, key: String, value: String| {
+        if !static_keys.contains(&key) {
+            env.push((key, value));
+        }
+    };
 
     // 2. 注入(バインディング)を 1 件ずつ解決。失効(資源が削除済み)は空に解決してスキップ。
     let injections: Vec<(Uuid, String, String, Option<String>)> = sqlx::query_as(
@@ -59,6 +74,21 @@ pub async fn resolve(
                     let url = format!(
                         "postgres://{role}:{pass}@{}:{}/{dbname}?sslmode={}",
                         cfg.db_internal_host, cfg.db_internal_port, cfg.db_internal_sslmode
+                    );
+                    // 素材(部品)も併注する(service の `_HOST`/`_PORT` と同型 = §0-H の一般化)。
+                    // URL を受け取らない ORM / TLS を明示制御したい駆動系が、自分の作法で接続設定を
+                    // 組めるようにする(URL は従来どおり据え置き)。名前の真源は `derived_env_keys` —
+                    // 後缀を足すときは両方揃える(単体テストが対応を釘付けにしている)。
+                    let base = host_port_base(&env_var).to_string();
+                    push_derived(&mut env, format!("{base}_HOST"), cfg.db_internal_host.clone());
+                    push_derived(&mut env, format!("{base}_PORT"), cfg.db_internal_port.to_string());
+                    push_derived(&mut env, format!("{base}_USER"), role);
+                    push_derived(&mut env, format!("{base}_PASSWORD"), pass);
+                    push_derived(&mut env, format!("{base}_NAME"), dbname);
+                    push_derived(
+                        &mut env,
+                        format!("{base}_SSLMODE"),
+                        cfg.db_internal_sslmode.clone(),
                     );
                     env.push((env_var, url));
                 }
@@ -93,7 +123,7 @@ pub async fn resolve(
                     // 名前は env_var の `_URL` を `_KEY_PREFIX` に置換(無ければ付加)。値は常に `<ns>:`。
                     let prefix_env = key_prefix_env(&env_var);
                     env.push((env_var, url));
-                    env.push((prefix_env, format!("{namespace}:")));
+                    push_derived(&mut env, prefix_env, format!("{namespace}:"));
                 }
             }
             "service" => {
@@ -107,9 +137,9 @@ pub async fn resolve(
                 // (受容)。実到達は network.rs の網リンクが担保する。
                 if let Some((subdomain, port)) = fetch_service_endpoint(state, resource_id).await? {
                     let url = format!("http://{subdomain}:{port}");
-                    let base = host_port_base(&env_var);
-                    env.push((format!("{base}_HOST"), subdomain));
-                    env.push((format!("{base}_PORT"), port.to_string()));
+                    let base = host_port_base(&env_var).to_string();
+                    push_derived(&mut env, format!("{base}_HOST"), subdomain);
+                    push_derived(&mut env, format!("{base}_PORT"), port.to_string());
                     env.push((env_var, url));
                 }
             }
@@ -131,6 +161,27 @@ fn key_prefix_env(env_var: &str) -> String {
 /// `MYPG_URL` → `MYPG_HOST` / `MYPG_PORT`(stateful 設計 §0-H。`key_prefix_env` と共有)。
 fn host_port_base(env_var: &str) -> &str {
     env_var.strip_suffix("_URL").unwrap_or(env_var)
+}
+
+/// 注入 1 件が **env_var 本体に加えて生む派生 env 名**。値ではなく名前だけを返す(resolve の
+/// push と同じ後缀・同じ基底導出を共有する — 名前の単一真源はここ)。衝突検査(create_injection)と
+/// 由来ラベル(`services/mod.rs::list_env_resolved`)がこれを引く。
+pub(crate) fn derived_env_keys(kind: &str, env_var: &str) -> Vec<String> {
+    let suffixes: &[&str] = match kind {
+        "database" => &["_HOST", "_PORT", "_USER", "_PASSWORD", "_NAME", "_SSLMODE"],
+        "service" => &["_HOST", "_PORT"],
+        "cache" => &["_KEY_PREFIX"],
+        _ => &[], // volume は派生しない(mount_path を env_var に入れるだけ)
+    };
+    let base = host_port_base(env_var);
+    suffixes.iter().map(|s| format!("{base}{s}")).collect()
+}
+
+/// 注入 1 件が占用する env 名の全体(env_var 本体 + 派生)。
+pub(crate) fn occupied_env_keys(kind: &str, env_var: &str) -> Vec<String> {
+    let mut keys = derived_env_keys(kind, env_var);
+    keys.push(env_var.to_string());
+    keys
 }
 
 #[cfg(test)]

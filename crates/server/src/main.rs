@@ -65,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     gc::spawn(state.clone());
+    // 注入ホスト名(= pgbouncer 証書の公開名)を per-service 私網で引けるようにする網別名の後付け。
+    // reconcile / deploy より **先**に済ませる(別名が無いまま app が起きると注入ホストが公網 DNS に
+    // 落ちる)。別名が要らない部署では no-op。m3 設計 §11 決定 A'。
+    services::network::migrate_pgbouncer_aliases(&state).await;
     // 現実(コンテナ/route)を期望状態へ収束させる第二の保険(restart=unless-stopped が第一)。
     // 起動時フル + 30s ライト(S8)。serve はブロックしない(初回フルは spawn 内の 0 tick)。
     services::reconcile::spawn(state.clone());

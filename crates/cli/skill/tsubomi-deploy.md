@@ -74,7 +74,7 @@ service 注入 = 別 app への**内部直連**(公網を通らない。同一 o
 
 **接続文字列は「env 名」で繋ぐ(値は環境ごとに解決:ローカル=公開 / 本番=内部)。**
 注入は **env 名にそのまま値を生成する**(内容マッチではない)。本番は起動時に**内部接続文字列**
-(app role・内部入口 `tsubomi-pgbouncer`・社外に出ない)を `DATABASE_URL` に入れる。開発機で使う
+(app role・内部入口・社外に出ない)を `DATABASE_URL` に入れる。開発機で使う
 **公開接続文字列**(`tbm db url`。human role・外部入口)とは **同じ env 名で繋ぐ** — コードは
 `process.env.DATABASE_URL` を**読むだけ**で、値はローカル=公開 / 本番=注入と別物。両者は別環境にしか
 存在しないので**衝突せず無縫に切り替わる**。これを成立させる 3 点:
@@ -84,31 +84,50 @@ service 注入 = 別 app への**内部直連**(公網を通らない。同一 o
   `<NAME>_KEY_PREFIX` も併せて入る)。確認は `injections[].env_var` と `process.env.XXX` の突き合わせ。
 - **接続文字列をコードに直書きしない**(必ず env 名を読む)。直書きは env をすり抜け、本番でも公開経路に出る。
 - **公開文字列を本番に持ち込まない**:`.env` は `.gitignore` + `.dockerignore`(**イメージに焼かない**)、
-  `tbm service env set DATABASE_URL=<公開>` も**しない**。持ち込むと公開経路(外部入口)に出て、同一ホストの
+  `tbm env set <名前> DATABASE_URL=<公開>` も**しない**。持ち込むと公開経路(外部入口)に出て、同一ホストの
   DB に**インターネットを一周**(遅延)+ `tbm db rotate` で**黙って切れる**(注入の内部文字列はどちらも無い)。
 
-### 3.1 `DATABASE_URL` の TLS は言語で扱いが違う(つまずきやすい)
+### 3.1 `DATABASE_URL` の TLS はドライバで扱いが違う(まず注入ホスト名を見て分岐する)
 
-注入される `DATABASE_URL` は **`sslmode=require`**(libpq の意味 = 暗号化はするが**証明書は検証しない**。
-内部の自己署名証明書のため検証は通らない)。この `require` の解釈がドライバで割れる:
+`sslmode=require` の意味が**ドライバで割れている**:libpq(Go / Python)は「暗号化のみ・証明書は
+検証しない」、Node の `pg` は「**厳格に検証**」。だから同じ URL が Go では繋がり Node では落ちる。
+どちらに転ぶかは**注入ホスト名が証明書と一致しているか**で決まるので、まずそれを見る:
 
-- **Go(lib/pq)/ Python(psycopg)**:`require` を「暗号化のみ・検証なし」と解釈 → **そのまま繋がる**。
-- **Node.js(`pg`)/ Next.js**:`pg` は `require` でも証明書を**厳密検証**する(libpq の
-  「require=検証なし」互換ではない)ため内部の自己署名証明書で失敗する。しかも接続文字列由来の
-  ssl 設定が明示 `ssl` を上書きするので、**URL から `sslmode` を外して** `ssl` を明示する:
-  ```js
-  const u = new URL(process.env.DATABASE_URL); u.searchParams.delete("sslmode");
-  const pool = new pg.Pool({ connectionString: u.toString(), ssl: { rejectUnauthorized: false } });
-  ```
+```
+tbm env list <名前> --resolved   # DATABASE_HOST の値を見る
+```
+
+- **`DATABASE_HOST` が `db.` で始まる(= 公開名)** → 証明書(公的に信頼される LE 発行)と名前が
+  一致する部署。**厳格検証で通る**ので `DATABASE_URL` をそのまま渡してよい:
+  - **Go / Python / Node(`pg`)**:そのまま。`rejectUnauthorized:false` は**不要**。
+  - **Rust(`postgres` / `tokio-postgres`)**:`NoTls` では `require` に繋がらないので TLS コネクタを
+    渡す。検証は有効のままでよい:
+    ```rust
+    let c = native_tls::TlsConnector::new()?;
+    let mut db = postgres::Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(c))?;
+    ```
+- **`DATABASE_HOST` がコンテナ名(`tsubomi-pgbouncer` 等)** → 証明書の名前と食い違う(または自己署名の)
+  部署。**厳格検証は通らない**ので、検証を切る側に寄せる:
+  - **Node(`pg`)**:接続文字列由来の ssl 設定が明示 `ssl` を上書きするので、**URL から `sslmode` を
+    外して**から渡す:
+    ```js
+    const u = new URL(process.env.DATABASE_URL); u.searchParams.delete("sslmode");
+    const pool = new pg.Pool({ connectionString: u.toString(), ssl: { rejectUnauthorized: false } });
+    ```
+  - **Rust**:`danger_accept_invalid_certs(true)` を付ける。
+  - **Go / Python**:そのままで繋がる(libpq は検証しない)。
+- **`DATABASE_SSLMODE` が `disable`**(dev 等)→ TLS 無し。Rust は `NoTls` でよい。
+- **証明書エラーが出て、かつ上の分岐と食い違う** → まず `tbm deploy` で**再デプロイ**する。注入値は
+  **コンテナ起動の瞬間**に解決されるので、走っているコンテナは古いホスト名を握っている可能性がある
+  (`--resolved` は「次のデプロイでこうなる」値を見せる)。
 - **cache を使う Node アプリ(ioredis)**:**必ず `redis.on("error", …)` を付ける**(未listen の error
   イベントは "Unhandled error event" でプロセスごと落ちる = 起動直後 exit の典型。DB の TLS とは別件だが
   同じ「起動直後 exit」症状になる)。
-- **Rust(`postgres` / `tokio-postgres`)**:`NoTls` では `sslmode=require` に繋がらない。TLS
-  コネクタを渡す(検証なし = `require` の意味に合わせる):
-  ```rust
-  let c = native_tls::TlsConnector::builder().danger_accept_invalid_certs(true).build()?;
-  let mut db = postgres::Client::connect(&url, postgres_native_tls::MakeTlsConnector::new(c))?;
-  ```
+
+**URL を組み直したい / URL が使えないとき**は、同じ注入から**素材の env** も入っている:
+`DATABASE_HOST` / `DATABASE_PORT` / `DATABASE_USER` / `DATABASE_PASSWORD` / `DATABASE_NAME` /
+`DATABASE_SSLMODE`(`--as MYDB_URL` で注入したなら `MYDB_HOST` 等 = `_URL` を剥いだ基底に付く)。
+自分のドライバの作法で接続設定を組める(ORM が URL を受け取らない場合や、TLS を明示制御したい場合)。
 
 迷ったら **起動時ではなくリクエスト時に DB へ繋ぐ**と、失敗が「起動直後 exit」ではなく
 レスポンスのエラーに出て切り分けやすい。
@@ -363,8 +382,10 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | deploy failed(`manifest unknown`) | push は成功したが registry に実体が無い(GC 競合) | 再デプロイで再 push。直らなければ管理者へ(registry cache の毒 — `docker restart tsubomi-registry`) |
 | URL が `/noservice` へ 302 する | `visibility=private`(または未デプロイ/停止) | `tbm service status` で確認 → 公開するなら `tbm service visibility <名前> company` |
 | push が 413 | 単層 >100MB(CF 経由)。直連入口があれば起きない | §「push が 413」。無ければ層を小さく |
-| Node/Next が起動直後 exit / DB で 502 | `pg` が `sslmode=require` を verify-full 扱い | §3.1(URL から sslmode を外し `ssl:{rejectUnauthorized:false}`)+ ioredis に `on("error")` |
+| Node/Next が DB の証明書エラーで落ちる | 注入ホスト名と証明書が一致しない部署(または古いホスト名を握ったコンテナ) | §3.1 の分岐(`DATABASE_HOST` を見る)→ 一致するなら再デプロイ、しないなら検証を切る |
+| Node/Next が起動直後 exit(DB 以外) | ioredis の error イベント未listen | §3.1(`redis.on("error", …)` を付ける) |
 | Rust が起動直後 exit(DB 接続) | `NoTls` で `sslmode=require` に繋げない | §3.1(`postgres-native-tls` で TLS コネクタを渡す) |
+| ORM / ライブラリが URL 形を受け取らない | URL 一本で組めないケース | §3.1 の素材 env(`DATABASE_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`) |
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict` | 名前が既出 | 別名にする |
 | `code: validation` | 入力不正 | メッセージに従う |

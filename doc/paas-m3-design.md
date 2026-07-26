@@ -531,11 +531,15 @@ UI/CLI で「失効」表示。service は普通に起動する(第 4 層 §5、
 
 - 解決するのは **app role**(human ではない)→ 「外部 key の rotate が走る service を
   切らない」が成立(第 4 層 §2)。
-- 文字列 = `postgres://<app_role>:<app_pass>@tsubomi-pgbouncer:6432/<pg_dbname>?sslmode=require`
-  - host = **docker DNS の `tsubomi-pgbouncer`**(pgbouncer が edge に参加 — §3.4)。
-    コンテナは社外に出ず、公開ホスト名のヘアピンも不要。
-  - `sslmode=require`:pgbouncer は平文を拒否(M1 の client TLS)。自己署名なので
-    CA 検証はしない(`require` は検証しない)。
+- 文字列 = `postgres://<app_role>:<app_pass>@<db_internal_host>:6432/<pg_dbname>?sslmode=require`
+  - host = **docker DNS で引く `TSUBOMI_DB_INTERNAL_HOST`**。本番はこれを pgbouncer 証書の公開名
+    (`db.<ドメイン>`)にし、平台が同名を **per-service 私網の網別名**として付ける(§11 決定 A')。
+    コンテナは社外に出ない(公網 DNS は docker 内蔵 DNS が遮蔽 = ヘアピンしない)。
+  - `sslmode=require`:pgbouncer は平文を拒否(M1 の client TLS)。**`require` の意味は駆動系で
+    割れている**(libpq = 検証しない / node-postgres = 厳格に検証)ので、ホスト名を証書に揃えて
+    両方通す(正本 = `doc/paas-db-public-design.md`「証書名は仕組みの一部」)。
+  - 加えて**素材の env** も注入する(`_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`)—
+    URL 形を受け取らない利用側のため(§0-H の一般化)。
   - human が手にする外部文字列(`tbm db connect` / `/url`)は従来どおり
     `db.<ドメイン>:6432`(会社 CIDR)。**別 role の別文字列**。ユーザに見えるのは外部
     1 本だけ、内部は平台が注入する不可視の配管(第 4 層 §5)。
@@ -680,6 +684,47 @@ Button/Dialog を踏襲(frontend 規約)。
 | **G** | **TLS = 既定 LE TLS-ALPN-01(按需・子域ごと)、DNS 厂商非依存**。DNS-01 通配证は配置級のオプション升级 | §1 で :80/:443 公開・ipAllowList は L7 ⇒ LE が公網から子域を検証可。`*.<ドメイン>` A レコード(API 不要)だけで足る | DNS-01 通配を既定(provider API 要)/ 内部 CA(ブラウザ警告) |
 | **H** | **traefik は file provider のみ(docker provider 不使用)**。平台が `svc-<id>.yml`(ルート、route.rs)を、ipblock が `ipallow.yml`(middleware)を `traefik_dynamic_dir` に書く。**形式は .yml** | **実測で確定**:Docker Engine 29 が最小 API を 1.40 に上げ、traefik の docker クライアントは 1.24 に落ちて弾かれ provider が全コンテナを見失う(404)。file provider は docker API 不要・docker.sock マウントも不要。traefik directory provider は **.json を無視**(実測)するので YAML 必須 | docker provider(Docker 29 で壊れる)/ socket proxy で API バージョン書換(部品増・未確認) |
 
+### 決定 A' — 注入ホスト名を証書の公開名に寄せる(2026-07-26 修正。A の代替案の再評価)
+
+決定 A は代替案として「注入文字列も外部 `db.<ドメイン>:6432` にする」を**否決**していた。理由は
+「§1 の DOCKER-USER bridge 許可が前提、**ヘアピン依存**」— つまり公網 DNS 経由で自ホストへ回り込む形を
+想定していた。**その前提は消えた**ので、名前だけをその形に寄せる:
+
+- **やること**:`TSUBOMI_DB_INTERNAL_HOST` を pgbouncer の client TLS 証書と同じ公開名(`db.<ドメイン>`)
+  にし、**その名前を docker 網別名として pgbouncer に生やす**。生やす場所は **per-service 私網**
+  (`services/network.rs::pgbouncer_aliases`。infra を私網へ attach する時に渡す)— テナント容器は
+  M6 網隔離で自分の私網にしか居ないので、**compose 側で `tsubomi-edge` に別名を付けても見えない**
+  (edge は残骸。ここを間違えると「設定したのに効かない」になる)。
+- **ヘアピンしない**:docker 内蔵 DNS が公網 DNS より先に別名を返すので、解決先はコンテナの網内 IP。
+  DOCKER-USER の bridge 許可も要らない(A の否決理由が両方とも成立しない)。egress は同 subnet RETURN で
+  素通り = 不変。
+- **別名は初回 connect 時にしか付かない**ので、この変更より前から在る私網には後付けが要る:
+  server 起動時に `network::migrate_pgbouncer_aliases` が inspect して、別名の無い私網だけを
+  disconnect → 別名付き reconnect する(その service の DB 接続が一瞬切れる。放置すると注入ホストが
+  公網 DNS に落ちて**通信が網外へ出る**方が悪い)。別名不要な部署(容器名と同じ)では no-op。
+- **traefik の公開 DB 後端は分離した**:`ipblock.rs` は**容器名**で pgbouncer を指す。注入ホスト名は
+  「証書の身元」、traefik 後端は「配管先」で別の関心事 — 後端に公開名を書くと、その名前が引けない
+  瞬間に公網 DNS へ落ちて traefik が自分自身へ転送する自環になる。
+- **なぜ必要になったか**:`sslmode=require` の意味が**駆動系で割れている**(libpq = 証書を検証しない /
+  node-postgres = 厳格に検証)。容器名のままだと証書の名前と食い違い、**厳格に検証する駆動系だけが
+  繋がらない**という非互換になる(AI 利用フィードバック 2026-07-26 で実際に踏まれた)。名前を証書に
+  揃えると同じ 1 本の URL で両系統が通る。`verify-full` へ上げる案は却下 — libpq 側に
+  `sslrootcert=system` が必要になり、それが今度は node 側で壊れる(接続文字列のパスとして読まれる)=
+  非互換を別の駆動系へ移すだけ。
+- **引き受けたコスト**:LE 証書が**全テナント app の生命線**になった(以前は検証されないので切れても
+  内部注入は動いていた)。更新の自動化(acme.sh `--reloadcmd` = `deploy/db-public/reload-pgb-cert.sh`)と
+  DR 手順・期限監視が**必須**になる(`doc/paas-dr-restore-runbook.md` §E)。
+- **移行手順(この順で)**:①`.env.production` に新しい値を入れる ②server を入れ替え / 再起動する
+  (`ship` の `up -d server` でよい。**pgbouncer の再作成は不要**)→ 起動時に既存私網へ別名が付く
+  ③**DB 注入済み service を順に再デプロイ**する。
+  - **③ を省くと直らない**:注入値は**コンテナ起動の瞬間**に解決されるので、走行中のコンテナは
+    古いホスト名(容器名)を握ったままで、厳格検証する駆動系は依然繋がらない。
+  - **② で各 service の DB 接続が 1 度切れる**:別名の後付けは force-disconnect → reconnect なので、
+    その私網の張られていた TCP セッション(実行中トランザクション含む)が service ごとに 1 回落ちる。
+    プールは張り直すが、告知してから実施するのが望ましい。
+  - **古い server + 新しい変数の組は起こり得ない**(変数を読むのも別名を付けるのも server なので同時に
+    切り替わる)。逆に**新しい server + 古い変数**は単に従来動作(別名なし = no-op)。
+
 ---
 
 ## 12. 完了判定(第 4 層 §9 の M3 行を満たす)
@@ -748,13 +793,20 @@ TSUBOMI_REGISTRY_PUSH=registry.tsubomi.wgzhao.me   # ← これが pull と別 =
 TSUBOMI_PLATFORMS=linux/arm64
 TSUBOMI_EDGE_NETWORK=tsubomi-edge
 TSUBOMI_TRAEFIK_DYNAMIC_DIR=/srv/tsubomi/traefik-dynamic
-TSUBOMI_DB_INTERNAL_HOST=tsubomi-pgbouncer
+TSUBOMI_DB_INTERNAL_HOST=db.<域名>   # pgbouncer の client TLS 証書と同じ公開名にする(下記注)
 TSUBOMI_DB_INTERNAL_PORT=6432
 TSUBOMI_DB_PUBLIC_HOST=<外部接続用ホスト>
 TSUBOMI_DB_SSLMODE=require
 ```
 (既存の `PG_*` / `PGBOUNCER_*` / `TENANT_ADMIN_URL` / `TSUBOMI_MASTER_KEY` / `GOOGLE_*` / `TSUBOMI_ALLOWED_HD` /
 `TSUBOMI_OWNER_EMAILS` / `PGBOUNCER_BIND_ADDR=0.0.0.0` はそのまま。)
+
+> **注:`TSUBOMI_DB_INTERNAL_HOST` は pgbouncer の client TLS 証書と同じ名前にする**(容器名ではなく
+> `db.<域名>`)。平台がこの値を **per-service 私網の網別名**として pgbouncer に付けるので、通信は網内の
+> まま(公網 DNS は docker 内蔵 DNS が遮蔽)。容器名のままだと証書の名前と食い違い、`sslmode=require` を
+> 「厳格に検証」と解釈する駆動系(node-postgres 等)だけが繋がらない、という駆動系依存の非互換になる。
+> 詳細は §11 決定 A'。**値は host 名のみ**(port を含めると全テナントの URL が壊れる — 起動時に検証して
+> 落ちる)。変更は server の入替/再起動で効く(既存私網には起動時に別名を後付けする)。
 
 **3. 起こす**:
 1. 開発機で `just release-image`(既定 amd64+arm64。`REGISTRY=docker.io/<you>` 等)→ `compose.prod.yml` の

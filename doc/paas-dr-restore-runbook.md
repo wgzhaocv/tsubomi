@@ -16,6 +16,8 @@ AI 審査 R11 への回答:日次バックアップ(`gc.rs::run_backup`)は「�
 | 日次バックアップ | `/srv/tsubomi/backups/YYYY-MM-DD/` | サーバプロセスが毎日生成、**7 日で自動削除**(`BACKUP_RETAIN_DAYS`) |
 | compose 定義 | `~/tsubomi-deploy/compose.prod.yml` | `just ship` が毎回配布(git にもある) |
 | .env.production | Pi のみ(git に無い) | master key / valkey admin pass / owner 種など。**これ自体も控えを取る** |
+| **acme.sh のアカウント + DNS API トークン** | Pi の `~/.acme.sh/`(`CF_Token` 等は同ディレクトリの account.conf) | **新たな単点**(2026-07-26)。`db.<域名>` の証書を再発行できないと、注入ホスト名が証書と食い違い**厳格検証する駆動系の app が全滅**する(§E)。バックアップに入っていない — 別途控える |
+| 証書更新 hook | 正本 = git の `deploy/db-public/reload-pgb-cert.sh`(cache 側は `deploy/cache-public/`) | ホストへは**手で配置**して acme.sh の `--reloadcmd` に登録する(compose は参照しない)。§5 で再配置が必要 |
 
 バックアップディレクトリの中身(1 日分):
 
@@ -135,10 +137,44 @@ app が bind mount で見ているのはホスト側の実ディレクトリな�
    §2 で管制面を復元(server はまだ起こさない)。
 4. §3 の「クラスタごと失った場合」の手順で各テナント DB を復元(role 再作成 + rotate)。
 5. `volumes/` を `/srv/tsubomi/volumes/` へ rsync(§4、こちらは全量で良い)。
+5.5. **pgbouncer の証書を戻す**(server より先。§E の予防):acme.sh を入れ直し、控えた
+   アカウント / DNS トークンで `db.<域名>` を発行 → `deploy/db-public/reload-pgb-cert.sh` を
+   ホストへ配置して `--reloadcmd` に登録。**pgbouncer を起こしてから**手で 1 度実行する
+   (未起動だと「次回起動で反映」と言って正常終了するだけで、閉環確認まで進まない)。
+   pgbouncer 稼働中なら、スクリプトは serving 証書の指紋が入れた物と一致するまで確認し、
+   **一致しなければ非零で終わる** — subject / notAfter が出れば成功。
+   **acme.sh を通せないなら**、その間は `.env.production` の `TSUBOMI_DB_INTERNAL_HOST` を
+   **容器名(`tsubomi-pgbouncer`)へ戻しておく** — 種の自己署名では厳格検証する駆動系が繋がらないので、
+   検証しない駆動系だけでも動く状態に倒す(後で証書を入れたら戻して server 再起動 + 再デプロイ)。
 6. 残りの infra + server を起こす:`docker compose -f compose.prod.yml up -d`。
 7. **全 service を再デプロイ**(registry イメージはバックアップ外。CI 再実行か
    `tbm deploy --local`。rotate した DB の新パスワードもこの再デプロイで注入される)。
 8. DNS / CF Tunnel を新機へ向け直す。
+
+---
+
+## 5.9. E: pgbouncer 証書の失効・期限切れ(全テナント app の DB が落ちる)
+
+**症状の見え方が厄介**:注入ホスト名は pgbouncer 証書の公開名に揃えてあるので(m3 設計 §11 決定 A')、
+証書が切れる / 名前が食い違うと **`sslmode=require` を厳格検証する駆動系(Node の `pg` 等)だけ**が
+TLS エラーで落ちる。libpq 系(Go / Python)は検証しないので**平然と動き続ける** ⇒ 「一部の app だけ壊れた」
+ように見えて、共通原因(証書)に辿り着きにくい。**複数 app が同時に DB エラーを出したら最初にここを見る**。
+
+```bash
+# 1. 今出ている証書を確認(notAfter が過去 / 名前が db.<域名> でない = これ)
+ssh <host> 'openssl s_client -connect 127.0.0.1:6432 -starttls postgres </dev/null 2>/dev/null |
+  openssl x509 -noout -subject -dates'
+# 2. 更新して反映(hook が卷へ入れて SIGHUP、末尾で反映後の証書を印字する)
+ssh <host> '~/.acme.sh/acme.sh --renew -d db.<域名> --ecc --force && ~/reload-pgb-cert.sh'
+```
+
+**5 分の退路**(証書をすぐ直せない時):`.env.production` の `TSUBOMI_DB_INTERNAL_HOST` を
+`tsubomi-pgbouncer` に戻し、server を入れ替え(`just ship` の `up -d server` で足りる)、影響 service を
+**再デプロイ**する(注入値は起動の瞬間に解決されるため)。これで検証しない駆動系は復活する。
+Node 側は §3.1 の「容器名のとき」の書き方(`rejectUnauthorized:false`)に倒す。
+
+**予防**:acme.sh の日次 cron + `--reloadcmd` が入っていること、`~/.acme.sh/acme.sh --list` の
+`Renew` 列が未来日であることを演練時に確認する(§7)。更新は 60 日毎なので**沈黙する窓が長い**。
 
 ---
 
@@ -147,11 +183,14 @@ app が bind mount で見ているのはホスト側の実ディレクトリな�
 - **platform.sql を「動いている」管制面に重ね掛けしない**(必ず空 DB に流す。重複行で半端に死ぬ)。
 - **master key を変えたまま復元しない**(暗号列が全部開けなくなる。復元は必ず同じ鍵で)。
 - 復元中に server を走らせない(reconcile が中途半端な DB を正として孤児掃除を始める)。
+- **`pgb_tls` 卷を消さない / certgen を再実行させない**:`if [ ! -f ]` なので卷が空だと**自己署名の種が
+  静かに再生成**され、注入ホスト名と食い違って §E の状態になる(LE 証書の再配置が必要)。
 
 ## 7. 演練(年 1 回)
 
 dev か予備機で:①最新バックアップを取り寄せ ②§2 を実施 ③テナント 1 本を §3 で復元
-④`tbm db query` で実データを確認 ⑤所要時間を本書末尾に記録。
+④`tbm db query` で実データを確認 ⑤**証書更新の演練**(`acme.sh --list` の Renew 列が未来日か +
+`--renew --force` → `reload-pgb-cert.sh` の後で app が切れないか)⑥所要時間を本書末尾に記録。
 **「復元したことのないバックアップはバックアップではない」**。
 
 | 演練日 | 実施者 | 所要 | メモ |
