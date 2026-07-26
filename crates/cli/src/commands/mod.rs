@@ -78,7 +78,7 @@ pub fn resolve_server_from(over: Option<&str>, cfg: Option<&Config>) -> String {
 /// 優先順位:--token / TSUBOMI_TOKEN > 保存済み設定。
 pub fn resolve_token_from(over: Option<String>, cfg: Option<Config>) -> Result<String> {
     over.or_else(|| cfg.and_then(|c| c.token))
-        .context("not logged in (run: tbm login)")
+        .context("ログインしていません(`tbm login` を実行してください)")
 }
 
 /// 現在の unix 秒(deploy hook の ts / logs --follow の再接続カーソルが共有)。

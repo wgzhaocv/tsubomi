@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
     if let Some(latest) = nudge {
         let current = env!("CARGO_PKG_VERSION");
         eprintln!(
-            "note: tbm {latest} is available (you have {current}). Run 'tbm update' to upgrade."
+            "note: tbm {latest} が利用可能です(現在 {current})。`tbm update` で更新できます。"
         );
     }
 
@@ -194,6 +194,7 @@ async fn main() -> Result<()> {
             );
         }
     } else if is_deploy
+        && skill_nudge_due()
         && let Some(p) = skill::claude_skill_path()
     {
         eprintln!(
@@ -217,6 +218,25 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     result
+}
+
+/// deploy の「skill を読め」案内を出すか(24h に 1 度)。**毎回出すと読んだ後は雑音**になり、
+/// 本当に読むべき警告(未反映の注入・crash の exit code 等)が埋もれる。version_check と同じ
+/// 刻印方式:出すと決めた時にだけ config へ現在時刻を書く(書けなければ出さない側に倒す =
+/// 刻印できないのに出し続ける状態を作らない)。skill 内容が変わった時は呼び出し側が別枝で必ず出す。
+fn skill_nudge_due() -> bool {
+    use chrono::Utc;
+    const COOLDOWN_HOURS: i64 = 24;
+    let Ok(Some(mut cfg)) = config::load() else {
+        return false; // 未ログイン等 = 設定が無い。刻印できないので出さない。
+    };
+    if let Some(last) = cfg.last_skill_nudge
+        && (Utc::now() - last) < chrono::Duration::hours(COOLDOWN_HOURS)
+    {
+        return false;
+    }
+    cfg.last_skill_nudge = Some(Utc::now());
+    config::save(&cfg).is_ok()
 }
 
 #[cfg(test)]

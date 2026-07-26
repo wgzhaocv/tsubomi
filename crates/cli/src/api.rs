@@ -55,7 +55,7 @@ pub async fn fetch_me(server_url: &str, token: &str) -> Result<Me> {
     let status = resp.status();
     if !status.is_success() {
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
-            "token invalid (run: tbm login)".to_owned()
+            "トークンが無効です(`tbm login` を実行してください)".to_owned()
         } else {
             let body = resp.text().await.unwrap_or_default();
             format!("/api/auth/me failed: HTTP {status} {body}")

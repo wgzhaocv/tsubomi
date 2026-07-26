@@ -44,6 +44,12 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 
 ## 2. リソースを作る(必要なものだけ)
 
+> **create の前に決めること(後から変えられない)**:`--port` / `--stateful` / `--github` は
+> **作成時のみ有効**で、選び直すには**削除して作り直す**しかない。つまり `tbm service create` の前に
+> 「デプロイ経路(§4)」「listen ポート」「自帯 DB か(§3.2)」を決めておく。逆に `--visibility` /
+> `--memory` / `--cpus` は後から変えられる(`tbm service visibility …`)。
+> 作成直後の回显に port / visibility / stateful / memory が出るので、**意図と違ったらその場で作り直す**。
+
 - service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 経路(既定)で出すなら、この
   作成時に `--github` を付ける**(repo/secret/variable と workflow 設定までこの 1 回で済む。§4 参照)。
   `--github` は**作成時のみ有効**(付け忘れた既存 service には効かず、再 create は重名 409)。GitHub 経路なら

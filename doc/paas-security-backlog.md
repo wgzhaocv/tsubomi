@@ -79,3 +79,8 @@ codex の監査(2026-06-17)で挙がった指摘のうち、**「直すべきだ
   あるいはログ参照だけ保存し全文は docker logs から権限付きで即時取得。**ログ尾は排障に有用なので redaction の質と要相談**。
 - **(Low/既出)viewer login のレート制限**(`admin/viewer.rs`):CLAUDE.md M4 §で既に「否決(後相)」と明記済み。
   現状 bcrypt + 最小長 8 のみ。修復:user/session/IP で滑动窗口 + 失敗退避、失敗を audit、または owner 招待式 viewer grant。
+- **(Low/受容)`service create` が deploy_key / registry pass を平文で端末に出す**(`crates/cli/src/commands/service.rs`
+  の text 経路 + json 既定経路、`services/workflow.rs` の `setup_commands`):秘密が shell の scrollback に残る
+  (AI 利用フィードバック 2026-07-26 で指摘)。**ユーザ判断で現状維持**:gh が無い環境ではこの手順そのものが
+  交付物で、隠すと「値が要るのに取れない」になる。gh が使える経路では既に stdin 渡しで argv には出していない。
+  緩和したくなった時の形:既定では出さず `--show-setup` で明示的に取り出す(text/json 両方)。

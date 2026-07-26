@@ -12,7 +12,9 @@ pub async fn run(_server_override: Option<String>, out: OutputFormat) -> Result<
         }))?;
     } else {
         println!("ok");
-        eprintln!("note: server-side token is still valid; revoke it from the web tokens page");
+        eprintln!(
+            "note: サーバ側のトークンはまだ有効です。失効させるには web のトークン画面から削除してください。"
+        );
     }
     Ok(())
 }

@@ -23,6 +23,11 @@ pub struct Config {
     /// 落ちているサーバ相手に毎回 1 秒のタイムアウトを払わないため。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_version_check: Option<DateTime<Utc>>,
+    /// deploy の度に出していた「skill を読め」の案内のクールダウン刻印(24h)。
+    /// 毎回出すと**読んだ後は雑音**で、本当に読むべき警告が埋もれる(AI フィードバック 2026-07-26)。
+    /// skill の内容が変わった時(`skill::ensure_fresh` が true)は刻印を無視して必ず出す。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_skill_nudge: Option<DateTime<Utc>>,
 }
 
 fn project_dirs() -> Result<ProjectDirs> {

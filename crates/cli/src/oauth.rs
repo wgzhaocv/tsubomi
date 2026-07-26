@@ -67,7 +67,7 @@ pub async fn exchange_code(
     state: &str,
 ) -> Result<String> {
     if !code.starts_with(AUTHCODE_PREFIX) {
-        bail!("invalid code (must start with '{AUTHCODE_PREFIX}')");
+        bail!("コードの形式が不正です(`{AUTHCODE_PREFIX}` で始まる必要があります)");
     }
     let resp = reqwest::Client::new()
         .post(format!("{server_url}{OAUTH_TOKEN_PATH}"))
@@ -85,7 +85,7 @@ pub async fn exchange_code(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        bail!("token exchange failed: HTTP {status} {body}");
+        bail!("トークン交換に失敗しました: HTTP {status} {body}");
     }
     let parsed: TokenResp = resp
         .json()

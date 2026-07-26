@@ -615,6 +615,7 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
         "サービスを作成しました:{} (service{}, subdomain={})",
         svc.display_name, svc.anon_seq, svc.subdomain
     );
+    print_created_shape(resp);
 
     // 1. ローカル workflow ファイル(gh 不要)。無ければ書く。
     write_workflow_file(&resp.workflow_yaml)?;
@@ -638,6 +639,45 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
     );
     Ok(())
 }
+
+/// 作成された service の**形**を回显する(text)。`--port` を指定すると `visibility` の既定が
+/// 連動して変わる(8080 以外 → private)ので、**推導された事実をその場で見せる** — 引数 1 つが
+/// 一見無関係な項目を動かす「隔空作用」を、黙って起こさないための回显(AI フィードバック 2026-07-26)。
+/// 作成後に変えられないもの(port / stateful)も併記する。
+fn print_created_shape(resp: &CreateServiceResp) {
+    let svc = &resp.service;
+    eprintln!(
+        "  port={} / visibility={} / stateful={} / memory={}MB{}",
+        svc.container_port,
+        svc.visibility,
+        svc.stateful,
+        svc.memory_mb,
+        svc.cpu_limit_millis
+            .map(|m| format!(" / cpus={:.2}", m as f64 / 1000.0))
+            .unwrap_or_default()
+    );
+    // visibility を明示しなかったのに非既定になった = port から推導された、と分かる場合だけ言う。
+    if svc.container_port != PLATFORM_HTTP_PORT && svc.visibility == tsubomi_shared::VISIBILITY_PRIVATE {
+        eprintln!(
+            "  ※ port {} は HTTP 契約港({})ではないので visibility={} を推導しました\
+             (公開したいなら `tbm service visibility {} company`)",
+            svc.container_port,
+            PLATFORM_HTTP_PORT,
+            tsubomi_shared::VISIBILITY_PRIVATE,
+            svc.display_name
+        );
+    }
+    if svc.stateful {
+        eprintln!(
+            "  ※ stateful = デプロイは stop-first(数秒の瞬断と引き換えにデータ目録を単独占有)。\
+             データは volume 注入に置くこと"
+        );
+    }
+    eprintln!("  ※ port / stateful は作成後に変更できません(変えるには作り直し)");
+}
+
+/// 平台の HTTP 契約港。`visibility` 推導の基準(真源はサーバ。ここは回显の説明用)。
+const PLATFORM_HTTP_PORT: i32 = 8080;
 
 /// gh で repo(冪等)→ secrets(値は argv に載せず stdin で渡す = `ps` で見えない)→ variables を
 /// 設定し、ローカルの `tsubomi` remote も確実にする。設定した repo (`owner/sub`) を返す。

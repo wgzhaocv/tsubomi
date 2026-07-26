@@ -240,6 +240,17 @@ shared は `SetServiceVisibilityReq { visibility: String }` + `ServiceDto` に
 
 - **§10-A 部分公開**(per-path / Basic 認証 / 署名付き URL):三態で満たせない要件が実際に出たら別設計。
   traefik middleware の積み増しで実現可能な下地(route ファイル生成の分岐)は本設計で既に在る。
+  - **2026-07-26:その「実際に出た要件」が来た**(AI 利用フィードバック)。曰く「**自分だけが見たい**」
+    用途に当てる档が無い — `company` は**会社 IP 許可リスト**なので社外(携帯回線等)から届かず、
+    結局 `public` + アプリ側で自作の口令闸門を書くことになった。
+  - **今回は実装しない**。理由は規模:平台層で「人」を認証するには traefik forwardAuth + 管制面の
+    判定端点が要るが、**session cookie は host-only**(管制面は apex、service は一級子域)なので
+    そのまま転送しても cookie が付かない。`Domain=.<域名>` へ緩めるのは**却下** — テナント app と
+    same-site になる前提で組んである既存の防御(`config.rs` の control_origins / WS の Origin 門)を
+    土台から崩す。よって oauth2-proxy 式に「未認証なら管制面へ 302 → 限定スコープの子域 cookie を
+    別途署名」する流れが必要で、独立した設計文書に値する。
+  - **§10-D と混同しないこと**:あちらが否決したのは「**リンク先からのみ許可**」= service 間の ACL で、
+    M6 網隔離が代替する話。今回の要件は「**人**の認証」で別物 — §10-D は本件の否決理由にならない。
 - **§10-B admin(owner)面への visibility 表示・代理切替**:owner ガバナンスは「見る=匿名化 /
   最後の砦=停止・削除」の現行二層で足りる。visibility はユーザの自資源操作(CLI/web の通常入口)。
 - **§10-C `route::ensure` 汎化**(§3 冒頭に理由)。

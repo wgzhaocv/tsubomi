@@ -347,7 +347,7 @@ async fn run_watch(
     }
     let run = wait_for_run(&sha, repo.as_deref(), remaining()).await?;
     // run URL は追跡先として常に出す(捕捉側が持てるよう stderr へ)。
-    eprintln!("Actions run: {}", run.url);
+    eprintln!("Actions の実行: {}", run.url);
 
     // 3) run の完了を待つ。text は `gh run watch`(ログを継承、時間管理は gh)、json は静かに輪詢。
     if json {
