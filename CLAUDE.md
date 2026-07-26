@@ -473,10 +473,12 @@ just check        # cargo check + clippy -D warnings + web lint
   `-infinity` を回填 → sqlx が `DateTime<Utc>` に読めず panic。dev は既存行が無いので**新規作成の e2e では
   一度も踏まなかった**)。一般形:**既存データだけが踏む穴は、新規作成の検証では見えない**。
   時刻列は `20260727000001` の CHECK(有限値)で書き込み側も塞いである。
-- **`panic = "abort"`(ワークスペースの release profile)なので、ハンドラ内の panic は
-  プロセスごと落とす**。`restart: unless-stopped` が拾うが、**進行中の deploy は失敗扱いになり
-  WS(logs --follow / terminal)も切れる**。「1 リクエストの失敗」で済まないので、リクエスト経路で
-  panic し得るコード(unwrap / 範囲外の値の decode)を書かない。診断は DR runbook §5.95。
+- **panic はそのリクエストに閉じ込める**:`panic = "abort"` は**外した**(2026-07-26)+ router に
+  `CatchPanicLayer`。以前は abort だったので、ハンドラ 1 つの panic が**プロセスごと**落とし、
+  進行中の他人のデプロイが失敗扱いになり WS も切れていた(実際に sqlx の decode panic で発生)。
+  今は 500 に閉じ込まる(panic はログに残る)。代償は unwind テーブル分のバイナリ増
+  (配布する tbm も同じ profile:実測 1.80MB → 2.14MB / +19%)— 管制面は他人の app を預かる側
+  なので、この交換を選んだ。それでもリクエスト経路で panic し得るコードは書かない(500 は 500)。
 - **適用済みマイグレーションは不変**(`migrations/*.sql`)。sqlx はファイル全体の
   checksum を取るので、**コメント 1 文字でも変えると本番 DB の記録と不一致**になり、
   server が起動時のマイグレーション検証で落ちて 502 になる(2026-06-24 の本番障害=

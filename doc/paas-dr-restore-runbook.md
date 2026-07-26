@@ -183,13 +183,18 @@ Node 側は §3.1 の「容器名のとき」の書き方(`rejectUnauthorized:fa
 
 **バックアップもホストも無傷なのに読めない**型。2026-07-26 に実際に起きた:migration が既存行を
 `'-infinity'` で回填したが、Postgres の infinity は Rust の `DateTime<Utc>` に読み込めず sqlx が panic。
-この平台は **`panic = "abort"`**(ワークスペースの release profile)なので、**1 リクエストの panic で
-server プロセスが落ちる** — `restart: unless-stopped` がすぐ拾い、起動時 reconcile が丁寧に収束させる
-ので、外からは「その端点だけ壊れている」ように見える。実際の波及:
+当時この平台は **`panic = "abort"`** だったので、**1 リクエストの panic で server プロセスが落ちた** —
+`restart: unless-stopped` がすぐ拾い、起動時 reconcile が丁寧に収束させるので、外からは「その端点だけ
+壊れている」ように見えた。実際の波及:
 
 - **進行中の deploy が `failed`(`error='server がデプロイ中に再起動しました'`)になる** — 他人の
   デプロイが、誰かが web の env タブを開くたびに死ぬ。
 - `logs --follow` / web terminal(WS)/ `tbm deploy --local` のアップロードが全切断。
+
+**この波及は 2026-07-26 に塞いだ**(`panic = "abort"` を外し router に `CatchPanicLayer`)。
+以後の panic は**そのリクエストが 500** になるだけで、プロセスは生き続ける(panic はログに残る)。
+つまり今この型を踏んだら **「特定の端点だけ 500」+ ログに `panicked at`** という、より素直な形で出る
+— 再起動が増えないので `RestartCount` は手掛かりにならない。診断は下の 1) をログ中心に読む。
 
 ```bash
 # 1) 診断(この 3 つで型が確定する)

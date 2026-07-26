@@ -5,6 +5,7 @@ use crate::cli_release;
 use crate::state::AppState;
 use axum::routing::{get, post};
 use axum::{Json, Router, middleware};
+use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::trace::TraceLayer;
 use tsubomi_shared::Health;
 
@@ -57,6 +58,11 @@ pub fn build_router(state: AppState) -> Router {
         // fallback にすることでクライアントサイドのルート(/oauth/authorize
         // など)も解決する。amber と同じ配信方式。
         .fallback_service(web::fallback(&state.config.web_dir))
+        // **panic をそのリクエストに閉じ込める**(TraceLayer より内側 = panic もログに残る)。
+        // これが無いと、ハンドラ内の panic が**プロセスごと**落とし、進行中の他人のデプロイが
+        // 失敗扱いになり WS も切れる(2026-07-26 に sqlx の decode panic で実際に起きた。
+        // DR runbook §5.95)。ここで 500 に変換して他のリクエストを守る。
+        .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

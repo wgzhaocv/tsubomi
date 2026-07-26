@@ -6,4 +6,8 @@ members = ["crates/server", "crates/cli", "crates/shared", "crates/sni-gate"]
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# **`panic = "abort"` は意図的に付けない**(2026-07-26 に外した)。管制面は他人の app を預かる
+# サーバで、ハンドラ内の 1 つの panic でプロセスが落ちると**進行中の他人のデプロイが失敗扱いに
+# なり**、WS(logs --follow / terminal)も全部切れる。実際に sqlx の decode panic で起きた
+# (DR runbook §5.95)。unwind + `CatchPanicLayer` にして「その 1 リクエストが 500」に閉じ込める。
+# 代償は unwind テーブルの分だけバイナリが大きくなること(配布する tbm も同じ profile)。
