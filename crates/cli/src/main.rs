@@ -194,8 +194,8 @@ async fn main() -> Result<()> {
             );
         }
     } else if is_deploy
-        && skill_nudge_due()
         && let Some(p) = skill::claude_skill_path()
+        && skill_nudge_due()
     {
         eprintln!(
             "note: デプロイ手順は skill にあります({})。未読ならまず読んでから進めてください。",
@@ -228,7 +228,10 @@ fn skill_nudge_due() -> bool {
     use chrono::Utc;
     const COOLDOWN_HOURS: i64 = 24;
     let Ok(Some(mut cfg)) = config::load() else {
-        return false; // 未ログイン等 = 設定が無い。刻印できないので出さない。
+        // 設定ファイルが無い層(CI / コンテナ / AI が `TSUBOMI_TOKEN` だけで動かす)では刻印できない。
+        // ここで false にすると**案内が二度と出ない** — AI に読ませるのが目的なので、
+        // 刻印の有無と表示の有無を結び付けず「毎回出す」(= 変更前の挙動)側に倒す。
+        return true;
     };
     if let Some(last) = cfg.last_skill_nudge
         && (Utc::now() - last) < chrono::Duration::hours(COOLDOWN_HOURS)

@@ -478,7 +478,7 @@ pub async fn run(
                     print_json(&resp)?;
                 }
             } else {
-                orchestrate(&resp)?;
+                orchestrate(&resp, visibility.is_none())?;
             }
         }
     }
@@ -538,8 +538,10 @@ fn print_status(
         println!("  url:         {}{suffix}", svc.url);
     }
     // 旧サーバ(フィールド無し = 空文字)は行ごと出さない。
+    // port / stateful / memory / cpus は**作成後に変えられない**のに、以前は作成時に 1 度回显する
+    // だけで後から確認する手段が無かった。create と同じ 1 行を共有して出す。
     if !svc.visibility.is_empty() {
-        println!("  visibility:  {}", svc.visibility);
+        println!("  形:          {}", shape_line(svc));
     }
     if let Some(d) = &svc.image_digest {
         println!("  digest:      {}", short_digest(d));
@@ -548,7 +550,7 @@ fn print_status(
         println!("  last deploy: {t}");
     }
     if !injections.is_empty() {
-        println!("  注入(反映には再デプロイ):");
+        println!("  注入:");
         for i in injections {
             let stale = if i.valid { "" } else { "  [失効]" };
             // 走行中コンテナより後に作られた注入 = まだ効いていない。「env が無い」症状の真因が
@@ -609,13 +611,13 @@ pub(crate) fn short_sha(s: &str) -> String {
 
 /// text モード:ローカル workflow を置き、gh が使えれば repo/secret/variable を組み立てる。
 /// gh が無い / 未ログインなら手順を表示してフォールバックする(値は stdout、警告は stderr)。
-fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
+fn orchestrate(resp: &CreateServiceResp, visibility_derived: bool) -> Result<()> {
     let svc = &resp.service;
     eprintln!(
         "サービスを作成しました:{} (service{}, subdomain={})",
         svc.display_name, svc.anon_seq, svc.subdomain
     );
-    print_created_shape(resp);
+    print_created_shape(svc, visibility_derived);
 
     // 1. ローカル workflow ファイル(gh 不要)。無ければ書く。
     write_workflow_file(&resp.workflow_yaml)?;
@@ -640,31 +642,34 @@ fn orchestrate(resp: &CreateServiceResp) -> Result<()> {
     Ok(())
 }
 
-/// 作成された service の**形**を回显する(text)。`--port` を指定すると `visibility` の既定が
-/// 連動して変わる(8080 以外 → private)ので、**推導された事実をその場で見せる** — 引数 1 つが
-/// 一見無関係な項目を動かす「隔空作用」を、黙って起こさないための回显(AI フィードバック 2026-07-26)。
-/// 作成後に変えられないもの(port / stateful)も併記する。
-fn print_created_shape(resp: &CreateServiceResp) {
-    let svc = &resp.service;
-    eprintln!(
-        "  port={} / visibility={} / stateful={} / memory={}MB{}",
+/// service の**形**の 1 行(port / visibility / stateful / memory / cpus)。
+/// create の回显と `status` が共有する — 作成後に変えられない値ほど後で確認したくなる。
+fn shape_line(svc: &ServiceDto) -> String {
+    format!(
+        "port={} / visibility={} / stateful={} / memory={}MB{}",
         svc.container_port,
         svc.visibility,
         svc.stateful,
         svc.memory_mb,
         svc.cpu_limit_millis
-            .map(|m| format!(" / cpus={:.2}", m as f64 / 1000.0))
+            // millicore をそのまま出す(0.12 のような丸めで 125m/999m を誤表示しない)。
+            .map(|m| format!(" / cpus={}m", m))
             .unwrap_or_default()
-    );
-    // visibility を明示しなかったのに非既定になった = port から推導された、と分かる場合だけ言う。
-    if svc.container_port != PLATFORM_HTTP_PORT && svc.visibility == tsubomi_shared::VISIBILITY_PRIVATE {
+    )
+}
+
+/// 作成された service の**形**を回显する(text)。`--port` を指定すると `visibility` の既定が
+/// 連動して変わる(8080 以外 → private)ので、**推導された事実をその場で見せる** — 引数 1 つが
+/// 一見無関係な項目を動かす「隔空作用」を、黙って起こさないための回显(AI フィードバック 2026-07-26)。
+/// `visibility_derived` = ユーザが `--visibility` を渡さなかった(= サーバが推導した)。**推導規則を
+/// CLI で再実装しない** — 真源はサーバの `default_visibility` で、CLI は「指定したか」だけを知る。
+fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
+    eprintln!("  {}", shape_line(svc));
+    if visibility_derived && svc.visibility != tsubomi_shared::VISIBILITY_COMPANY {
         eprintln!(
-            "  ※ port {} は HTTP 契約港({})ではないので visibility={} を推導しました\
-             (公開したいなら `tbm service visibility {} company`)",
-            svc.container_port,
-            PLATFORM_HTTP_PORT,
-            tsubomi_shared::VISIBILITY_PRIVATE,
-            svc.display_name
+            "  ※ visibility={} は port {} から推導されました(明示するなら --visibility / \
+             後から変えるなら `tbm service visibility \"{}\" company`)",
+            svc.visibility, svc.container_port, svc.display_name
         );
     }
     if svc.stateful {
@@ -673,11 +678,12 @@ fn print_created_shape(resp: &CreateServiceResp) {
              データは volume 注入に置くこと"
         );
     }
-    eprintln!("  ※ port / stateful は作成後に変更できません(変えるには作り直し)");
+    // 変更端点があるのは visibility だけ — 他は作り直しになるので、その場で気付けるように言う。
+    eprintln!(
+        "  ※ 作成後に変更できるのは visibility だけです(port / stateful / memory / cpus は作り直し)"
+    );
 }
 
-/// 平台の HTTP 契約港。`visibility` 推導の基準(真源はサーバ。ここは回显の説明用)。
-const PLATFORM_HTTP_PORT: i32 = 8080;
 
 /// gh で repo(冪等)→ secrets(値は argv に載せず stdin で渡す = `ps` で見えない)→ variables を
 /// 設定し、ローカルの `tsubomi` remote も確実にする。設定した repo (`owner/sub`) を返す。
@@ -1100,7 +1106,11 @@ fn print_metrics(name: &str, m: &ServiceMetricsDto) {
         println!("  再起動:   {rc} 回{}", if rc > 0 { "(クラッシュ / 再起動の疑い)" } else { "" });
     }
     if m.oom_killed == Some(true) {
-        println!("  ⚠ 直近の終了は OOM でした(`--memory` を上げるか使用量を減らす)");
+        // memory は作成後に変更できない(変更端点が無い)ので、「上げる」= 作り直しだと明示する。
+        println!(
+            "  ⚠ 直近の終了は OOM でした(使用量を減らす、または `--memory` を上げて**作り直す** \
+             — memory は作成後に変更できません)"
+        );
     }
 }
 

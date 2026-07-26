@@ -342,7 +342,12 @@ pub async fn dump_url(conn_url: &str, dump_path: &Path) -> AppResult<()> {
     if let Some(parent) = dump_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file = std::fs::File::create(dump_path)?;
+    // **一時名へ書いて成功後に rename**(同一目録なので原子的)。最終パスへ直書きすると、途中で
+    // プロセスが死んだとき(panic="abort" / OOM / ホスト再起動)**正規の名前で切り詰められた dump**が
+    // 残り、pg_dump の exit code も見られないので gc の成功判定も素通りする。DR でそれを
+    // `ON_ERROR_STOP=1` で流し込むと「旧 DB を退避した後に途中で止まる」= 最悪の姿になる。
+    let tmp_path = dump_path.with_extension("sql.tmp");
+    let file = std::fs::File::create(&tmp_path)?;
     let out = Command::new("pg_dump")
         .args(["-h", &c.host, "-p", &c.port, "-U", &c.user, "-d", &dbname])
         .env("PGPASSWORD", &c.password)
@@ -352,11 +357,13 @@ pub async fn dump_url(conn_url: &str, dump_path: &Path) -> AppResult<()> {
         .wait_with_output()
         .await?;
     if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
         return Err(AppError::Other(anyhow!(
             "pg_dump (platform) 失敗: {}",
             String::from_utf8_lossy(&out.stderr)
         )));
     }
+    std::fs::rename(&tmp_path, dump_path)?;
     Ok(())
 }
 

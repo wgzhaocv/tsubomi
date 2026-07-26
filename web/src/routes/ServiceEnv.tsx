@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpRight, Plus, X } from "lucide-react";
 import { Link, useParams } from "react-router";
 
@@ -54,8 +54,10 @@ export default function ServiceEnv() {
   const [resourceId, setResourceId] = useState("");
   const [injEnvVar, setInjEnvVar] = useState("");
   const [mount, setMount] = useState("");
-  // 注入直後の非破壊の注意喚起(server の warning)。次の注入まで出しておく。
-  const [injNotice, setInjNotice] = useState<string | null>(null);
+  // 注入直後の非破壊の注意喚起(server の warning)。**id を持たせて**、その注入を外したら消す
+  // (解消済みの警告が居座ると狼少年になる)。service を切り替えた時も消す。
+  const [injNotice, setInjNotice] = useState<{ id: string; text: string } | null>(null);
+  useEffect(() => setInjNotice(null), [id]);
   // 環境変数 Modal のフォーム。
   const [envOpen, setEnvOpen] = useState(false);
   const [key, setKey] = useState("");
@@ -87,10 +89,17 @@ export default function ServiceEnv() {
           setInjEnvVar("");
           setMount("");
           // server の非破壊警告(静的 env に譲った派生 env 等)は捨てずに出す。
-          setInjNotice(inj.warning ?? null);
+          setInjNotice(inj.warning ? { id: inj.id, text: inj.warning } : null);
         },
       },
     );
+  };
+
+  // その注入を外したら、その注入についての警告も消す(解消済みの警告を残さない)。
+  const ejectInjection = (injectionId: string) => {
+    eject.mutate(injectionId, {
+      onSuccess: () => setInjNotice((n) => (n?.id === injectionId ? null : n)),
+    });
   };
 
   const submitEnv = () => {
@@ -144,7 +153,7 @@ export default function ServiceEnv() {
         <strong>反映には再デプロイ(または開始)が必要</strong>です。
       </p>
 
-      {injNotice && <p className="text-sm font-semibold text-[#b5862a]">⚠ {injNotice}</p>}
+      {injNotice && <p className="text-sm font-semibold text-[#b5862a]">⚠ {injNotice.text}</p>}
       {injError && <p className="text-sm font-semibold text-[#e05a5a]">{injError.message}</p>}
       {envError && <p className="text-sm font-semibold text-[#e05a5a]">{envError.message}</p>}
 
@@ -211,7 +220,7 @@ export default function ServiceEnv() {
                 danger
                 icon={<X className="size-4" />}
                 loading={eject.isPending}
-                onClick={() => eject.mutate(inj.id)}
+                onClick={() => ejectInjection(inj.id)}
               >
                 外す
               </Button>

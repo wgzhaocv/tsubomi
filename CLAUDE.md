@@ -340,8 +340,31 @@ web の由来ラベルが同じ関数を引く = 手書きの対応表を廃止)
 `env/resolved` に平文で出る穴も同時に塞いだ(旧マスクは URL 形しか見ていなかった)。skill §3.1 は
 **`DATABASE_HOST` を見て分岐する**形に書き換え(dev / 旧部署は容器名のままなので無条件断言にしない)。
 実装級・却下理由・受容は **`doc/paas-db-public-design.md`「証書名は仕組みの一部」**(正本)+ m3 設計 §11 決定 A'。
-同日の小修正:web のデプロイ履歴で**稼働中の版**に出ていた「このデプロイに戻す」を隠す(digest 一致 +
-running のときだけ「稼働中」表示)。
+**続き(同日):注入の未反映を可視化 + CLI QoL(server 同版 / tbm 1.0.32)**。坑 2「注入は部署の前」への
+回答:migration `injections.created_at` を足し、**今 serving している deploy 行の作成時刻より後に
+作られた注入**を `InjectionDto.needs_redeploy` で出す(走行中フラグの流用ではないので**部署前から在る
+注入は「反映済み」のまま**)。基準に `finished_at` を使ってはいけない — commit_success は readiness 探測
+(既定 60s)の後なので、「**デプロイ中に注入した**」ケースで未反映が反映済みに**反転する**(この機能が
+最も要る場面で裏返る = 見逃し。simplify/codex review で発見)。行の作成時刻は env 解決より必ず前なので
+過剰警告側に倒れる。**cache rotate も未反映として拾う**(注入値そのものが変わるため)が、**db rotate は
+human role だけ**を回し app role は不変なので対象にしない。入口 = `tbm inject` の強い文案 / `service status` の
+`[未反映:要デプロイ]` / web のバッジ / json。skill に §「順序:注入 → デプロイ」。
+CLI 側:create の text 回显に port/visibility/stateful/memory + **推導が起きた時だけ**その理由
+(`--port` が visibility を動かす「隔空作用」を黙って起こさない)/ deploy の skill 案内に **24h
+クールダウン**(毎回出すと読んだ後は雑音で本当の警告が埋もれる)/ 利用者向け英文文案を日本語へ統一。
+**作成後に変えられるのは visibility だけ**(memory/cpus の変更端点は無い — skill に嘘を書いていたので訂正)。
+
+**同日の本番事故 → 恒久修正**:上記 migration が既存行を **`'-infinity'`** で回填したが、Postgres の
+infinity は `DateTime<Utc>` に読み込めず sqlx が「`NaiveDateTime + TimeDelta` overflowed」で **panic**、
+本番の `GET /services/:id/injections`(= `tbm service status` / web の env タブ)が全部落ちた。
+**dev で露出しなかった理由**:dev の injections 表は空で新規行は `now()`、`-infinity` を**読み戻す経路が
+一度も走らなかった** — **migration の回填値は「新規行での動作確認」では検証できない**(既存行を作って
+読み直すまでが検証)。修正は 2 段:新 migration で epoch へ寄せる(適用済みファイルは不変)+ SQL 側で
+`GREATEST(created_at,'epoch')` に丸めて**二度と端点を落とさない**。
+教訓の一般形:**既存データだけが踏む穴は、新規作成の e2e では見えない**。
+併せて web:同じイメージを 2 回デプロイすると同 digest の行が複数でき**その全部が「稼働中」に見えて**
+いたので、「digest が一致する最初の成功行」1 件に絞り、バッジを左のステータス側へ移した
+(右に置くとバッジの幅の分だけボタンが行ごとにずれて履歴が不揃いに見える — ユーザ報告)。
 
 ## 重要な約束事
 
@@ -445,6 +468,15 @@ just check        # cargo check + clippy -D warnings + web lint
 - owner 操作はバックエンドで毎回検証。フロントの表示制御はただの UX。
 - マルチアーキテクチャ:イメージ / バイナリは両ターゲット(aarch64 = 香橙派、
   x86_64 = 将来のホスト)。M3 の GH Actions は buildx で両アーキテクチャを出す。
+- **マイグレーションの回填値は「新規行の DEFAULT と同じ値」にする**。違う値(センチネル)を使うときは、
+  その値が **Rust の受け側の型で読み戻せることを既存行で確認する**まで完了ではない(2026-07-26 の事故:
+  `-infinity` を回填 → sqlx が `DateTime<Utc>` に読めず panic。dev は既存行が無いので**新規作成の e2e では
+  一度も踏まなかった**)。一般形:**既存データだけが踏む穴は、新規作成の検証では見えない**。
+  時刻列は `20260727000001` の CHECK(有限値)で書き込み側も塞いである。
+- **`panic = "abort"`(ワークスペースの release profile)なので、ハンドラ内の panic は
+  プロセスごと落とす**。`restart: unless-stopped` が拾うが、**進行中の deploy は失敗扱いになり
+  WS(logs --follow / terminal)も切れる**。「1 リクエストの失敗」で済まないので、リクエスト経路で
+  panic し得るコード(unwrap / 範囲外の値の decode)を書かない。診断は DR runbook §5.95。
 - **適用済みマイグレーションは不変**(`migrations/*.sql`)。sqlx はファイル全体の
   checksum を取るので、**コメント 1 文字でも変えると本番 DB の記録と不一致**になり、
   server が起動時のマイグレーション検証で落ちて 502 になる(2026-06-24 の本番障害=

@@ -47,6 +47,7 @@ pg-platform / pg-tenant の**クラスタレベル資産**(role は dump に入�
 | 特定テナント DB が壊れた / 3 日窓を過ぎた誤削除 | B: テナント DB 単体 | §3 |
 | volume のファイルを過去時点に戻したい | C: volume | §4 |
 | ホスト / ディスク全損(新機に再構築) | D: フル DR | §5 |
+| 特定の端点だけ 5xx / 無応答。`docker logs tsubomi-server` に `panicked at` が在り、server が繰り返し起動している | **F: コード/データ不整合(バックアップは無傷)** | §5.95 |
 
 ---
 
@@ -177,6 +178,44 @@ Node 側は §3.1 の「容器名のとき」の書き方(`rejectUnauthorized:fa
 `Renew` 列が未来日であることを演練時に確認する(§7)。更新は 60 日毎なので**沈黙する窓が長い**。
 
 ---
+
+## 5.95. F: コード/データ不整合(復元ではない — 前進修復のみ)
+
+**バックアップもホストも無傷なのに読めない**型。2026-07-26 に実際に起きた:migration が既存行を
+`'-infinity'` で回填したが、Postgres の infinity は Rust の `DateTime<Utc>` に読み込めず sqlx が panic。
+この平台は **`panic = "abort"`**(ワークスペースの release profile)なので、**1 リクエストの panic で
+server プロセスが落ちる** — `restart: unless-stopped` がすぐ拾い、起動時 reconcile が丁寧に収束させる
+ので、外からは「その端点だけ壊れている」ように見える。実際の波及:
+
+- **進行中の deploy が `failed`(`error='server がデプロイ中に再起動しました'`)になる** — 他人の
+  デプロイが、誰かが web の env タブを開くたびに死ぬ。
+- `logs --follow` / web terminal(WS)/ `tbm deploy --local` のアップロードが全切断。
+
+```bash
+# 1) 診断(この 3 つで型が確定する)
+docker logs tsubomi-server 2>&1 | grep -A5 'panicked at'
+docker inspect -f '{{.RestartCount}}' tsubomi-server
+docker exec tsubomi-pg-platform psql -U tsubomi -d tsubomi_platform   -c "SELECT count(*) FROM deploys WHERE error LIKE '%再起動%'"   # 被害を受けた deploy
+```
+
+手順(**この順序が要点**):
+
+1. **即応 = データを直す**(イメージ更新なしでその場で効く)。例:
+   `UPDATE injections SET created_at='epoch' WHERE created_at='-infinity';`
+2. 被害を受けた deploy の利用者に**再デプロイを案内**する。
+3. 恒久修正(読み側の丸め / CHECK 制約 / migration)は落ち着いてから前へ進める。
+4. **旧イメージへ戻すのは不可** — 下記 §5.96。
+
+## 5.96. migration を含む版へ上げたら、イメージは戻せない(片道切符)
+
+`state.rs` の `sqlx::migrate!(...).run()` は既定で `ignore_missing = false`。**DB に適用済みで手元の
+バイナリに無い version があると `VersionMissing` で起動を拒否**する。つまり:
+
+> **migration を 1 本足した版を ship した瞬間から、前の版へのロールバックは使えない。**
+> 管制面が丸ごと 502 になる(テナント app は traefik のファイル route で生き残る)。**前進修復のみ。**
+
+緊急にどうしても戻すなら `_sqlx_migrations` から該当 version の行を消してから旧版を起こす
+(スキーマは新しいまま = データ側の後始末は手動)。**通常は選ばない** — 前へ直す方が速く安全。
 
 ## 6. やってはいけないこと
 

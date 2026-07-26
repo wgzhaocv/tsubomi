@@ -18,13 +18,17 @@ export default function ServiceDeploys() {
   const { data: deploys, isPending, error } = useServiceDeploys(id);
   const { data: svc } = useService(id);
   const rollback = useRollbackService(id);
-  // 今 serving している **1 件**の deploy id。一覧は created_at 降順なので「digest が一致する
-  // 最初の成功行」= 実際に起動された行(`expected_container_name` と同じ選び方)。
+  // 今 serving している **1 件**の deploy id =「digest が一致する最初の成功行」。
   // digest だけで判定すると、同じイメージを再デプロイした履歴が複数在るとき**全部が「稼働中」に
-  // 見えてしまう**(実際に走っているのは 1 つ)。**running の時だけ**判定する — 停止中は
-  // image_digest が最後の版を保持したままなので「稼働中」と呼ぶと嘘になる。
+  // 見えてしまう**(実際に走っているのは 1 つ)。
+  // 門は `phase` ではなく **`desired_state`**(ユーザの意図):phase で門を掛けると、**新しい
+  // デプロイが失敗した直後**(旧版は start-first なので serving を続けている)に phase=failed で
+  // バッジが恒久的に消える(codex review 2026-07-26)。停止中は desired_state=stopped なので
+  // 「稼働中」と嘘をつかない。
+  // 注:サーバ側の真源(`latest_succeeded_deploy`)は digest を見ず「最後に成功した行」を選ぶ。
+  // commit_success が status と image_digest を同一 tx で書くので結果は一致する = 近似で足りる。
   const servingDeployId =
-    svc?.phase === "running"
+    svc?.desired_state === "running"
       ? deploys?.find((d) => d.status === "succeeded" && d.image_digest === svc.image_digest)?.id
       : undefined;
 

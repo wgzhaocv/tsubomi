@@ -414,6 +414,23 @@ pub(crate) async fn presence(
     Ok((present, running_names))
 }
 
+/// **今この env を握って生きている**コンテナ名(RUNNING **+ RESTARTING**)。
+/// `presence` の `running_names` と違い RESTARTING も含めるのが要点で、用途が別:
+/// - route の後端 / drift 判定 = **RUNNING だけ**(再起動中の容器へ流しても 502 になる)
+/// - **設定が反映済みか**の判定 = ここ。crash loop 中の容器は `restart=unless-stopped` で
+///   **作成時の env のまま起き続ける**ので、「走っていない = 反映すべき相手が居ない」と扱うと、
+///   crash を直すために入れた注入が「反映済み」に見えてしまう(codex review 2026-07-26)。
+pub(crate) async fn live_names(state: &AppState, service_id: Uuid) -> AppResult<Vec<String>> {
+    use ContainerSummaryStateEnum::{RESTARTING, RUNNING};
+    Ok(list_by_service(state, service_id)
+        .await?
+        .into_iter()
+        .filter(|c| matches!(c.state, Some(RUNNING) | Some(RESTARTING)))
+        .filter_map(|c| c.names.and_then(|ns| ns.into_iter().next()))
+        .map(|n| n.trim_start_matches('/').to_string())
+        .collect())
+}
+
 /// 全ての管理コンテナ(`tsubomi.managed=true`)を `(コンテナ id, service_id ラベルの parse 結果)`
 /// で返す(停止中も含む)。reconcile の孤児検出が使う:service_id が DB に生きた行を持たなければ
 /// 孤児。ラベルが欠落 / 不正なら `None`(個別削除の対象)。

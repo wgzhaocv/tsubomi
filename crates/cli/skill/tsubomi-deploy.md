@@ -16,7 +16,8 @@ tsubomi(蕾)= 社内 PaaS(基礎版 Vercel + Neon)。ユーザ(多くは非エ�
    デプロイの存活判定はコンテナが「起動して落ちていない」ことしか見ない。アプリのポートが
    ズレていても "succeeded" になり、サイトは 502 になる。**真実は curl だけ**。
 2. **注入はデプロイの「前」に行う。** 値はコンテナ起動の瞬間に解決される。注入し忘れたまま
-   デプロイすると env が無い。rotate(パスワード再生成)も**再デプロイして初めて効く**。
+   デプロイすると env が無い。**cache** の rotate も再デプロイして初めて効く(db の rotate は
+   human role だけなので走行中の app は無影響 — §「順序:注入 → デプロイ」)。
 3. **外向き・破壊的な操作はユーザに一言断ってから。** GitHub repo の作成、リソース削除など。
 
 CLI の出力は捕捉時(非 TTY)に自動で JSON。`jq` で id を拾える。エラーは `{"error","code"}` を
@@ -44,11 +45,16 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 
 ## 2. リソースを作る(必要なものだけ)
 
-> **create の前に決めること(後から変えられない)**:`--port` / `--stateful` / `--github` は
-> **作成時のみ有効**で、選び直すには**削除して作り直す**しかない。つまり `tbm service create` の前に
-> 「デプロイ経路(§4)」「listen ポート」「自帯 DB か(§3.2)」を決めておく。逆に `--visibility` /
-> `--memory` / `--cpus` は後から変えられる(`tbm service visibility …`)。
+> **create の前に決めること**:作成後に変えられるのは **`visibility` だけ**
+> (`tbm service visibility <名前> <private|company|public>`)。`--port` / `--stateful` / `--memory` /
+> `--cpus` / `--github` は**作成時のみ有効**で、変更端点が無い。つまり `tbm service create` の前に
+> 「デプロイ経路(§4)」「listen ポート」「自帯 DB か(§3.2)」「必要メモリ」を決めておく。
 > 作成直後の回显に port / visibility / stateful / memory が出るので、**意図と違ったらその場で作り直す**。
+>
+> **作り直しには手順がある**:`tbm service delete` は**ゴミ箱への soft delete** で、ゴミ箱内の名前も
+> 同名 create を 409 で弾く。よって同じ名前で作り直すには `tbm trash purge <名前>`(**不可逆** —
+> 実行前にユーザへ一言)を先に行うか、**別の名前で作る**。名前は subdomain = 公開 URL になるので、
+> 「まだ誰にも URL を渡していない」なら別名の方が安全。
 
 - service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 経路(既定)で出すなら、この
   作成時に `--github` を付ける**(repo/secret/variable と workflow 設定までこの 1 回で済む。§4 参照)。
@@ -57,8 +63,8 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
   - 任意フラグ:`--port <PORT>`(listen ポート。既定 8080。**8080 以外を指定すると公開範囲の既定が
     `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(自帯 DB 等の
     有状態コンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータ目録を保護)/
-    `--memory <MiB>`(硬上限。既定 1024)。**port / stateful は作成後に変更できない** — 間違えたら
-    削除して作り直す。
+    `--memory <MiB>`(硬上限。既定 1024)/ `--cpus <N>`。**visibility 以外はすべて作成後に変更できない**
+    — 間違えたら削除して作り直す(OOM で memory を増やしたい場合も作り直し)。
 - database:`tbm db create <名前>`
 - volume:`tbm volume create <名前>`(ファイル永続が要るなら)
 - cache:`tbm cache create <名前>`(valkey が要るなら)
@@ -103,8 +109,8 @@ service 注入 = 別 app への**内部直連**(公網を通らない。同一 o
 tbm env list <名前> --resolved   # DATABASE_HOST の値を見る
 ```
 
-- **`DATABASE_HOST` が `db.` で始まる(= 公開名)** → 証明書(公的に信頼される LE 発行)と名前が
-  一致する部署。**厳格検証で通る**ので `DATABASE_URL` をそのまま渡してよい:
+- **`DATABASE_HOST` が `db.` で始まる** → 証明書(公的に信頼される LE 発行)と名前が一致する部署
+  (この名前は**内部網の docker 別名**で、外部入口ではない — 通信は網内に留まる)。**厳格検証で通る**ので `DATABASE_URL` をそのまま渡してよい:
   - **Go / Python / Node(`pg`)**:そのまま。`rejectUnauthorized:false` は**不要**。
   - **Rust(`postgres` / `tokio-postgres`)**:`NoTls` では `require` に繋がらないので TLS コネクタを
     渡す。検証は有効のままでよい:
@@ -340,17 +346,21 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    エスケープ不要。型は SQL 側で `$1::int` と明示。NULL は SQL に直書き。server v43+)。
    注入した値が何に解決されるかは **`tbm env list <service名> --resolved`**(由来付き・秘密は伏せる)
    で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので
-   rotate 後は要再デプロイ。
+   cache の rotate 後は要再デプロイ(db の rotate は app に無影響 — §「順序:注入 → デプロイ」)。
 
 ### 順序:**注入 → デプロイ**(逆にすると env が現れない)
 
 値は**コンテナ起動の瞬間**に解決される(注入表はバインディングしか持たない)。つまり:
 
 - **走っている service に後から注入しても、そのコンテナには入らない**。`tbm deploy`(または
-  `tbm service stop && start`)で作り直すまで env は現れない。`tbm inject` は走行中なら
+  `tbm service stop <名前> && tbm service start <名前>`)で作り直すまで env は現れない。`tbm inject` は走行中なら
   「今動いているコンテナには入っていません」と言い、`-o json` では `needs_redeploy: true` を返す。
-- **同じ理由で `tbm db rotate` / `tbm cache rotate` の後も再デプロイが要る**(古い資格情報を
-  握ったまま動き続ける → ある日突然 認証エラー、ではなく即座に切れる)。
+- **`tbm cache rotate` の後は再デプロイが要る**:cache は資格情報が 1 本 = **注入値そのもの**が
+  変わるので、走行中の app は古いパスワードを握ったまま即座に認証エラーになる(`status` の
+  `未反映` にも出る)。
+- **`tbm db rotate` は再デプロイ不要**:回すのは **human role**(外部接続用)だけで、注入されるのは
+  **app role** なので走行中の app は切れない(外部 key の rotate が service を切らないための意図した
+  設計)。影響するのは、公開接続文字列を**静的 env に置いてしまった**場合だけ(§3 冒頭)。
 - **症状が原因を指さない**:app からは「env が無い」「接続できない」としか見えないので、
   **まず `tbm env list <名前> --resolved` と `tbm service status`(注入一覧に `未反映` が付く)を見る**。
   env が resolved には在るのにコンテナに無い = この順序問題。再デプロイで直る。
@@ -383,7 +393,8 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 ## 6. ライフサイクルと後始末
 
 - 再デプロイ:GitHub 経路は `git push`、ローカルは `tbm deploy --local`。
-- `tbm db rotate` / `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く。
+- `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く
+  (`tbm db rotate` は human role だけなので走行中の app は無影響)。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
 - **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切り替え(**即時反映・
   再デプロイ不要**)。`private` = 公開 URL 無効(監視・通知系 worker 向け。内部リンク /
@@ -409,7 +420,7 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict` | 名前が既出 | 別名にする |
 | `code: validation` | 入力不正 | メッセージに従う |
-| 注入が効かない / env が無い | 走行中に注入した(値は起動の瞬間に解決)/ rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
+| 注入が効かない / env が無い | 走行中に注入した(値は起動の瞬間に解決)/ cache rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
 | 平台 DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 自帯コンテナ(§3.2:`--port` + `--stateful` + volume) |
 | 自帯 DB が再デプロイでデータ全損 | データ目録を volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ(既成イメージ / 無 context Dockerfile なら `--image`・`--dockerfile`) |

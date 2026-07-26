@@ -317,9 +317,12 @@ pub(crate) async fn latest_succeeded_deploy(
     service_id: Uuid,
 ) -> AppResult<Option<(String, String, Option<String>)>> {
     Ok(sqlx::query_as(
+        // **`finished_at` 順**(created_at ではない):deploy 行は deploy_lock を取る**前**に作られるので、
+        // A→B の順に行ができても B→A の順に成功し得る。実際に serving しているのは「最後に成功した」
+        // 方なので、行の作成順ではなく完了順で選ぶ(codex review 2026-07-26)。
         "SELECT image_digest, git_sha, commit_message FROM deploys
           WHERE service_id = $1 AND status = 'succeeded'
-          ORDER BY created_at DESC LIMIT 1",
+          ORDER BY finished_at DESC NULLS LAST, created_at DESC LIMIT 1",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
@@ -333,10 +336,27 @@ pub(crate) async fn latest_succeeded_deploy_id(
     state: &AppState,
     service_id: Uuid,
 ) -> AppResult<Option<Uuid>> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM deploys
+    Ok(latest_succeeded_deploy_ref(state, service_id)
+        .await?
+        .map(|(id, _)| id))
+}
+
+/// 直近に成功した deploy の **(id, 行の作成時刻)**。時刻は「そのコンテナの env が凍結された瞬間より
+/// 前」を保証する下限として使う — 注入値は `inject::resolve`(deploy 中の starting 段階)で解決される
+/// ので、行の作成(received 段階)は必ずそれより前。**`finished_at` を使ってはいけない**:
+/// commit_success は readiness 探測(既定 60s)の後なので、「デプロイ中に注入した」ケースで
+/// `created_at < finished_at` となり **未反映が反映済みに反転する**(この機能が最も要る場面で
+/// 裏返る = 見逃し。simplify/codex review 2026-07-26)。過剰警告(pull 中の注入)側に倒す。
+pub(crate) async fn latest_succeeded_deploy_ref(
+    state: &AppState,
+    service_id: Uuid,
+) -> AppResult<Option<(Uuid, DateTime<Utc>)>> {
+    Ok(sqlx::query_as(
+        // 並びは `latest_succeeded_deploy` と同じ理由で `finished_at` 順。返す時刻は **行の作成時刻**
+        // (env 凍結より必ず前 = 見逃さない側)。
+        "SELECT id, created_at FROM deploys
           WHERE service_id = $1 AND status = 'succeeded'
-          ORDER BY created_at DESC LIMIT 1",
+          ORDER BY finished_at DESC NULLS LAST, created_at DESC LIMIT 1",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
@@ -795,21 +815,25 @@ type InjectionRow = (
     DateTime<Utc>,
 );
 
-/// 今動いているコンテナが起動した時刻(= 注入値が解決された瞬間)。走っていなければ None。
-/// これより後に作られた注入は**まだ効いていない** — 値は起動の瞬間に解決される(決定 #5)。
+/// 今 serving しているコンテナの env が凍結された時刻の**下限**。走っていなければ None。
+/// これより後に作られた注入は**まだ効いていない**(値は起動の瞬間に解決される — 決定 #5)。
+/// SQL 1 本 + docker 1 回(`latest_succeeded_deploy_ref` が id と時刻を同時に返すので、
+/// 「同じ行を 2 度引く」も「2 本の間に deploy が commit して食い違う」も起きない)。
 async fn serving_since(state: &AppState, id: Uuid) -> Option<DateTime<Utc>> {
-    // 走行確認(docker)を先にやらない — 未デプロイ / 停止中は SQL だけで抜ける。
-    serving_container(state, id).await?;
-    sqlx::query_scalar(
-        "SELECT COALESCE(finished_at, created_at) FROM deploys
-          WHERE service_id = $1 AND status = 'succeeded'
-          ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
+    // SQL を先に引く — 未デプロイなら docker を撃たない(serving_container と同じ順序)。
+    let (deploy_id, since) = match latest_succeeded_deploy_ref(state, id).await {
+        Ok(v) => v?,
+        Err(e) => {
+            // 判定不能を黙って「反映済み」に倒すと警告が消えるので、痕跡は残す
+            // (`expected_container_name` と同じ扱い)。
+            tracing::warn!(error = ?e, %id, "注入の未反映判定:直近成功 deploy の取得に失敗");
+            return None;
+        }
+    };
+    // RESTARTING も「その env を握って生きている」に含める(`live_names` の doc 参照)。
+    let live = docker::live_names(state, id).await.ok()?;
+    live.contains(&deploy::container_name(id, deploy_id))
+        .then_some(since)
 }
 
 fn injection_row_to_dto(r: InjectionRow, serving_since: Option<DateTime<Utc>>) -> InjectionDto {
@@ -823,7 +847,7 @@ fn injection_row_to_dto(r: InjectionRow, serving_since: Option<DateTime<Utc>>) -
         valid: r.6,
         warning: None, // 一覧では出さない(作成時のみの注意喚起)
         // 走っているコンテナより後に作られた注入 = 未反映。停止中(None)なら反映すべき相手が
-        // 居ないので false。既存行の created_at は '-infinity'(migration)なので誤報しない。
+        // 居ないので false。既存行の created_at は epoch(20260726000002)なので誤報しない。
         needs_redeploy: serving_since.is_some_and(|since| r.7 > since),
     }
 }
@@ -836,13 +860,22 @@ pub async fn list_injections(
 ) -> AppResult<Json<Vec<InjectionDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<InjectionRow> = sqlx::query_as(
-        // created_at は **必ず有限値に丸めて**取り出す:Postgres の infinity は `DateTime<Utc>` に
-        // 読み込めず sqlx が panic する(20260726000002 で実データは直したが、SQL 側でも塞いで
-        // 二度と端点を落とさない)。epoch より前の deploy は存在しないので判定は変わらない。
+        // 「注入値が今のコンテナと違う」時刻 = 注入の作成時刻と **cache の rotate 時刻**の遅い方。
+        // cache rotate は注入される資格情報そのもの(ACL パスワード)を差し替えるので、走行中の app は
+        // 即座に認証エラーになる = 再デプロイが要る。database の rotate は **human role だけ**を回し
+        // app role(注入される側)は不変なので、あちらは対象にしない(m3 設計 §7.2)。
+        //
+        // 値は **両端を有限に丸める**:Postgres の infinity は `DateTime<Utc>` に読み込めず sqlx が
+        // panic する(= `panic="abort"` なのでプロセスごと落ちる。2026-07-26 の事故)。
+        // 下端だけ塞ぐと `+infinity` が素通りするので `LEAST(GREATEST(…), now())` で挟む。
+        // 書き込み側は CHECK 制約(20260727000001)が拒むので、これは縦深防御。
         "SELECT i.id, i.resource_id, r.kind, r.display_name, i.env_var, i.mount_path,
                 (r.deleted_at IS NULL) AS valid,
-                GREATEST(i.created_at, 'epoch'::timestamptz) AS created_at
-           FROM injections i JOIN resources r ON r.id = i.resource_id
+                LEAST(GREATEST(GREATEST(i.created_at, cd.rotated_at), 'epoch'::timestamptz), now())
+                  AS created_at
+           FROM injections i
+           JOIN resources r ON r.id = i.resource_id
+           LEFT JOIN cache_details cd ON cd.resource_id = i.resource_id
           WHERE i.service_id = $1
           ORDER BY i.env_var",
     )
@@ -960,8 +993,12 @@ pub async fn create_injection(
     });
 
     let new_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO injections (service_id, resource_id, env_var, mount_path)
-              VALUES ($1, $2, $3, $4) RETURNING id",
+        // created_at は **clock_timestamp()**(実時刻)で入れる。列の DEFAULT は `now()` =
+        // **トランザクション開始時刻**なので、行ロック待ちで tx が長引くと「実際に INSERT した時刻より
+        // 古い」created_at が入り、その間に走った deploy の env 解決を跨いだのに「反映済み」に
+        // 見える窓ができる(codex review 2026-07-26)。
+        "INSERT INTO injections (service_id, resource_id, env_var, mount_path, created_at)
+              VALUES ($1, $2, $3, $4, clock_timestamp()) RETURNING id",
     )
     .bind(id)
     .bind(req.resource_id)
@@ -998,8 +1035,9 @@ pub async fn create_injection(
             mount_path,
             valid: true,
             warning,
-            // 作った瞬間は「走っているコンテナがあれば必ず未反映」(この注入より前に起動している)。
-            needs_redeploy: serving_container(&state, id).await.is_some(),
+            // 「未反映」の定義は一覧と同じ関数に寄せる(時刻の基準を変えたとき片方だけ直る事故を防ぐ)。
+            // 作った瞬間は、走っているコンテナがあれば必ず未反映(この注入より前に起動している)。
+            needs_redeploy: serving_since(&state, id).await.is_some(),
         }),
     ))
 }
