@@ -201,16 +201,25 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         Write-Warning "git の自動インストールに失敗しました。手動で導入してください: https://gitforwindows.org/"
     }
 }
+# ログイン案内は「空行 + インデントしたコマンド単独行」で出す(文末に埋め込むと
+# 目立たず、コピーもしづらい — 実利用のフィードバック)。claude も同型。
+$GhLoginCmd = "gh auth login --web --git-protocol https --clipboard"
 if (Get-Command gh -ErrorAction SilentlyContinue) {
     # 既にある → 触らない。未ログインなら一手だけ案内。
     gh auth status 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "gh は未ログインです。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
+        Write-Host "gh は未ログインです。GitHub と連携するには、次を実行:"
+        Write-Host ""
+        Write-Host "    $GhLoginCmd"
+        Write-Host ""
     }
 } else {
     Write-Host "gh(GitHub CLI)が見つかりません。インストールしています…"
     if (Install-Gh) {
-        Write-Host "gh をインストールしました。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
+        Write-Host "gh をインストールしました。GitHub と連携するには、次を実行:"
+        Write-Host ""
+        Write-Host "    $GhLoginCmd"
+        Write-Host ""
     } else {
         Write-Warning "gh の自動インストールに失敗しました。手動で導入してください: https://github.com/cli/cli/releases"
     }
@@ -240,7 +249,10 @@ if ($claudeOk) {
     if (Test-Path $claudeExe) {
         & $claudeExe auth status 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Claude Code は未ログインです。ログインするには: claude auth login"
+            Write-Host "Claude Code は未ログインです。ログインするには、次を実行:"
+            Write-Host ""
+            Write-Host "    claude auth login"
+            Write-Host ""
         }
     }
 }

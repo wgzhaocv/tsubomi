@@ -122,8 +122,10 @@ fi
 
 # 前提ツール(git / gh = GitHub CLI)。tbm の GitHub デプロイ経路で必須。
 # gh は GitHub 公式 release から ~/.tbm/bin に入れる(管理者権限不要 — PATH も
-# uninstall も tbm と同じ仕組みでカバーされる)。git は mac/Linux に管理者権限
-# なしの公式配布が無いため、自動導入はせず手順だけ案内する(設計上の判断)。
+# uninstall も tbm と同じ仕組みでカバーされる)。git は:
+#   - macOS: Apple 公式の Command Line Tools インストーラを自動起動する
+#     (xcode-select --install。ダイアログを 1 回押すだけ・管理者権限不要)。
+#   - Linux: 管理者権限なしの公式配布が無いため、手順だけ案内する(設計上の判断)。
 install_gh() {
   # latest のリダイレクト先からバージョンを読む方式。GitHub API のレート制限
   # (60回/時/IP)を踏まないため。転送は GitHub の TLS で認証されるので、会社
@@ -221,20 +223,52 @@ PY
 }
 
 echo ""
-if ! command -v git >/dev/null 2>&1; then
-  case "$(uname -s)" in
-    Darwin) echo "⚠ git が見つかりません。次を実行して入れてください: xcode-select --install" >&2 ;;
-    *)      echo "⚠ git が見つかりません。管理者 / IT 部門に導入を依頼してください(例: sudo apt install git)。" >&2 ;;
-  esac
-fi
+# git の有無。macOS では /usr/bin/git が CLT 未導入でもシムとして常に存在し
+# `command -v git` が偽陽性になる(以前はこの分岐が一度も発火しなかった)ので、
+# 実体の有無は `xcode-select -p`(CLT のパス解決)で判定する。CLT 無しでも
+# 非シムの git(git-scm の pkg 等)が PATH に居ればそれで足りる。
+case "$(uname -s)" in
+  Darwin)
+    GIT_PATH="$(command -v git 2>/dev/null || true)"
+    if xcode-select -p >/dev/null 2>&1 \
+       || { [ -n "$GIT_PATH" ] && [ "$GIT_PATH" != "/usr/bin/git" ]; }; then
+      : # git あり → 何もしない
+    else
+      echo "git が見つかりません。Command Line Tools のインストーラを起動します…"
+      if xcode-select --install >/dev/null 2>&1; then
+        echo "開いたダイアログで「インストール」を押してください(管理者権限は不要)。"
+      else
+        echo "⚠ インストーラの自動起動に失敗しました。次を実行して入れてください:" >&2
+        echo "" >&2
+        echo "    xcode-select --install" >&2
+        echo "" >&2
+      fi
+    fi
+    ;;
+  *)
+    if ! command -v git >/dev/null 2>&1; then
+      echo "⚠ git が見つかりません。管理者 / IT 部門に導入を依頼してください(例: sudo apt install git)。" >&2
+    fi
+    ;;
+esac
+# ログイン案内は「空行 + インデントしたコマンド単独行」で出す(文末に埋め込むと
+# 目立たず、コピーもしづらい — 実利用のフィードバック)。以降の gh / claude も同型。
+GH_LOGIN_CMD="gh auth login --web --git-protocol https --clipboard"
 if command -v gh >/dev/null 2>&1; then
   # 既にある → 触らない。ただし未ログインなら一手だけ案内する。
-  gh auth status >/dev/null 2>&1 || \
-    echo "gh は未ログインです。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "gh は未ログインです。GitHub と連携するには、次を実行:"
+    echo ""
+    echo "    $GH_LOGIN_CMD"
+    echo ""
+  fi
 else
   echo "gh(GitHub CLI)が見つかりません。インストールしています…"
   if install_gh; then
-    echo "gh をインストールしました。GitHub と連携するには: gh auth login --web --git-protocol https --clipboard"
+    echo "gh をインストールしました。GitHub と連携するには、次を実行:"
+    echo ""
+    echo "    $GH_LOGIN_CMD"
+    echo ""
   else
     echo "⚠ gh の自動インストールに失敗しました。手動で導入してください: https://github.com/cli/cli/releases" >&2
   fi
@@ -260,8 +294,12 @@ if [ -n "$CLAUDE_OK" ]; then
   CLAUDE_BIN="$(command -v claude 2>/dev/null || true)"
   [ -n "$CLAUDE_BIN" ] || CLAUDE_BIN="$HOME/.local/bin/claude"
   if [ -x "$CLAUDE_BIN" ]; then
-    "$CLAUDE_BIN" auth status >/dev/null 2>&1 || \
-      echo "Claude Code は未ログインです。ログインするには: claude auth login"
+    if ! "$CLAUDE_BIN" auth status >/dev/null 2>&1; then
+      echo "Claude Code は未ログインです。ログインするには、次を実行:"
+      echo ""
+      echo "    claude auth login"
+      echo ""
+    fi
   fi
 fi
 

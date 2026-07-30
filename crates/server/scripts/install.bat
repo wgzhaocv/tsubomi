@@ -168,18 +168,29 @@ if errorlevel 1 (
         echo warning: failed to auto-install git. Install manually: https://gitforwindows.org/
     )
 )
+REM Login hints are printed as "blank line + indented command on its own line".
+REM An inline command at the end of a sentence is easy to miss and hard to copy
+REM (real-usage feedback). The claude hints below follow the same shape.
 where gh >nul 2>&1
 if errorlevel 1 (
     echo gh ^(GitHub CLI^) not found. Installing ^(no admin^)...
     call :install_gh
     if defined GH_OK (
-        echo gh installed. To connect to GitHub now, run: "%INSTALL_DIR%\gh.exe" auth login --web --git-protocol https --clipboard
+        echo gh installed. To connect to GitHub now, run:
+        echo.
+        echo     "%INSTALL_DIR%\gh.exe" auth login --web --git-protocol https --clipboard
+        echo.
     ) else (
         echo warning: failed to auto-install gh. Install manually: https://github.com/cli/cli/releases
     )
 ) else (
     gh auth status >nul 2>&1
-    if errorlevel 1 echo gh not logged in. To connect to GitHub, run: gh auth login --web --git-protocol https --clipboard
+    if errorlevel 1 (
+        echo gh not logged in. To connect to GitHub, run:
+        echo.
+        echo     gh auth login --web --git-protocol https --clipboard
+        echo.
+    )
 )
 
 REM claude (Claude Code = the AI CLI used to drive this PaaS). Official native
@@ -191,14 +202,22 @@ if errorlevel 1 (
     call :install_claude
     if defined CLAUDE_OK (
         call :configure_claude
-        echo claude installed. To log in now, run: "%USERPROFILE%\.local\bin\claude.exe" auth login
+        echo claude installed. To log in now, run:
+        echo.
+        echo     "%USERPROFILE%\.local\bin\claude.exe" auth login
+        echo.
     ) else (
         echo warning: failed to auto-install claude. Install manually: https://claude.ai/install.cmd
     )
 ) else (
     call :configure_claude
     claude auth status >nul 2>&1
-    if errorlevel 1 echo claude not logged in. To log in, run: claude auth login
+    if errorlevel 1 (
+        echo claude not logged in. To log in, run:
+        echo.
+        echo     claude auth login
+        echo.
+    )
 )
 
 REM PATH for NEW terminals is already written to the registry above (reg add +
