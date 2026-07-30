@@ -102,7 +102,10 @@ export default function Databases() {
                   }
                 >
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {db.size_bytes != null && <CardChip>{formatBytes(db.size_bytes)}</CardChip>}
+                    {/* 裸の数値だけだと何のサイズか伝わらない(ユーザ実測)— 名詞を付ける。 */}
+                    {db.size_bytes != null && (
+                      <CardChip>サイズ {formatBytes(db.size_bytes)}</CardChip>
+                    )}
                     <CardChip>接続上限 {db.conn_limit}</CardChip>
                     {db.rotated_at && <CardChip>rotate {formatRelative(db.rotated_at)}</CardChip>}
                   </div>
