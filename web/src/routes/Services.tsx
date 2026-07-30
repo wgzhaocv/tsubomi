@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronUp, Plus, Server } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, Plus, Server } from "lucide-react";
 import { useNavigate } from "react-router";
 
 import { PageContainer } from "@/components/page-container";
@@ -157,10 +157,25 @@ export default function Services() {
                   badge={<PhaseBadge phase={svc.phase} />}
                   onClick={() => navigate(`/services/${svc.id}`)}
                   // 公開 URL のホスト部(Vercel のドメイン行に相当)。private は URL 自体が無い。
+                  // 実リンクにする — クリックはカードの詳細遷移に食われないよう伝播を止める。
                   description={
-                    serviceVisibility(svc) === "private"
-                      ? "非公開(公開 URL なし)"
-                      : (svc.url?.replace(/^https?:\/\//, "") ?? svc.subdomain)
+                    serviceVisibility(svc) === "private" ? (
+                      "非公開(公開 URL なし)"
+                    ) : svc.url ? (
+                      <a
+                        href={svc.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="inline-flex max-w-full items-center gap-1 hover:text-foreground hover:underline"
+                      >
+                        <span className="truncate">{svc.url.replace(/^https?:\/\//, "")}</span>
+                        {/* 新 tab で開くことの合図(外部リンク icon)。 */}
+                        <ExternalLink className="size-3.5 shrink-0" />
+                      </a>
+                    ) : (
+                      svc.subdomain
+                    )
                   }
                   footer={
                     <>
