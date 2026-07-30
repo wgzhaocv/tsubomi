@@ -685,6 +685,33 @@
   background: rgba(25, 200, 185, 0.25);
 }
 
+/* 動森カーソル(animal-island-ui Cursor の force モード移植。49×48 PNG、
+   hotspot 4 0 = 人差し指の先。原典どおりピクセル等倍 — 変えると指先がずれる)。
+   force = 全要素を !important で小手に統一する原典既定。pointer/I-beam/
+   not-allowed/ns-resize(DatabaseEditor の分割条)等の機能カーソルも潰れるのは
+   提示済み・受容(ユーザ選択)。戻したくなったら原典の scoped モード
+   (交互要素セレクタで pointer 等を復元する方式)に差し替え可能。
+   原典はラッパコンポーネントだが、アプリでは全域 CSS の方が DashboardLayout
+   外のルート(/login 等)も body 直下 portal(modal/select)も 1 ルールで覆える。
+   タッチ端末はカーソル自体が無いので media で丸ごと無効(PNG も取得しない)。
+   any-hover/any-pointer なのは触屏主体 + マウス外付けの 2-in-1 を拾うため
+   (hover/pointer は主入力デバイスしか見ない — codex 指摘)。
+   @layer base に入れるのが要点:!important の cascade は層順が反転する
+   (Cascade 5)ため無 layer の important は最弱。早い base 層に置けば、後続層や
+   無 layer に important な cursor が現れても刺し抜かれない。
+   受容済み:32px 超のカーソルは bitmap が視口をはみ出す位置(右/下端の
+   ~45px 帯)で native 矢印へ一時回退する(Blink/Gecko の反スプーフ閾値。
+   原典と同資産・同挙動 = 忠実移植の代価)。 */
+@layer base {
+  @media (any-hover: hover) and (any-pointer: fine) {
+    * {
+      cursor:
+        url("/cursor/cursor-icon.png") 4 0,
+        default !important;
+    }
+  }
+}
+
 /* prefers-reduced-motion:OS が「視差効果を減らす」設定のとき、装飾アニメーション
    (loading ストライプ / splash / 葉の揺れ / フェード / zoom / 点滅 / カーソル滑り込み
    等)とトランジションをほぼ無効化する。Typewriter は JS 側で全文即時表示に切替。 */
