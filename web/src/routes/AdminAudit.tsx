@@ -100,92 +100,106 @@ export default function AdminAudit() {
 
         {!error && (isPending || rows.length > 0) && (
           <Card>
-            <CardContent className="p-0">
-              {/* ヘッダはスクロール枠の**外**に置く(仮想化のオフセット計算に header 高が
-                  混ざらないように)。列はスクロール内の行と同じ COLS グリッドで揃える。 */}
-              <div
-                className={cn(
-                  COLS,
-                  "border-b-2 border-[rgba(61,52,40,0.08)] py-3 text-xs font-bold text-muted-foreground",
-                )}
-              >
-                <div>時刻</div>
-                <div>アクション</div>
-                <div>操作者</div>
-                <div>対象ユーザ</div>
-                <div>IP</div>
-                <div>詳細</div>
-              </div>
+            <CardContent className="overflow-x-auto p-0">
+              {/* 横スクロールは card 内で完結させる(COLS の固定最小幅が viewport を広げないように)。
+                  min-w-min = header(COLS)由来の min-content を導出 — 幅の定数を二重管理しない。 */}
+              <div className="min-w-min">
+                {/* ヘッダは縦スクロール枠の**外**に置く(仮想化のオフセット計算に header 高が
+                      混ざらないように)。列はスクロール内の行と同じ COLS グリッドで揃える。 */}
+                <div
+                  className={cn(
+                    COLS,
+                    "border-b-2 border-[rgba(61,52,40,0.08)] py-3 text-xs font-bold text-muted-foreground",
+                  )}
+                >
+                  <div>時刻</div>
+                  <div>アクション</div>
+                  <div>操作者</div>
+                  <div>対象ユーザ</div>
+                  <div>IP</div>
+                  <div>詳細</div>
+                </div>
 
-              <div ref={scrollRef} className="max-h-[60vh] overflow-auto [scrollbar-gutter:stable]">
-                {isPending ? (
-                  // 初回読み込み:Skeleton 行(仮想化なし)。
-                  <div>
-                    {skeletonKeys.map((k) => (
-                      <div
-                        key={k}
-                        className={cn(COLS, "border-b border-[rgba(61,52,40,0.06)] py-3")}
-                        style={{ height: ROW_HEIGHT }}
-                      >
-                        <Skeleton className="h-4 w-28" />
-                        <Skeleton className="h-4 w-24" />
-                        <Skeleton className="h-4 w-20" />
-                        <Skeleton className="h-4 w-20" />
-                        <Skeleton className="h-4 w-24" />
-                        <Skeleton className="h-4 w-full" />
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  // 仮想リスト本体:総高のスペーサ内に、見える行だけ絶対配置。
-                  <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-                    {virtualItems.map((vi) => {
-                      const e = rows[vi.index];
-                      const detail = detailText(e.detail);
-                      return (
+                {/* 横スクロールは外側(CardContent)専任 — ここが x 方向にもスクロールすると
+                    header と行が別々に動いて列がずれる上、横ジェスチャが virtualizer の再描画を起こす。 */}
+                <div
+                  ref={scrollRef}
+                  className="max-h-[60vh] overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]"
+                >
+                  {isPending ? (
+                    // 初回読み込み:Skeleton 行(仮想化なし)。
+                    <div>
+                      {skeletonKeys.map((k) => (
                         <div
-                          key={e.id}
-                          className={cn(COLS, "border-b border-[rgba(61,52,40,0.06)] py-3 text-sm")}
-                          style={{
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            width: "100%",
-                            height: vi.size,
-                            transform: `translateY(${vi.start}px)`,
-                          }}
+                          key={k}
+                          className={cn(COLS, "border-b border-[rgba(61,52,40,0.06)] py-3")}
+                          style={{ height: ROW_HEIGHT }}
                         >
-                          <div className="truncate text-xs font-medium text-muted-foreground">
-                            {new Date(e.created_at).toLocaleString("ja-JP")}
-                          </div>
-                          <div className="truncate font-mono text-xs font-bold text-[#0b9c93]">
-                            {e.action}
-                          </div>
-                          <div className="truncate font-semibold text-foreground">
-                            {e.actor_name ?? (
-                              <span className="text-muted-foreground">システム</span>
-                            )}
-                          </div>
-                          <div className="truncate font-medium text-foreground">
-                            {e.target_user_name ?? <span className="text-muted-foreground">—</span>}
-                          </div>
-                          <div
-                            className="truncate font-mono text-xs text-muted-foreground"
-                            title={e.client_ip ?? undefined}
-                          >
-                            {e.client_ip ?? <span className="text-muted-foreground">—</span>}
-                          </div>
-                          <div
-                            className="truncate font-mono text-xs text-muted-foreground"
-                            title={detail}
-                          >
-                            {detail}
-                          </div>
+                          <Skeleton className="h-4 w-28" />
+                          <Skeleton className="h-4 w-24" />
+                          <Skeleton className="h-4 w-20" />
+                          <Skeleton className="h-4 w-20" />
+                          <Skeleton className="h-4 w-24" />
+                          <Skeleton className="h-4 w-full" />
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  ) : (
+                    // 仮想リスト本体:総高のスペーサ内に、見える行だけ絶対配置。
+                    <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+                      {virtualItems.map((vi) => {
+                        const e = rows[vi.index];
+                        const detail = detailText(e.detail);
+                        return (
+                          <div
+                            key={e.id}
+                            className={cn(
+                              COLS,
+                              "border-b border-[rgba(61,52,40,0.06)] py-3 text-sm",
+                            )}
+                            style={{
+                              position: "absolute",
+                              top: 0,
+                              left: 0,
+                              width: "100%",
+                              height: vi.size,
+                              transform: `translateY(${vi.start}px)`,
+                            }}
+                          >
+                            <div className="truncate text-xs font-medium text-muted-foreground">
+                              {new Date(e.created_at).toLocaleString("ja-JP")}
+                            </div>
+                            <div className="truncate font-mono text-xs font-bold text-[#0b9c93]">
+                              {e.action}
+                            </div>
+                            <div className="truncate font-semibold text-foreground">
+                              {e.actor_name ?? (
+                                <span className="text-muted-foreground">システム</span>
+                              )}
+                            </div>
+                            <div className="truncate font-medium text-foreground">
+                              {e.target_user_name ?? (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </div>
+                            <div
+                              className="truncate font-mono text-xs text-muted-foreground"
+                              title={e.client_ip ?? undefined}
+                            >
+                              {e.client_ip ?? <span className="text-muted-foreground">—</span>}
+                            </div>
+                            <div
+                              className="truncate font-mono text-xs text-muted-foreground"
+                              title={detail}
+                            >
+                              {detail}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
             </CardContent>
           </Card>
