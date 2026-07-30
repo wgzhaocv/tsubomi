@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
+import { CardChip, ResourceCard, ResourceCardGrid } from "@/components/resource-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
@@ -11,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Title } from "@/components/ui/title";
 import { useCreateDatabase, useDatabases } from "@/lib/databases";
+import { formatBytes, formatDate, formatRelative } from "@/lib/format";
 
 // データベース一覧。RESOURCES(サイドメニュー)の「データベース」項目に対応する
 // 実画面。作成は名前を 1 つ入れるだけ(平台が wire 名・role・パスワードを生成する)。
@@ -85,32 +87,29 @@ export default function Databases() {
         )}
 
         {dbs && dbs.length > 0 && (
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
+          <ResourceCardGrid>
             {dbs.map((db) => (
               <li key={db.id}>
-                <Card
-                  interactive
+                <ResourceCard
+                  icon={<Database />}
+                  title={db.display_name}
                   onClick={() => navigate(`/databases/${db.id}`)}
-                  className="flex-row items-center justify-between gap-4 py-4"
+                  description="PostgreSQL(独立データベース + 双ロール)"
+                  footer={
+                    <>
+                      database{db.anon_seq} · 作成 {formatDate(db.created_at)}
+                    </>
+                  }
                 >
-                  <CardContent className="flex min-w-0 items-center gap-3.5">
-                    <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
-                      <Database className="size-5.5" />
-                    </div>
-                    <div className="flex min-w-0 flex-col">
-                      <span className="truncate text-base font-bold text-foreground">
-                        {db.display_name}
-                      </span>
-                      <span className="truncate text-xs font-medium text-muted-foreground">
-                        database{db.anon_seq} · 作成{" "}
-                        {new Date(db.created_at).toLocaleDateString("ja-JP")}
-                      </span>
-                    </div>
-                  </CardContent>
-                </Card>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {db.size_bytes != null && <CardChip>{formatBytes(db.size_bytes)}</CardChip>}
+                    <CardChip>接続上限 {db.conn_limit}</CardChip>
+                    {db.rotated_at && <CardChip>rotate {formatRelative(db.rotated_at)}</CardChip>}
+                  </div>
+                </ResourceCard>
               </li>
             ))}
-          </ul>
+          </ResourceCardGrid>
         )}
 
         <Modal

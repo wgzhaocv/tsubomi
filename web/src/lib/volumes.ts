@@ -41,19 +41,6 @@ export const volumeKeys = {
   usage: (id: string) => ["volumes", id, "usage"] as const,
 };
 
-// バイト数を人間可読に(ファイルブラウザ・概要で共用)。
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let v = bytes / 1024;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(1)} ${units[i]}`;
-}
-
 // エラー本文(サーバは AppError の日本語メッセージを text で返す)を投げる。
 async function failBody(res: Response): Promise<never> {
   const body = await res.text().catch(() => "");

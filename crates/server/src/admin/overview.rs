@@ -95,13 +95,12 @@ async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
 }
 
 /// pg-tenant の DB サイズ(bytes)。失敗は None(best-effort)。
+/// 計測 SQL の正本は `databases::db_sizes`(ユーザ向け一覧と同じ物差しで測る)。
 async fn db_size(state: &AppState, dbname: Option<&str>) -> Option<i64> {
     let dbname = dbname?;
-    sqlx::query_scalar::<_, i64>("SELECT pg_database_size($1)")
-        .bind(dbname)
-        .fetch_one(&state.tenant_admin)
+    crate::databases::db_sizes(state, &[dbname])
         .await
-        .ok()
+        .remove(dbname)
 }
 
 /// volume の占用(bytes)。M2 の `volumes::dir_usage`(symlink を辿らない再帰走査 +

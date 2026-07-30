@@ -2,7 +2,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { authKeys } from "@/lib/auth";
 import { RESOURCES } from "@/lib/resources";
-import { formatBytes } from "@/lib/volumes";
+import { formatBytes } from "@/lib/format";
 
 // 使用量の表示(種別で単位が違う):cache は key 数(個)、それ以外は bytes 整形(§4.2)。
 // overview(総覧)と ranking で共有する。null は「取得不能」。

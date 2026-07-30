@@ -18,10 +18,10 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { formatBytes } from "@/lib/format";
 import {
   type FileEntry,
   downloadFile,
-  formatBytes,
   previewUrl,
   useDeleteEntry,
   useListDir,

@@ -54,13 +54,16 @@ export function serviceVisibility(svc?: Pick<Service, "visibility">): string {
   return v === "private" || v === "public" ? v : "company";
 }
 
-// 公開範囲の選択肢(値 + 日本語ラベル)。詳細ページ(Radio)と作成フォーム(Select)が
-// 共有する単一真源 — 値・文言のドリフトを防ぐ。値はサーバの Visibility と対。
-export const VISIBILITY_OPTIONS = [
-  { value: "private", label: "非公開(外部からアクセス不可)" },
-  { value: "company", label: "社内のみ(会社 IP のみ)" },
-  { value: "public", label: "一般公開(IP 制限なし)" },
-] as const;
+// 公開範囲の選択肢(値 + 日本語ラベル)。詳細ページ(Radio)/ 作成フォーム(Select)/
+// 一覧カードのチップが共有する単一真源 — 値・文言のドリフトを防ぐ。値はサーバの Visibility と対。
+// label は short + detail から合成する(チップは short だけ使う — 文言を直しても割れない)。
+export const VISIBILITY_OPTIONS = (
+  [
+    { value: "private", short: "非公開", detail: "外部からアクセス不可" },
+    { value: "company", short: "社内のみ", detail: "会社 IP のみ" },
+    { value: "public", short: "一般公開", detail: "IP 制限なし" },
+  ] as const
+).map((o) => ({ ...o, label: `${o.short}(${o.detail})` }));
 
 // `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。Overview / Deploys で共用。
 export function shortDigest(d: string): string {

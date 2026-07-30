@@ -12,6 +12,8 @@ export type Database = {
   created_at: string;
   rotated_at: string | null;
   conn_limit: number;
+  // 実データサイズ(pg_database_size、bytes)。取得失敗・旧サーバは null/欠落 = 非表示。
+  size_bytes?: number | null;
 };
 
 // 接続枠の上限 + 実時の使用量(/capacity)。「接続が満杯に近いか」の可視化用。

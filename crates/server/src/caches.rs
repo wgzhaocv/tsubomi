@@ -21,16 +21,24 @@ use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
 
-/// `list` の行(id, display_name, anon_seq, created_at, rotated_at)。
-type CacheRow = (Uuid, String, i32, DateTime<Utc>, Option<DateTime<Utc>>);
+/// `list` / `rename` の行(id, display_name, anon_seq, created_at, rotated_at, namespace)。
+type CacheRow = (
+    Uuid,
+    String,
+    i32,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    String,
+);
 
-fn row_to_dto((id, display_name, anon_seq, created_at, rotated_at): CacheRow) -> CacheDto {
+fn row_to_dto((id, display_name, anon_seq, created_at, rotated_at, namespace): CacheRow) -> CacheDto {
     CacheDto {
         id,
         display_name,
         anon_seq,
         created_at,
         rotated_at,
+        namespace,
     }
 }
 
@@ -185,13 +193,14 @@ async fn insert_rows(
         anon_seq,
         created_at,
         rotated_at: None,
+        namespace: name.to_owned(),
     })
 }
 
 /// `GET /api/caches`:自分の cache 一覧。
 pub async fn list(auth: AuthCtx, State(state): State<AppState>) -> AppResult<Json<Vec<CacheDto>>> {
     let rows: Vec<CacheRow> = sqlx::query_as(
-        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, d.namespace
            FROM resources r
            JOIN cache_details d ON d.resource_id = r.id
           WHERE r.user_id = $1 AND r.kind = 'cache' AND r.deleted_at IS NULL
@@ -258,7 +267,7 @@ pub async fn rename(
            FROM cache_details d
           WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'cache' AND r.deleted_at IS NULL
             AND d.resource_id = r.id
-      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at",
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, d.namespace",
     )
     .bind(&display_name)
     .bind(id)

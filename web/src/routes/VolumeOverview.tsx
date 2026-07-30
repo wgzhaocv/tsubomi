@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { formatBytes, useDeleteVolume, useVolumeUsage, useVolumes } from "@/lib/volumes";
+import { formatBytes } from "@/lib/format";
+import { useDeleteVolume, useVolumeUsage, useVolumes } from "@/lib/volumes";
 
 // 概要ページ:状態(メタデータ)+ ファイルブラウザへの導線 + 危険ゾーン(削除)。
 // 注入(M3)が入るまではファイル置き場の単体運用。DatabaseOverview の簡略版。

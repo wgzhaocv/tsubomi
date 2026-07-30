@@ -169,6 +169,10 @@ pub struct DatabaseDto {
     /// 旧上限 20 なので、フォールバックは 20(新規 DB の既定 100 とは別概念)。
     #[serde(default = "default_conn_limit")]
     pub conn_limit: i32,
+    /// 実データサイズ(`pg_database_size`、bytes)。list / get_one が best-effort で載せる
+    /// (取得失敗・create/rename 応答・旧サーバは None = 表示側は出さない)。
+    #[serde(default)]
+    pub size_bytes: Option<i64>,
 }
 
 fn default_conn_limit() -> i32 {
@@ -223,6 +227,10 @@ pub struct CacheDto {
     /// 最後の rotate 時刻。これより前にコピーした接続文字列は失効済み。
     #[serde(default)]
     pub rotated_at: Option<DateTime<Utc>>,
+    /// key 前缀のもと(= `cache_details.acl_user`)。`REDIS_KEY_PREFIX` = `<namespace>:`。
+    /// 旧サーバ応答には無い(serde 既定 = 空文字)ので、表示側は空なら出さない。
+    #[serde(default)]
+    pub namespace: String,
 }
 
 /// `POST /api/caches` のリクエストボディ。

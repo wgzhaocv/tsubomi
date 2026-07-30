@@ -39,15 +39,20 @@ const MAX_QUERY_PARAM_LEN: usize = 8192;
 /// 偶の重利用を縛らない様あえて高め(噪声邻居は pgbouncer の max_user_connections + idle 超時で抑える)。
 const DEFAULT_CONN_LIMIT: i32 = 100;
 
-/// `list` / `get_one` の行(id, display_name, anon_seq, created_at, rotated_at, conn_limit)。
-type DbRow = (
-    Uuid,
-    String,
-    i32,
-    DateTime<Utc>,
-    Option<DateTime<Utc>>,
-    i32,
-);
+/// `list` / `get_one` / `rename` の行。SELECT の列順は
+/// `id, display_name, anon_seq, created_at, rotated_at, conn_limit(COALESCE), pg_dbname`。
+/// 7 列に育ってタプルの位置参照が事故りやすくなったので具名 struct(sqlx は列順で写す)。
+/// pg_dbname は DTO には出さず、`db_sizes` の対応付け(pg_database_size)にだけ使う。
+#[derive(sqlx::FromRow)]
+struct DbRow {
+    id: Uuid,
+    display_name: String,
+    anon_seq: i32,
+    created_at: DateTime<Utc>,
+    rotated_at: Option<DateTime<Utc>>,
+    conn_limit: i32,
+    pg_dbname: String,
+}
 /// `list_resources` の行(+ kind, deleted_at)。
 type ResourceRow = (
     Uuid,
@@ -58,19 +63,41 @@ type ResourceRow = (
     Option<DateTime<Utc>>,
 );
 
-/// DbRow → DatabaseDto(list と get_one が共有)。DatabaseDto も DbRow も外部型なので
-/// From は孤児規則で書けず、自由関数にする。
-fn db_row_to_dto(
-    (id, display_name, anon_seq, created_at, rotated_at, conn_limit): DbRow,
-) -> DatabaseDto {
+/// DbRow → DatabaseDto(list / get_one / rename が共有)。DatabaseDto も DbRow も外部型なので
+/// From は孤児規則で書けず、自由関数にする。size は呼び手が `db_sizes` で引いて渡す
+/// (rename は None = 表示は一覧/詳細の再取得に任せる)。
+fn db_row_to_dto(row: DbRow, size_bytes: Option<i64>) -> DatabaseDto {
     DatabaseDto {
-        id,
-        display_name,
-        anon_seq,
-        created_at,
-        rotated_at,
-        conn_limit,
+        id: row.id,
+        display_name: row.display_name,
+        anon_seq: row.anon_seq,
+        created_at: row.created_at,
+        rotated_at: row.rotated_at,
+        conn_limit: row.conn_limit,
+        size_bytes,
     }
+}
+
+/// pg-tenant の実データサイズ(bytes)をまとめて引く(1 往復)。best-effort:
+/// 失敗・欠落は map に載らない = DTO は None(一覧/詳細を size のために落とさない)。
+/// admin の overview/ranking(`admin::overview::db_size`)も単一要素でここへ委譲する
+/// (同じ量を測る SQL を 2 箇所に持たない)。
+pub(crate) async fn db_sizes(
+    state: &AppState,
+    dbnames: &[&str],
+) -> std::collections::HashMap<String, i64> {
+    if dbnames.is_empty() {
+        return Default::default();
+    }
+    sqlx::query_as::<_, (String, i64)>(
+        // datname は `name` 型なので ::text に寄せてから返す(sqlx の String 解码を確実に)。
+        "SELECT datname::text, pg_database_size(datname) FROM pg_database WHERE datname = ANY($1)",
+    )
+    .bind(dbnames)
+    .fetch_all(&state.tenant_admin)
+    .await
+    .map(|rows| rows.into_iter().collect())
+    .unwrap_or_default()
 }
 
 pub fn routes() -> Router<AppState> {
@@ -354,6 +381,8 @@ async fn insert_rows(
         created_at,
         rotated_at: None,
         conn_limit: DEFAULT_CONN_LIMIT,
+        // 作成直後の実サイズは表示に効かない(一覧/詳細の再取得で埋まる)。
+        size_bytes: None,
     })
 }
 
@@ -364,7 +393,7 @@ pub async fn list(
 ) -> AppResult<Json<Vec<DatabaseDto>>> {
     let rows: Vec<DbRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at,
-                COALESCE(ro.conn_limit, 20)
+                COALESCE(ro.conn_limit, 20) AS conn_limit, d.pg_dbname
            FROM resources r
            JOIN database_details d ON d.resource_id = r.id
            LEFT JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'human'
@@ -375,7 +404,16 @@ pub async fn list(
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(rows.into_iter().map(db_row_to_dto).collect()))
+    let dbnames: Vec<&str> = rows.iter().map(|r| r.pg_dbname.as_str()).collect();
+    let sizes = db_sizes(&state, &dbnames).await;
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| {
+                let size = sizes.get(&row.pg_dbname).copied();
+                db_row_to_dto(row, size)
+            })
+            .collect(),
+    ))
 }
 
 /// `PATCH /api/databases/:id`:表示名のリネーム。display_name(resources)だけ更新し、
@@ -395,7 +433,8 @@ pub async fn rename(
           WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'database' AND r.deleted_at IS NULL
             AND d.resource_id = r.id
             AND ro.resource_id = r.id AND ro.role_kind = 'human'
-      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, ro.conn_limit",
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at, ro.conn_limit,
+                d.pg_dbname",
     )
     .bind(&display_name)
     .bind(id)
@@ -419,7 +458,7 @@ pub async fn rename(
         auth.client_ip.as_deref(),
     )
     .await;
-    Ok(Json(db_row_to_dto(row)))
+    Ok(Json(db_row_to_dto(row, None)))
 }
 
 /// `GET /api/databases/:id`:単体。
@@ -430,7 +469,7 @@ pub async fn get_one(
 ) -> AppResult<Json<DatabaseDto>> {
     let row: Option<DbRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at, d.rotated_at,
-                COALESCE(ro.conn_limit, 20)
+                COALESCE(ro.conn_limit, 20) AS conn_limit, d.pg_dbname
            FROM resources r
            JOIN database_details d ON d.resource_id = r.id
            LEFT JOIN database_roles ro ON ro.resource_id = r.id AND ro.role_kind = 'human'
@@ -442,7 +481,8 @@ pub async fn get_one(
     .await?;
 
     let row = row.ok_or(AppError::NotFound)?;
-    Ok(Json(db_row_to_dto(row)))
+    let size = db_sizes(&state, &[&row.pg_dbname]).await.remove(&row.pg_dbname);
+    Ok(Json(db_row_to_dto(row, size)))
 }
 
 /// `GET /api/databases/:id/capacity`:接続枠の上限 + 実時の使用量(web 詳細 / `tbm db info` 用)。

@@ -16,7 +16,7 @@ import {
 } from "@/lib/admin";
 import { type HostMetrics, useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
-import { formatBytes } from "@/lib/volumes";
+import { formatBytes } from "@/lib/format";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + 資源保有ユーザ数。
 // 匿名化(設計 v2 §7):資源の名前・内容は出さない。owner ゲートは <RequireOwner>

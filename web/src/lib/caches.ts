@@ -10,9 +10,11 @@ export type Cache = {
   anon_seq: number;
   created_at: string;
   rotated_at: string | null;
+  // key 前缀のもと(REDIS_KEY_PREFIX = `<namespace>:`)。旧サーバは欠落 = 非表示。
+  namespace?: string;
 };
 
-// 詳細(GET /api/caches/:id):一覧に namespace + キー数(SCAN 概算)を足す。
+// 詳細(GET /api/caches/:id):一覧にキー数(SCAN 概算)を足す(namespace は必ず載る)。
 export type CacheDetail = Cache & {
   namespace: string;
   key_count: number | null;

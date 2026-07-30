@@ -5,6 +5,7 @@ import { useNavigate } from "react-router";
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
 import { PhaseBadge } from "@/components/phase-badge";
+import { CardChip, ResourceCard, ResourceCardGrid } from "@/components/resource-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -14,9 +15,11 @@ import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Select } from "@/components/ui/select";
 import { Title } from "@/components/ui/title";
+import { formatDate, formatRelative } from "@/lib/format";
 import {
   type CreateServiceResult,
   type Service,
+  serviceVisibility,
   useCreateService,
   useServices,
   VISIBILITY_OPTIONS,
@@ -28,6 +31,12 @@ import {
 
 // モーダルの状態(作成フォーム / 作成後の連携手順 / 閉)を 1 つの型で表す。
 type ModalState = { kind: "create" } | { kind: "setup"; result: CreateServiceResult } | null;
+
+// チップ用の公開範囲短縮ラベル(VISIBILITY_OPTIONS の short = 単一真源)。
+function visibilityShortLabel(svc: Service): string {
+  const v = serviceVisibility(svc);
+  return VISIBILITY_OPTIONS.find((o) => o.value === v)?.short ?? v;
+}
 
 export default function Services() {
   const navigate = useNavigate();
@@ -139,33 +148,40 @@ export default function Services() {
         )}
 
         {services && services.length > 0 && (
-          <ul className="grid grid-cols-[repeat(auto-fill,minmax(20rem,1fr))] gap-3">
+          <ResourceCardGrid>
             {services.map((svc: Service) => (
               <li key={svc.id}>
-                <Card
-                  interactive
+                <ResourceCard
+                  icon={<Server />}
+                  title={svc.display_name}
+                  badge={<PhaseBadge phase={svc.phase} />}
                   onClick={() => navigate(`/services/${svc.id}`)}
-                  className="flex-row items-center justify-between gap-4 py-4 pr-6"
+                  // 公開 URL のホスト部(Vercel のドメイン行に相当)。private は URL 自体が無い。
+                  description={
+                    serviceVisibility(svc) === "private"
+                      ? "非公開(公開 URL なし)"
+                      : (svc.url?.replace(/^https?:\/\//, "") ?? svc.subdomain)
+                  }
+                  footer={
+                    <>
+                      service{svc.anon_seq} · 最終デプロイ{" "}
+                      {svc.last_deploy_at ? formatRelative(svc.last_deploy_at) : "未"} · 作成{" "}
+                      {formatDate(svc.created_at)}
+                    </>
+                  }
                 >
-                  <CardContent className="flex min-w-0 items-center gap-3.5">
-                    <div className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent text-accent-foreground">
-                      <Server className="size-5.5" />
-                    </div>
-                    <div className="flex min-w-0 flex-col">
-                      <span className="truncate text-base font-bold text-foreground">
-                        {svc.display_name}
-                      </span>
-                      <span className="truncate text-xs font-medium text-muted-foreground">
-                        {svc.subdomain} · service{svc.anon_seq} · 作成{" "}
-                        {new Date(svc.created_at).toLocaleDateString("ja-JP")}
-                      </span>
-                    </div>
-                  </CardContent>
-                  <PhaseBadge phase={svc.phase} />
-                </Card>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <CardChip>{visibilityShortLabel(svc)}</CardChip>
+                    {svc.container_port !== 8080 && (
+                      <CardChip>ポート {svc.container_port}</CardChip>
+                    )}
+                    {svc.stateful && <CardChip>有状態</CardChip>}
+                    {svc.memory_mb != null && <CardChip>{svc.memory_mb} MiB</CardChip>}
+                  </div>
+                </ResourceCard>
               </li>
             ))}
-          </ul>
+          </ResourceCardGrid>
         )}
 
         {/* 作成モーダル(名前を 1 つ)。 */}
