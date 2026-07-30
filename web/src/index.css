@@ -1,5 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* @wterm(web ターミナル)の素の CSS は無 layer のため、そのまま import すると
+   Tailwind utilities 層に必ず勝ってしまう(className の padding/丸み指定が全部死ぬ)。
+   components 層へ降ろして「utilities で上書きできる普通のコンポーネント CSS」にする。 */
+@import "@wterm/react/css" layer(components);
 
 /* つぼみ — どうぶつの森(Animal Crossing)風テーマ。
    設計トークンは animal-island-ui(guokaigdg) の skill/SKILL.md を移植。
@@ -638,6 +642,47 @@
   transform: rotate(45deg);
   border-bottom: 2px solid #c4b89e;
   border-left: 2px solid #c4b89e;
+}
+
+/* web ターミナル(@wterm)の tsubomi テーマ(純パレット。built-in の
+   .wterm.theme-solarized-dark 等と同じ形 — ServiceTerminal の
+   <Terminal theme="tsubomi"> でこのクラスが付く)。
+   既定の VS Code 風ダークをやめ、カード面と同じ暖クリーム地 + ブラウン文字 +
+   ミントカーソルで画面の世界観に揃える。
+   ANSI 16 色はクリーム地に対する WCAG コントラストを制約に調色(1–6/9–14 は
+   ≥3:1、fg は 5.6:1)。白系だけ意味変換:7(白)→ 暖グレー(2.9:1 は弱調表示
+   として意図的)/ 15(明白)→ 濃ブラウン(強調)— literal な白はクリーム地で
+   1.1:1 = 不可視のため。
+   受容済みの限界(codex 審査 2026-07-31。浅色ターミナル全般の宿命で、主用途=
+   コンテナ調試の前景出力では実害が薄い):①256 色/truecolor 転義は @wterm が
+   16 色以降を硬編碼しており再調色が届かない(白 231 は不可視のまま)②reverse
+   video(0-on-7)は 2.6:1 ③15 を背景に使う TUI では濃ブラウン化が裏目
+   ④設計目標は ≥3:1 で、14px の厳密 AA(4.5:1)には 1–14 の一部が届かない
+   (本文 fg は 5.6:1 で AA)。 */
+.wterm.theme-tsubomi {
+  --term-fg: var(--card-foreground);
+  --term-bg: var(--card);
+  --term-cursor: #0c9a8d; /* ミント(--primary を 3:1 まで濃く) */
+
+  --term-color-0: #5c4a33;
+  --term-color-1: #c14b4b;
+  --term-color-2: #4e8f2c;
+  --term-color-3: #9a7b00;
+  --term-color-4: #3a72b5;
+  --term-color-5: #a05a92;
+  --term-color-6: #0f8f84;
+  --term-color-7: #9c8d74;
+  --term-color-8: #8a7b66;
+  --term-color-9: #cc4f4f;
+  --term-color-10: #459c2a;
+  --term-color-11: #a68200;
+  --term-color-12: #4a86cc;
+  --term-color-13: #b56ea6;
+  --term-color-14: #0c9a8d;
+  --term-color-15: #4a3a28;
+}
+.wterm.theme-tsubomi ::selection {
+  background: rgba(25, 200, 185, 0.25);
 }
 
 /* prefers-reduced-motion:OS が「視差効果を減らす」設定のとき、装飾アニメーション

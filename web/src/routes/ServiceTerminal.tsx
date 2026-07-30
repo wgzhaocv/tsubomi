@@ -1,5 +1,4 @@
 import { Terminal, useTerminal } from "@wterm/react";
-import "@wterm/react/css";
 import { RotateCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
@@ -104,11 +103,14 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
         {state === "open" ? "接続中" : state === "connecting" ? "接続しています…" : "切断"}
       </span>
       <div className="relative">
+        {/* @wterm の CSS は index.css で components 層へ降ろしてあるので、utility で
+            普通に上書きできる(shadow-none = 既定の黒ドロップシャドウ殺し)。 */}
         <Terminal
           ref={ref}
           autoResize
           cursorBlink
-          className="h-[480px] overflow-hidden rounded-2xl border-2 border-[#e8e2d6] p-2"
+          theme="tsubomi"
+          className="h-[480px] rounded-2xl border-2 border-[#e8e2d6] shadow-none"
           onReady={() => setReady(true)}
           onData={(d) => send(enc.encode(d))}
           onResize={(cols, rows) => send(JSON.stringify({ type: "resize", cols, rows }))}
