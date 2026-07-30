@@ -85,7 +85,9 @@ export default function ServiceOverview() {
               </a>
             )}
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          {/* 狭い画面では w-full で 2 行目へ落とす(flex-1 の URL 列は basis 0 なので、
+              放っておくとボタンより先に潰れて「wg…」だけになる)。 */}
+          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
             <Button
               type="default"
               size="small"
