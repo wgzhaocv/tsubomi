@@ -176,7 +176,6 @@ export default function Services() {
                       <CardChip>ポート {svc.container_port}</CardChip>
                     )}
                     {svc.stateful && <CardChip>有状態</CardChip>}
-                    {svc.memory_mb != null && <CardChip>{svc.memory_mb} MiB</CardChip>}
                   </div>
                 </ResourceCard>
               </li>
