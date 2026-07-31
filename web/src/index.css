@@ -685,8 +685,11 @@
   background: rgba(25, 200, 185, 0.25);
 }
 
-/* 動森カーソル(animal-island-ui Cursor の force モード移植。49×48 PNG、
-   hotspot 4 0 = 人差し指の先。原典どおりピクセル等倍 — 変えると指先がずれる)。
+/* 動森カーソル(animal-island-ui Cursor の force モード移植)。原典の 49×48 PNG は
+   大きすぎる(ユーザ反馈)ため 32×31 に再采样(hotspot も等比 4→3 = 人差し指の先)。
+   32px 以下に収めたことで Blink/Gecko の反スプーフ閾値(32px 超は bitmap が視口を
+   はみ出す位置で native 矢印へ一時回退)も踏まなくなった。ファイル名を変えたのは
+   CF が旧 URL の PNG を edge cache しているため(同名差し替えは旧が出続ける)。
    force = 全要素を !important で小手に統一する原典既定。pointer/I-beam/
    not-allowed/ns-resize(DatabaseEditor の分割条)等の機能カーソルも潰れるのは
    提示済み・受容(ユーザ選択)。戻したくなったら原典の scoped モード
@@ -698,15 +701,12 @@
    (hover/pointer は主入力デバイスしか見ない — codex 指摘)。
    @layer base に入れるのが要点:!important の cascade は層順が反転する
    (Cascade 5)ため無 layer の important は最弱。早い base 層に置けば、後続層や
-   無 layer に important な cursor が現れても刺し抜かれない。
-   受容済み:32px 超のカーソルは bitmap が視口をはみ出す位置(右/下端の
-   ~45px 帯)で native 矢印へ一時回退する(Blink/Gecko の反スプーフ閾値。
-   原典と同資産・同挙動 = 忠実移植の代価)。 */
+   無 layer に important な cursor が現れても刺し抜かれない。 */
 @layer base {
   @media (any-hover: hover) and (any-pointer: fine) {
     * {
       cursor:
-        url("/cursor/cursor-icon.png") 4 0,
+        url("/cursor/cursor-icon-32.png") 3 0,
         default !important;
     }
   }
