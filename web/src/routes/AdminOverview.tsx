@@ -14,7 +14,7 @@ import {
   KIND_LABEL,
   useAdminOverview,
 } from "@/lib/admin";
-import { type HostMetrics, useHostMetrics } from "@/lib/host-metrics";
+import { type HostMetrics, type TempSensor, useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
 import { formatBytes } from "@/lib/format";
 
@@ -167,9 +167,37 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
             detail={formatPair(data?.disk_used, data?.disk_total)}
             loading={loading}
           />
+          <TempRow temps={data?.temps ?? []} />
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// 高温の色分け閾値。現ホスト(RK3588)の throttle 帯基準 — 別機種へ移すとき見直す
+// (内核の trip_point/temp*_crit を後端が添える案は必要になったら。設計は色だけの用途)。
+const TEMP_HOT_C = 85; // 赤
+const TEMP_WARN_C = 75; // 暗金
+
+// ホスト温度のチップ列。センサ構成は機種依存(ARM SoC の zone / x86 の hwmon チップ)
+// なので label は内核の名前をそのまま出す。取得不能(dev macOS / VM)= 空なら行ごと
+// 出さない。key に index を混ぜるのは hwmon のチップ名が重複し得るため(nvme×2 等)。
+function TempRow({ temps }: { temps: TempSensor[] }) {
+  if (temps.length === 0) return null;
+  const tone = (c: number) =>
+    c >= TEMP_HOT_C ? "text-destructive" : c >= TEMP_WARN_C ? "text-[#b5862a]" : "text-foreground";
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="mr-1 w-14 shrink-0 text-xs font-semibold text-muted-foreground">温度</span>
+      {temps.map((t, i) => (
+        <span
+          key={`${t.label}-${i}`}
+          className="rounded-full bg-[rgba(196,184,158,0.18)] px-2.5 py-1 text-xs font-semibold text-muted-foreground"
+        >
+          {t.label} <span className={tone(t.temp_c)}>{t.temp_c.toFixed(1)}°C</span>
+        </span>
+      ))}
+    </div>
   );
 }
 

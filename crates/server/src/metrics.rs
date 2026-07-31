@@ -55,6 +55,16 @@ pub struct HostMetrics {
     /// 平台自身(server + infra)の**各コンテナ**の CPU/メモリ(加総せず個別に出す)。
     /// 用户 app は含めない(managed ラベルで除外)。dev は server が容器でないので出ない。
     pub platform: Vec<crate::services::docker::ContainerStat>,
+    /// ホストの温度センサ一覧。取得不能(dev macOS / VM)は空 = UI は行ごと非表示。
+    pub temps: Vec<TempSensor>,
+}
+
+/// 温度センサ 1 つ。label は内核が付けた名前(zone の type / hwmon のチップ名)を
+/// そのまま使う — 機種別の対応表は持たない(どのアーキに載るか分からない前提)。
+#[derive(Clone, Serialize)]
+pub struct TempSensor {
+    pub label: String,
+    pub temp_c: f64,
 }
 
 /// `df -Pk` の 1 行を解析したディスク容量。`gc` のディスク警告(使用率)とも共有する。
@@ -162,6 +172,7 @@ fn spawn_sampler(state: AppState) {
             // 平台自身の各コンテナ(server + infra)。docker stats を並行に取る(~1-2s)。
             // 採取はロックの外なので host 指標の鮮度を妨げない。
             let platform = crate::services::docker::platform_stats(&state).await;
+            let temps = read_temps().await;
             let snap = HostMetrics {
                 cpu_pct,
                 mem_used: mem.map(|(used, _)| used),
@@ -170,6 +181,7 @@ fn spawn_sampler(state: AppState) {
                 disk_total: disk.map(|d| d.total),
                 disk_pct: disk.map(|d| d.pct),
                 platform,
+                temps,
             };
 
             let mut running = state.metrics_running.lock().await;
@@ -258,6 +270,100 @@ async fn read_cpu_times() -> Option<CpuTimes> {
         total: vals.iter().sum(),
         idle,
     })
+}
+
+/// ホスト温度を読む。**機種非依存**(どのアーキの機に載っても動く前提):
+/// ① `/sys/class/thermal/thermal_zone*` — 内核の汎用 thermal API(ARM SoC は
+///    package/gpu 等の zone、Intel は x86_pkg_temp/acpitz)。zone 番号順。
+/// ② zone が空なら `/sys/class/hwmon` へ退避 — AMD(k10temp)や一部 x86 は
+///    thermal zone を作らず hwmon にしか出ない。hwmon は 1 チップ多センサ
+///    (coretemp の Core 0..31 等)なので**チップ毎に最大値 1 個**へ畳む
+///    (行が爆発しない + 「そのチップの一番熱い所」で警告用途には十分)。
+/// どちらも無い(VM / dev macOS)は空 = UI は行ごと出さない。全て best-effort。
+async fn read_temps() -> Vec<TempSensor> {
+    let zones = read_thermal_zones().await;
+    if !zones.is_empty() {
+        return zones;
+    }
+    read_hwmon_temps().await
+}
+
+/// /sys/class/thermal/thermal_zone*/{type,temp}。temp は千分度。label は type の
+/// ありふれた後缀 "-thermal" だけ落とす(RK3588 の "package-thermal" 等 — 対応表は持たない)。
+async fn read_thermal_zones() -> Vec<TempSensor> {
+    let mut zones: Vec<(u32, TempSensor)> = Vec::new();
+    let Ok(mut dir) = tokio::fs::read_dir("/sys/class/thermal").await else {
+        return Vec::new();
+    };
+    while let Ok(Some(ent)) = dir.next_entry().await {
+        let name = ent.file_name();
+        let Some(idx) = name
+            .to_string_lossy()
+            .strip_prefix("thermal_zone")
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let path = ent.path();
+        let (Ok(ty), Ok(raw)) = (
+            tokio::fs::read_to_string(path.join("type")).await,
+            tokio::fs::read_to_string(path.join("temp")).await,
+        ) else {
+            continue;
+        };
+        let Ok(milli) = raw.trim().parse::<i64>() else {
+            continue;
+        };
+        zones.push((
+            idx,
+            TempSensor {
+                label: ty.trim().trim_end_matches("-thermal").to_string(),
+                temp_c: milli as f64 / 1000.0,
+            },
+        ));
+    }
+    zones.sort_by_key(|(i, _)| *i);
+    zones.into_iter().map(|(_, s)| s).collect()
+}
+
+/// /sys/class/hwmon/hwmon*/(name, temp*_input)。チップ(hwmon ディレクトリ)毎に
+/// temp*_input の最大値を 1 センサとして返す。name 順で安定させる。
+async fn read_hwmon_temps() -> Vec<TempSensor> {
+    let mut chips: Vec<TempSensor> = Vec::new();
+    let Ok(mut dir) = tokio::fs::read_dir("/sys/class/hwmon").await else {
+        return Vec::new();
+    };
+    while let Ok(Some(ent)) = dir.next_entry().await {
+        let path = ent.path();
+        let Ok(name) = tokio::fs::read_to_string(path.join("name")).await else {
+            continue;
+        };
+        let mut max_milli: Option<i64> = None;
+        let Ok(mut files) = tokio::fs::read_dir(&path).await else {
+            continue;
+        };
+        while let Ok(Some(f)) = files.next_entry().await {
+            let fname = f.file_name();
+            let fname = fname.to_string_lossy();
+            if !(fname.starts_with("temp") && fname.ends_with("_input")) {
+                continue;
+            }
+            let Ok(raw) = tokio::fs::read_to_string(f.path()).await else {
+                continue;
+            };
+            if let Ok(milli) = raw.trim().parse::<i64>() {
+                max_milli = Some(max_milli.map_or(milli, |m| m.max(milli)));
+            }
+        }
+        if let Some(milli) = max_milli {
+            chips.push(TempSensor {
+                label: name.trim().to_string(),
+                temp_c: milli as f64 / 1000.0,
+            });
+        }
+    }
+    chips.sort_by(|a, b| a.label.cmp(&b.label));
+    chips
 }
 
 /// 2 サンプルの差分から CPU 使用率(%)。間隔ゼロ / カウンタ巻き戻りは None。

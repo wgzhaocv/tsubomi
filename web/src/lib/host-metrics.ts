@@ -12,6 +12,13 @@ export type ContainerStat = {
   mem_bytes: number;
 };
 
+// 温度センサ 1 つ。label は内核が付けた名前そのまま(thermal zone の type /
+// hwmon のチップ名 — 機種別対応表は持たない)。
+export type TempSensor = {
+  label: string;
+  temp_c: number;
+};
+
 export type HostMetrics = {
   cpu_pct: number | null;
   mem_used: number | null;
@@ -21,6 +28,8 @@ export type HostMetrics = {
   disk_pct: number | null;
   // 平台自身(server + infra)の各コンテナ。dev は server が容器でないので出ない。
   platform: ContainerStat[];
+  // ホスト温度。取得不能(dev macOS / VM)は空 = 行ごと非表示。
+  temps: TempSensor[];
 };
 
 // 接続状態。WS が開けないと "closed"(rendering 側で控えめに扱う)。
