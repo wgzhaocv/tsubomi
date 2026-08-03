@@ -181,6 +181,9 @@ pub struct Config {
     /// **0 = 探測無効の退路**(存活確認のみ = v47 までの挙動)。company/public のユーザ契機
     /// deploy にだけ効く(private / reconcile 復活は元々探測しない — deploy.rs)。
     pub ready_timeout_secs: u64,
+    /// db fork(dump + restore)全体の期限(秒。`TSUBOMI_FORK_TIMEOUT_SECS`、既定 300)。
+    /// 超過はロールバック(作りかけの新 DB を掃除)して失敗にする。大庫は --schema-only へ誘導。
+    pub fork_timeout_secs: u64,
     /// **危険操作の確認コードを log に出すことを明示的に許す**(`TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES`、
     /// 既定 false)。dev で Resend 未契約のとき owner がコードを使えるようにする退路。**本番では絶対に
     /// 立てない** — log アクセス権だけで owner の危険操作(他人資源の stop/delete)を完遂できてしまう。
@@ -562,6 +565,10 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(60);
+        let fork_timeout_secs: u64 = std::env::var("TSUBOMI_FORK_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
         // 危険操作コードの log 出力許可(dev 退路。本番では立てない — §admin/actions.rs)。
         let dev_insecure_log_action_codes = std::env::var("TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES")
             .map(|v| v == "true" || v == "1")
@@ -619,6 +626,7 @@ impl Config {
             disk_warn_pct,
             disk_critical_pct,
             ready_timeout_secs,
+            fork_timeout_secs,
             dev_insecure_log_action_codes,
         })
     }

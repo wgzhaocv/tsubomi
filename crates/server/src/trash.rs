@@ -180,11 +180,18 @@ async fn restore_cache(state: &AppState, id: Uuid) -> AppResult<Option<i64>> {
 /// database の復元:role は残っているので DATABASE を再作成して dump を流し込む。
 /// dump 削除は呼び出し側(deleted_at クリア後)が行う。
 async fn restore_database(state: &AppState, id: Uuid, trash_meta: &Option<Value>) -> AppResult<()> {
-    let (dbname,): (String,) =
-        sqlx::query_as("SELECT pg_dbname FROM database_details WHERE resource_id = $1")
-            .bind(id)
-            .fetch_one(&state.db)
-            .await?;
+    // 流し込みは admin ではなくその DB の app role で行う(tenant::restore_database の doc 参照)
+    // ので、pg_dbname と一緒に app の資格情報も引いて復号する。
+    let (dbname, app_pw_enc): (String, Vec<u8>) = sqlx::query_as(
+        "SELECT d.pg_dbname, ro.password_enc
+           FROM database_details d
+           JOIN database_roles ro ON ro.resource_id = d.resource_id AND ro.role_kind = 'app'
+          WHERE d.resource_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let app_pw = state.crypto.decrypt(&app_pw_enc)?;
     let names = DbNames::from_dbname(dbname);
 
     // 作りかけの空 DB を残さないよう、dump を先に検証してから DATABASE を作る。
@@ -201,7 +208,8 @@ async fn restore_database(state: &AppState, id: Uuid, trash_meta: &Option<Value>
     if let Err(e) = tenant::restore_database(
         &state.config.tenant_admin_url,
         &names.dbname,
-        &names.owner,
+        &names.app,
+        &app_pw,
         &dump,
     )
     .await

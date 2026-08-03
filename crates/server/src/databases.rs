@@ -20,9 +20,8 @@ use futures_util::StreamExt;
 use serde_json::json;
 use sqlx::{Column, Connection, Executor, PgPool, Row, SqlSafeStr};
 use tsubomi_shared::{
-    ConnectionUrlResp, CreateDatabaseReq, DatabaseCapacityDto, DatabaseDto, QueryReq, QueryResp,
-    QueryResultSet,
-    RenameDatabaseReq, ResourceDto,
+    ConnectionUrlResp, CreateDatabaseReq, DatabaseCapacityDto, DatabaseDto, ForkDatabaseReq,
+    QueryReq, QueryResp, QueryResultSet, RenameDatabaseReq, ResourceDto,
 };
 use uuid::Uuid;
 
@@ -105,6 +104,7 @@ pub fn routes() -> Router<AppState> {
         .route("/resources", get(list_resources))
         .route("/databases", get(list).post(create))
         .route("/databases/{id}", get(get_one).patch(rename).delete(delete))
+        .route("/databases/{id}/fork", post(fork))
         .route("/databases/{id}/capacity", get(capacity))
         .route("/databases/{id}/url", get(url))
         .route("/databases/{id}/rotate", post(rotate))
@@ -233,6 +233,96 @@ pub(crate) fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> App
     }
 }
 
+/// 同名チェック(tenant DDL の前に行い、無駄な CREATE/DROP DATABASE を避ける)。
+/// UNIQUE (user_id, kind, display_name) はゴミ箱内(deleted_at)も含むのでここも全行を見る。
+/// 競合(同時 create/fork)は insert_rows の UNIQUE が最終ガード。create / fork が共有。
+async fn ensure_db_name_free(db: &PgPool, user_id: Uuid, display_name: &str) -> AppResult<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'database' AND display_name = $2)",
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .fetch_one(db)
+    .await?;
+    if exists {
+        return Err(AppError::Conflict(format!(
+            "データベース名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+        )));
+    }
+    Ok(())
+}
+
+/// DB 資源の開通の共通骨格(create / fork が共有):新 wire 名 + role 3 本 + パスワード 2 本を
+/// 生成 → tenant DDL →(fork なら元の内容を流し込み)→ platform 行。**どこで失敗しても
+/// tenant 側を掃除**して「platform 行が在る ⇒ tenant DB が在る」を保つ。
+///
+/// `restore_from` = `(元 pg_dbname, schema_only)`。流し込み(pg_dump|psql パイプ)**だけ**に
+/// `fork_timeout_secs` の期限を掛ける — DDL と insert_rows(commit を含む)は有界なので包まない。
+/// commit 中に期限が切れると「platform 行は commit 済みなのに tenant DB を掃除する」という
+/// 不変式破りが起き得るため、期限はキャンセル安全な区間に限る(kill_on_drop で子プロセスも止まる)。
+async fn provision_database(
+    state: &AppState,
+    user_id: Uuid,
+    display_name: &str,
+    restore_from: Option<(&str, bool)>,
+) -> AppResult<(DatabaseDto, DbNames)> {
+    let names = DbNames::generate();
+    let app_pw = tenant::gen_password();
+    let human_pw = tenant::gen_password();
+
+    let result: AppResult<DatabaseDto> = async {
+        tenant::create_database(
+            &state.tenant_admin,
+            &state.config.tenant_admin_url,
+            &names,
+            &app_pw,
+            &human_pw,
+            DEFAULT_CONN_LIMIT,
+        )
+        .await?;
+
+        if let Some((src_dbname, schema_only)) = restore_from {
+            let limit = std::time::Duration::from_secs(state.config.fork_timeout_secs);
+            let pipe = tenant::fork_database(
+                &state.config.tenant_admin_url,
+                src_dbname,
+                &names,
+                &app_pw,
+                schema_only,
+                state.config.fork_timeout_secs,
+            );
+            match tokio::time::timeout(limit, pipe).await {
+                Ok(r) => r?,
+                Err(_) => {
+                    return Err(AppError::BadRequest(format!(
+                        "fork がタイムアウトしました({} 秒)。大きなデータベースは --schema-only(構造のみ)を検討してください。フルデータの複製が必要な場合は管理者に TSUBOMI_FORK_TIMEOUT_SECS の引き上げを相談してください",
+                        state.config.fork_timeout_secs
+                    )));
+                }
+            }
+        }
+
+        let app_enc = state.crypto.encrypt(&app_pw)?;
+        let human_enc = state.crypto.encrypt(&human_pw)?;
+        insert_rows(&state.db, user_id, display_name, &names, app_enc, human_enc).await
+    }
+    .await;
+
+    match result {
+        Ok(dto) => Ok((dto, names)),
+        Err(e) => {
+            // 残骸を掃除(IF EXISTS なので、どの段で失敗していても同じ 1 手)。掃除自体の失敗は
+            // 握り潰さず wire 名ごと記録する(残骸の物証。起動時の孤児 warn が第二の網)。
+            if let Err(cleanup) = tenant::drop_database_and_roles(&state.tenant_admin, &names).await
+            {
+                tracing::error!(error = ?cleanup, dbname = %names.dbname,
+                    "開通ロールバックに失敗 — tenant 側に残骸の可能性(手動確認を)");
+            }
+            Err(e)
+        }
+    }
+}
+
 /// `POST /api/databases`:DB 作成。
 pub async fn create(
     auth: AuthCtx,
@@ -240,63 +330,9 @@ pub async fn create(
     Json(req): Json<CreateDatabaseReq>,
 ) -> AppResult<(StatusCode, Json<DatabaseDto>)> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+    ensure_db_name_free(&state.db, auth.user_id, &display_name).await?;
 
-    // 同名チェックを tenant DDL の前に行い、無駄な CREATE/DROP DATABASE を避ける。
-    // UNIQUE (user_id, kind, display_name) はゴミ箱内(deleted_at)も含むので
-    // ここも全行を見る。競合(同時 create)は insert_rows の UNIQUE が最終ガード。
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'database' AND display_name = $2)",
-    )
-    .bind(auth.user_id)
-    .bind(&display_name)
-    .fetch_one(&state.db)
-    .await?;
-    if exists {
-        return Err(AppError::Conflict(format!(
-            "データベース名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
-        )));
-    }
-
-    let names = DbNames::generate();
-    let app_pw = tenant::gen_password();
-    let human_pw = tenant::gen_password();
-
-    // 1. tenant 側 DDL を先に(CREATE DATABASE はトランザクション不可)。
-    if let Err(e) = tenant::create_database(
-        &state.tenant_admin,
-        &state.config.tenant_admin_url,
-        &names,
-        &app_pw,
-        &human_pw,
-        DEFAULT_CONN_LIMIT,
-    )
-    .await
-    {
-        // 途中で失敗 → 残骸を掃除(「platform 行が在る ⇒ tenant DB が在る」を保つ)。
-        let _ = tenant::drop_database_and_roles(&state.tenant_admin, &names).await;
-        return Err(e);
-    }
-
-    // 2. platform 側にメタを記録(パスワードは暗号化)。
-    let app_enc = state.crypto.encrypt(&app_pw)?;
-    let human_enc = state.crypto.encrypt(&human_pw)?;
-    let dto = match insert_rows(
-        &state.db,
-        auth.user_id,
-        &display_name,
-        &names,
-        app_enc,
-        human_enc,
-    )
-    .await
-    {
-        Ok(dto) => dto,
-        Err(e) => {
-            // platform 挿入に失敗 → tenant 側をロールバック。
-            let _ = tenant::drop_database_and_roles(&state.tenant_admin, &names).await;
-            return Err(e);
-        }
-    };
+    let (dto, names) = provision_database(&state, auth.user_id, &display_name, None).await?;
 
     audit(
         &state.db,
@@ -384,6 +420,135 @@ async fn insert_rows(
         // 作成直後の実サイズは表示に効かない(一覧/詳細の再取得で埋まる)。
         size_bytes: None,
     })
+}
+
+/// `POST /api/databases/:id/fork`:既存 DB をこの瞬間の内容ごと新しい DB に複製する。
+/// 新 DB は完全な新規資源(新 wire 名 + 新 role + 新パスワード — 元と資格情報を共有しない)。
+/// fork 後の同期はしない:分岐した瞬間から別々の道を行くのが仕様(dev 環境の意義 = 汚してよい)。
+///
+/// `CREATE DATABASE … TEMPLATE` は使わない(テンプレート元に接続が 1 本でもあると失敗し、
+/// pgbouncer 常時接続の本番では実質不成立)。`pg_dump | psql` のパイプ直結で複製する
+/// (MVCC の一致スナップショット = 元 DB は無停止。中間ファイル無し)。
+pub async fn fork(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ForkDatabaseReq>,
+) -> AppResult<(StatusCode, Json<DatabaseDto>)> {
+    let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+
+    // 元 DB の所有権 + 存在(他人・ゴミ箱内は 404 に収束 = 既存規律)。
+    let src: Option<(String, String)> = sqlx::query_as(
+        "SELECT d.pg_dbname, r.display_name
+           FROM resources r
+           JOIN database_details d ON d.resource_id = r.id
+          WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'database' AND r.deleted_at IS NULL",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let (src_dbname, src_display) = src.ok_or(AppError::NotFound)?;
+    ensure_db_name_free(&state.db, auth.user_id, &display_name).await?;
+
+    // 流し込みは分単位になり得るので spawn に隔離する:クライアント切断(CF Tunnel の
+    // ~100s 上限など)でハンドラ future が cancel されても作業は完走し、ロールバック規律が
+    // 壊れない。応答を受け取れなかった場合も新 DB は一覧に現れる。
+    let handle = tokio::spawn(fork_inner(
+        state,
+        auth,
+        id,
+        src_dbname,
+        src_display,
+        display_name,
+        req.schema_only,
+    ));
+    match handle.await {
+        Ok(result) => result.map(|dto| (StatusCode::CREATED, Json(dto))),
+        Err(e) => Err(AppError::Other(anyhow::anyhow!(
+            "fork タスクが異常終了しました: {e}"
+        ))),
+    }
+}
+
+/// fork の本体(spawn 内)。開通 + 流し込み + 掃除は provision_database に委譲。
+async fn fork_inner(
+    state: AppState,
+    auth: AuthCtx,
+    source_id: Uuid,
+    src_dbname: String,
+    src_display: String,
+    display_name: String,
+    schema_only: bool,
+) -> AppResult<DatabaseDto> {
+    let (dto, names) = provision_database(
+        &state,
+        auth.user_id,
+        &display_name,
+        Some((&src_dbname, schema_only)),
+    )
+    .await?;
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "db.fork",
+        dto.id,
+        json!({
+            "display_name": display_name,
+            "pg_dbname": names.dbname,
+            "source_id": source_id,
+            "source_display_name": src_display,
+            "schema_only": schema_only,
+        }),
+        auth.client_ip.as_deref(),
+    )
+    .await;
+    Ok(dto)
+}
+
+/// 起動時の可視化:pg-tenant に実在するのに platform 行(database_details)が 1 本も無い
+/// `db_*` を警告する — create / fork がロールバック(drop)まで到達せずプロセスごと死んだ
+/// 残骸(fork は窓が分単位で、`just ship` の server 入替がそこに着地し得る)。
+/// **自動削除はしない**(DR 直後・手動復旧中の誤爆が怖い。判断は人間に残す)。
+pub async fn log_orphan_tenant_dbs(state: &AppState) {
+    let in_tenant: Vec<String> = match sqlx::query_scalar(
+        r"SELECT datname::text FROM pg_database WHERE datname LIKE 'db\_%'",
+    )
+    .fetch_all(&state.tenant_admin)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = ?e, "孤児 DB 検査: pg_database の列挙に失敗");
+            return;
+        }
+    };
+    if in_tenant.is_empty() {
+        return;
+    }
+    // ゴミ箱内も database_details 行は残る(DROP 済みでも行は在る)ので、
+    // 「行が 1 本も無い」= どの経路の資源でもない = 中断の残骸。
+    let known: Vec<String> =
+        match sqlx::query_scalar("SELECT pg_dbname FROM database_details WHERE pg_dbname = ANY($1)")
+            .bind(&in_tenant)
+            .fetch_all(&state.db)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = ?e, "孤児 DB 検査: database_details の照合に失敗");
+                return;
+            }
+        };
+    let known: std::collections::HashSet<String> = known.into_iter().collect();
+    let orphans: Vec<String> = in_tenant.into_iter().filter(|d| !known.contains(d)).collect();
+    if !orphans.is_empty() {
+        tracing::warn!(
+            ?orphans,
+            "pg-tenant に platform 行の無い DB が残っています(create/fork 中断の残骸の可能性。手動確認を)"
+        );
+    }
 }
 
 /// `GET /api/databases`:自分の DB 一覧。

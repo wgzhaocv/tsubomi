@@ -205,6 +205,18 @@ pub struct RenameDatabaseReq {
     pub name: String,
 }
 
+/// `POST /api/databases/:id/fork`:既存 DB をこの瞬間の内容ごと新しい DB に複製する。
+/// 新 DB は完全な新規資源(新 wire 名 + 新 role + 新パスワード。元と資格情報を共有しない)。
+/// fork 後の同期はしない — 分岐した瞬間から別々の道を行くのが仕様(dev 環境の意義 = 汚してよい)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForkDatabaseReq {
+    /// 新 DB の表示名。
+    pub name: String,
+    /// true ならテーブル構造だけ複製しデータは含めない(機微データを撒かない / 大庫の高速化)。
+    #[serde(default)]
+    pub schema_only: bool,
+}
+
 /// `GET /api/databases/:id/url` / `POST /api/databases/:id/rotate` のレスポンス。
 /// 外部(human role)接続文字列。**パスワードそのもの** — 表示箇所で警告すること。
 #[derive(Debug, Clone, Serialize, Deserialize)]

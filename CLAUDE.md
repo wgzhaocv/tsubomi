@@ -366,6 +366,25 @@ infinity は `DateTime<Utc>` に読み込めず sqlx が「`NaiveDateTime + Time
 いたので、「digest が一致する最初の成功行」1 件に絞り、バッジを左のステータス側へ移した
 (右に置くとバッジの幅の分だけボタンが行ごとにずれて履歴が不揃いに見える — ユーザ報告)。
 
+**db fork(2026-08-03、tbm 1.0.34):database 複製 — 「基礎版 Neon」の看板能力**。dev/検証環境用に
+「この瞬間の構造 + データごと」の複製を一動詞で:`tbm db fork <元> <新名> [--schema-only]` + web 概要の
+「複製」セクション。**同期は作らない(恒久)** — fork 後は分道揚镳が仕様(データ向下 = 再 fork /
+構造向上 = app 自身の migration というユーザ自留地)。採用筛子は「**只有平台能做的,才值得平台做**」
+(CREATEDB は tenant-admin 権限 = ユーザ容器で代替不能。cron 案はこの筛子で却下 — crond 容器で足りる)。
+実装:同期 201・migration ゼロ、`pg_dump 元 | psql 新` の**パイプ直結**(TEMPLATE はテンプレート元に
+接続 1 本で失敗 = pgbouncer 常時接続の本番で不成立。パイプは中間ファイル無し + dump/restore 並走)、
+新 DB は完全な新規資源(新 wire 名 + 新 role 3 本 + 新パスワード — 資格情報を元と共有しない)。開通は
+`databases.rs::provision_database`(create と fork の共有骨格:tenant DDL →[流し込み]→ platform 行、
+失敗はどこでも `drop_database_and_roles` 1 手)。**タイムアウト(`TSUBOMI_FORK_TIMEOUT_SECS` 既定 300)は
+流し込み段だけに掛ける** — commit まで包むと「期限が commit 直後に切れ platform 行だけ残る」不変式破りが
+起き得る(4 simplify agents の審査で捕獲。併せて `kill_on_drop` + pg_dump `--lock-wait-timeout` で
+期限切れは実際に止まる、ハンドラは spawn 包裹 = CF Tunnel ~100s 切断でも完走)。**codex 深審の主捕獲:
+流し込み psql を admin + SET ROLE でなく新 DB の app role 接続に**(dump 内容はユーザ制御 —
+CHECK 制約の関数等から `RESET ROLE` で superuser に戻れた = 跨租户。app なら session_user が無特権。
+**trash 復元も同穴だったので同時修正** — fork が既存の穴を炙り出した)。残骸可視化:起動時に
+platform 行の無い `db_*` を warn(`log_orphan_tenant_dbs`、spawn 化で起動非阻塞・自動削除はしない)。
+実装級・受容 6 項は **`doc/paas-db-fork-design.md`**。
+
 ## 重要な約束事
 
 - **ドキュメント(md)もコードコメントも日本語で書く**(設計議論の中国語

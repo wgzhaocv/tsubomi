@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Eye, EyeOff, RotateCw, Trash2, TriangleAlert } from "lucide-react";
+import { Eye, EyeOff, GitFork, RotateCw, Trash2, TriangleAlert } from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CodeBlock } from "@/components/ui/codeblock";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
@@ -13,19 +14,26 @@ import {
   useDatabaseCapacity,
   useDatabases,
   useDeleteDatabase,
+  useForkDatabase,
   useRevealUrl,
   useRotate,
   useTables,
 } from "@/lib/databases";
 
-// 概要ページ:状態(メタデータ)+ 接続文字列(表示 / rotate)+ 危険ゾーン(削除)。
+// 概要ページ:状態(メタデータ)+ 接続文字列(表示 / rotate)+ 複製 + 危険ゾーン(削除)。
 // 接続文字列は秘密なので既定は隠し、表示要求時だけ取得して画面ローカルに置く。
 
-export default function DatabaseOverview() {
+// 現在の DB(URL の :id)を一覧キャッシュから引く。各 section が同じ導出を持っていたのを一本化
+// (サーバ状態は各 section が自前で引く方針のまま — これはその共通の入口)。
+function useCurrentDb() {
   const { id = "" } = useParams();
-  const navigate = useNavigate();
   const { data: dbs } = useDatabases();
-  const db = dbs?.find((d) => d.id === id);
+  return { id, db: dbs?.find((d) => d.id === id) };
+}
+
+export default function DatabaseOverview() {
+  const navigate = useNavigate();
+  const { id, db } = useCurrentDb();
   const { data: tables } = useTables(id);
   // 外部接続文字列機能が有効か(部署のトポロジ依存)。off の環境では接続文字列カードを隠す
   // (防御は後端 — ここは UX)。authInfo はアプリ起動時に取得済みでほぼキャッシュ命中。
@@ -79,6 +87,14 @@ export default function DatabaseOverview() {
             <strong>「SQL」</strong>・<strong>「テーブル」</strong>タブを使ってください。
           </p>
         ) : null}
+      </section>
+
+      <Divider type="line-brown" />
+
+      {/* ===== 複製 ===== */}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-lg font-bold text-foreground">複製</h2>
+        <ForkSection />
       </section>
 
       <Divider type="line-brown" />
@@ -151,6 +167,108 @@ export default function DatabaseOverview() {
   );
 }
 
+// 複製(fork)カード:この瞬間の構造 + データごと新しい DB を作る。dev/検証環境用の
+// 真実データが一発で手に入る。fork 後の同期はしない(分岐した瞬間から別々の道)。
+// サーバ状態は自前のフックで引く(props で配らない方針 — [[frontend-state-and-components]])。
+function ForkSection() {
+  const navigate = useNavigate();
+  const { id, db } = useCurrentDb();
+  const fork = useForkDatabase(id);
+
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [schemaOnly, setSchemaOnly] = useState(false);
+
+  const submit = () => {
+    const trimmed = name.trim();
+    if (!trimmed || fork.isPending) return;
+    fork.mutate(
+      { name: trimmed, schemaOnly },
+      { onSuccess: (newDb) => navigate(`/databases/${newDb.id}`) },
+    );
+  };
+
+  return (
+    <>
+      <p className="text-sm font-medium text-muted-foreground">
+        この瞬間の内容ごと新しいデータベースを作ります(開発・検証環境用)。複製後に同期は
+        されず、それぞれ独立して変化します。新しい DB の接続文字列は元とは別物です。
+      </p>
+      <Button
+        type="default"
+        icon={<GitFork className="size-4" />}
+        className="w-fit"
+        onClick={() => {
+          // 走行中に再度開いたときは state を作り直さない(reset すると isPending の観察が
+          // 外れて二重 fork を許してしまう)。開き直して進行中の表示に戻すだけ。
+          if (!fork.isPending) {
+            setName(db ? `${db.display_name}-dev` : "");
+            setSchemaOnly(false);
+            fork.reset();
+          }
+          setOpen(true);
+        }}
+      >
+        このデータベースを複製
+      </Button>
+
+      <Modal
+        open={open}
+        title="データベースを複製"
+        typewriter={false}
+        width={460}
+        onClose={() => {
+          // 走行中は閉じさせない(閉じても fork は止まらず、完了時に突然遷移して見える)。
+          if (!fork.isPending) setOpen(false);
+        }}
+        footer={
+          <>
+            <Button type="text" disabled={fork.isPending} onClick={() => setOpen(false)}>
+              キャンセル
+            </Button>
+            <Button
+              type="primary"
+              loading={fork.isPending}
+              disabled={!name.trim()}
+              onClick={submit}
+            >
+              複製する
+            </Button>
+          </>
+        }
+      >
+        <form
+          className="flex w-full flex-col gap-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <Input
+            label="新しい名前"
+            value={name}
+            autoFocus
+            placeholder={`例:${db?.display_name ?? "myapp-db"}-dev`}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <Checkbox
+            aria-label="複製の範囲"
+            options={[{ label: "スキーマのみ(データを含めない)", value: "schema" }]}
+            value={schemaOnly ? ["schema"] : []}
+            onChange={(vals) => setSchemaOnly(vals.includes("schema"))}
+          />
+          <p className="text-sm font-medium text-muted-foreground">
+            データ量によっては完了まで時間がかかります。
+          </p>
+          {fork.error && (
+            <p className="text-sm font-semibold text-[#e05a5a]">{fork.error.message}</p>
+          )}
+        </form>
+      </Modal>
+    </>
+  );
+}
+
 // 接続容量カード:1 ロールあたりの上限 + 実時の使用量(human / app)。「接続を食い潰して
 // いないか」を可視化する。実時用量は /capacity を定期取得(useDatabaseCapacity が 15s 毎)。
 function CapacitySection() {
@@ -177,9 +295,7 @@ function CapacitySection() {
 // サーバ状態は自前のフックで引く(props で配らない方針 — [[frontend-state-and-components]])。
 // 秘密の接続文字列は Query に載せず、表示 / rotate 要求時だけ取得して画面ローカルに置く。
 function ConnectionStringSection() {
-  const { id = "" } = useParams();
-  const { data: dbs } = useDatabases();
-  const db = dbs?.find((d) => d.id === id);
+  const { id, db } = useCurrentDb();
   const reveal = useRevealUrl();
   const rotate = useRotate();
 

@@ -84,6 +84,24 @@ export function useCreateDatabase() {
   });
 }
 
+// 複製(fork):この瞬間の構造 + データごと新しい DB を作る(schemaOnly で構造のみ)。
+// 新 DB は完全な新規資源(接続文字列は元と別物)。fork 後の同期はしない。
+export function useForkDatabase(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { name: string; schemaOnly: boolean }): Promise<Database> => {
+      const res = await fetch(`/api/databases/${id}/fork`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: input.name, schema_only: input.schemaOnly }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as Database;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: dbKeys.all }),
+  });
+}
+
 export function useDeleteDatabase() {
   const qc = useQueryClient();
   return useMutation({

@@ -15,6 +15,17 @@ pub enum DbCmd {
         /// 表示名(例:myapp-db)
         name: String,
     },
+    /// 複製(この瞬間の構造 + データごと新しい DB を作る。dev 環境用の真実データが一発で
+    /// 手に入る。fork 後は同期しない = 別々の道を行く。新 DB の接続文字列は元とは別物)
+    Fork {
+        /// 複製元データベースの表示名(`tbm db list` で確認)
+        name: String,
+        /// 新しいデータベースの表示名(例:myapp-db-dev)
+        new_name: String,
+        /// テーブル構造だけ複製しデータは含めない(機微データを撒かない / 大きな DB の高速化)
+        #[arg(long)]
+        schema_only: bool,
+    },
     /// 一覧
     List,
     /// 表示名を変更(接続文字列・dbname は不変)
@@ -96,6 +107,28 @@ pub async fn run(
                 print_json(&db)?;
             } else {
                 println!("作成しました:{} (database{})", db.display_name, db.anon_seq);
+                println!("接続文字列:  tbm db url {}", db.display_name);
+            }
+        }
+        DbCmd::Fork {
+            name,
+            new_name,
+            schema_only,
+        } => {
+            let id = resolve_id(&c, &server_url, &token, &name).await?;
+            if !json {
+                // データ量次第で分単位。無言だと途中失敗と区別できないので一言(stderr)。
+                eprintln!("複製中…(データ量によっては時間がかかります)");
+            }
+            let db = api::db_fork(&c, &server_url, &token, &id, &new_name, schema_only).await?;
+            if json {
+                print_json(&db)?;
+            } else {
+                let mode = if schema_only { "(スキーマのみ)" } else { "" };
+                println!(
+                    "複製しました:{} (database{}) ← {name}{mode}",
+                    db.display_name, db.anon_seq
+                );
                 println!("接続文字列:  tbm db url {}", db.display_name);
             }
         }

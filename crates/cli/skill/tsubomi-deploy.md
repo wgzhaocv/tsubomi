@@ -66,6 +66,9 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
     `--memory <MiB>`(硬上限。既定 1024)/ `--cpus <N>`。**visibility 以外はすべて作成後に変更できない**
     — 間違えたら削除して作り直す(OOM で memory を増やしたい場合も作り直し)。
 - database:`tbm db create <名前>`
+  - **dev/検証環境用の DB が欲しい → `tbm db fork <元> <新名> [--schema-only]`**(この瞬間の
+    構造 + データごと複製。migration 再生や手動データ投入は不要。`--schema-only` = 構造だけ。
+    fork 後は同期されない = 汚してよい。大きな DB でタイムアウトしたら `--schema-only` を検討)
 - volume:`tbm volume create <名前>`(ファイル永続が要るなら)
 - cache:`tbm cache create <名前>`(valkey が要るなら)
 

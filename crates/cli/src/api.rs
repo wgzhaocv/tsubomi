@@ -5,7 +5,8 @@ use tsubomi_shared::{
     CacheDetailDto, CacheDto, ConnectionUrlResp, CreateCacheReq, CreateDatabaseReq,
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, CreateVolumeReq, DatabaseCapacityDto,
     DatabaseDto,
-    DeployConfig, DeployDto, ExecReq, ExecResult, Health, InjectionDto, ListDirResp, LogsResp, Me,
+    DeployConfig, DeployDto, ExecReq, ExecResult, ForkDatabaseReq, Health, InjectionDto,
+    ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameVolumeReq, RollbackReq,
     ServiceDto, SetEnvReq, SetEnvResp, SetServiceVisibilityReq, TrashItemDto, VolumeDto,
 };
@@ -144,6 +145,26 @@ pub async fn db_create(
     )
     .await?;
     resp.json().await.context("failed to parse create response")
+}
+
+pub async fn db_fork(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+    schema_only: bool,
+) -> Result<DatabaseDto> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/databases/{id}/fork"))
+            .bearer_auth(token)
+            .json(&ForkDatabaseReq {
+                name: name.to_owned(),
+                schema_only,
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse fork response")
 }
 
 pub async fn db_rename(

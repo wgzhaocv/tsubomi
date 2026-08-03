@@ -44,8 +44,8 @@ enum Cmd {
         #[arg(long)]
         web: bool,
     },
-    /// データベース(create / list / rename / url(接続文字列)/ info(接続枠)/
-    /// rotate / delete / connect(psql)/ query(SQL 実行))
+    /// データベース(create / fork(複製)/ list / rename / url(接続文字列)/
+    /// info(接続枠)/ rotate / delete / connect(psql)/ query(SQL 実行))
     Db {
         #[command(subcommand)]
         action: commands::db::DbCmd,

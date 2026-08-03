@@ -317,6 +317,7 @@ pub async fn dump_database(admin_url: &str, dbname: &str, dump_path: &Path) -> A
         .env("PGPASSWORD", &c.password)
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()?
         .wait_with_output()
         .await?;
@@ -324,6 +325,104 @@ pub async fn dump_database(admin_url: &str, dbname: &str, dump_path: &Path) -> A
         return Err(AppError::Other(anyhow!(
             "pg_dump 失敗: {}",
             String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(())
+}
+
+/// fork 用:`pg_dump 元 | psql 新` をパイプ直結で流す(中間ファイル無し。dump と restore が
+/// 並走するので大 DB の墙鐘時間は落盤中転の約半分)。呼び手(fork)は timeout でこの future を
+/// 途中 drop し得るので `kill_on_drop` を両方に付け、「T 秒で報告する」ではなく「T 秒で止める」
+/// にする(孤児 pg_dump/psql が共有ホストで走り続けない)。pg_dump には `--lock-wait-timeout`
+/// も掛ける(ロック待ちで固まった backend はローカル kill では死なないため、待ち自体を有界に)。
+///
+/// **流し込みは admin ではなく新 DB の app role で接続する**(codex 審査 2026-08-03 の主指摘):
+/// dump の中身はユーザ制御(自分の DB とはいえ CHECK 制約から呼ばれる関数等に任意 SQL を仕込める)で、
+/// admin セッション + `SET ROLE` だと `RESET ROLE` 一発で superuser に戻れてしまう。app role なら
+/// session_user 自体が無特権 = 逃げ場が無い。app は `ALTER ROLE … SET ROLE owner` 済みなので
+/// 復元オブジェクトは従来どおり owner 所有になる。
+///
+/// **exit code は必ず両方検査する**:pg_dump が途中死してもパイプが文の境界で切れると
+/// psql は正常終了し得るため、psql 成功だけでは複製完了を意味しない。
+pub async fn fork_database(
+    admin_url: &str,
+    src_dbname: &str,
+    dst: &DbNames,
+    dst_app_pw: &str,
+    schema_only: bool,
+    lock_wait_secs: u64,
+) -> AppResult<()> {
+    if !is_safe_ident(src_dbname) {
+        return Err(AppError::Other(anyhow!("識別子が不正: {src_dbname}")));
+    }
+    check_idents(dst)?;
+    check_password(dst_app_pw)?;
+    let c = conn_parts(admin_url)?;
+
+    let mut dump_cmd = Command::new("pg_dump");
+    dump_cmd.args([
+        "-h",
+        &c.host,
+        "-p",
+        &c.port,
+        "-U",
+        &c.user,
+        "-d",
+        src_dbname,
+        "--no-owner",
+        "--no-privileges",
+    ]);
+    dump_cmd.arg(format!("--lock-wait-timeout={}", lock_wait_secs.saturating_mul(1000)));
+    if schema_only {
+        dump_cmd.arg("--schema-only");
+    }
+    let mut dump = dump_cmd
+        .env("PGPASSWORD", &c.password)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let dump_stdout = dump
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Other(anyhow!("pg_dump の stdout を取得できません")))?;
+    let stdin: Stdio = dump_stdout
+        .try_into()
+        .map_err(|e| AppError::Other(anyhow!("pg_dump stdout のパイプ変換に失敗: {e}")))?;
+
+    let psql = Command::new("psql")
+        .args([
+            "-h",
+            &c.host,
+            "-p",
+            &c.port,
+            "-U",
+            &dst.app,
+            "-d",
+            &dst.dbname,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-q",
+        ])
+        .env("PGPASSWORD", dst_app_pw)
+        .stdin(stdin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let (dump_out, psql_out) = tokio::join!(dump.wait_with_output(), psql.wait_with_output());
+    let (dump_out, psql_out) = (dump_out?, psql_out?);
+    if !dump_out.status.success() {
+        return Err(AppError::Other(anyhow!(
+            "pg_dump(fork 元)失敗: {}",
+            String::from_utf8_lossy(&dump_out.stderr)
+        )));
+    }
+    if !psql_out.status.success() {
+        return Err(AppError::Other(anyhow!(
+            "psql(fork 先への流し込み)失敗: {}",
+            String::from_utf8_lossy(&psql_out.stderr)
         )));
     }
     Ok(())
@@ -367,16 +466,21 @@ pub async fn dump_url(conn_url: &str, dump_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// dump を再作成済みの DB に流し込む。`role=<owner>` で作成オブジェクトを owner 所有に。
+/// dump を再作成済みの DB に流し込む。**admin ではなくその DB の app role で接続する**
+/// (fork_database と同じ理由:dump の中身はユーザ制御なので superuser セッションに触れさせない。
+/// `RESET ROLE` されても session_user = 無特権の app 止まり)。app は `ALTER ROLE … SET ROLE owner`
+/// 済みなので復元オブジェクトは owner 所有になる。host/port は admin_url から流用する。
 pub async fn restore_database(
     admin_url: &str,
     dbname: &str,
-    owner: &str,
+    app_role: &str,
+    app_pw: &str,
     dump_path: &Path,
 ) -> AppResult<()> {
-    if !is_safe_ident(owner) {
-        return Err(AppError::Other(anyhow!("owner 識別子が不正: {owner}")));
+    if !is_safe_ident(app_role) {
+        return Err(AppError::Other(anyhow!("role 識別子が不正: {app_role}")));
     }
+    check_password(app_pw)?;
     let c = conn_parts(admin_url)?;
     let file = std::fs::File::open(dump_path)?;
     let out = Command::new("psql")
@@ -386,19 +490,18 @@ pub async fn restore_database(
             "-p",
             &c.port,
             "-U",
-            &c.user,
+            app_role,
             "-d",
             dbname,
             "-v",
             "ON_ERROR_STOP=1",
             "-q",
         ])
-        .env("PGPASSWORD", &c.password)
-        // admin は superuser なので role を owner に切替 → 復元オブジェクトが owner 所有になる。
-        .env("PGOPTIONS", format!("-c role={owner}"))
+        .env("PGPASSWORD", app_pw)
         .stdin(Stdio::from(file))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await?;
     if !out.status.success() {
