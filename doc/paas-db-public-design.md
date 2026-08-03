@@ -114,7 +114,8 @@ DR 手順が必須(`doc/paas-dr-restore-runbook.md` §E)。**種のままでは�
 
 - **dev(済)**:`just check`(cargo check + clippy -D warnings + web lint)+ `cargo test -p tsubomi-server ipblock`
   (`render_db_tcp_yaml` の passthrough/fail-open/cidr 制限テスト)。
-- **VPS(落地後)**:`-f compose.prod.yml -f compose.prod.db-public.yml up -d` →
+- **VPS(落地後)**:`-f compose.prod.yml -f compose.prod.db-public.yml up -d`(他の overlay も
+  在れば全部 `-f` に — ship は自動)→
   許可 IP から `psql "postgres://…@<vps>:6432/…?sslmode=require"` が通り、**非許可 IP は拒否**されること。
   web で `ip-allowlist` を足し引きして TCP 側が即収束するか確認。
 

@@ -8,6 +8,8 @@
 #     TSUBOMI_CACHE_PUBLIC_HOST=cache.tsubomi-app.com
 #     TSUBOMI_CACHE_PUBLIC_PORT=443
 #   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.cache-public.yml up -d valkey
+#   (ホストに他の overlay も在るなら **在るもの全部を -f に連ねる** — `just ship` は自動で全載せ。
+#    部分 -f だと compose が残りの overlay の容器を「孤児」誤報 + 再作成時に構成が欠ける)
 #
 # 仕組み:valkey が内部 6379(明文・不変)に加え :6380 で **TLS を端到端終端**(LE 証書 SAN=cache.<域名>)。
 #   ホスト loopback 127.0.0.1:6380 に出し、frpc@Pi がそれを frps の loopback proxy 口へ中継 →

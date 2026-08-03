@@ -12,6 +12,7 @@
 #                                            # (server がこの名前を per-service 私網の網別名に生やす)
 #     (+ db.<域名> 等の A レコードを VPS 公網 IP へ。:6432 が公網到達できること)
 #   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.db-public.yml up -d
+#   (ホストに他の overlay も在るなら在るもの全部を -f に連ねる — `just ship` は自動で全載せ)
 #
 # 仕組み:平台(server)が db_public_enabled=true の時 db-tcp.yml(tcp router + ipAllowList +
 #   service=tsubomi-pgbouncer:6432)を動的設定へ書く(ipblock::sync_traefik)。Traefik は **素の TCP
@@ -26,7 +27,10 @@
 #    db-tcp.yml が未定義の postgres 入口を参照し router が不活性になる(Traefik は警告のみ・無害だが繋がらない)。
 #  * **compose.prod.tls.yml と同居**(直 VPS で traefik が :443 も終端)する場合、両者とも `command` を
 #    全置換するので web+websecure+postgres を**一つの command に統合**すること(本ファイル単体は
-#    上流 TLS = HTTP は :80 のみ、という常用形を想定)。
+#    上流 TLS = HTTP は :80 のみ、という常用形を想定)。統合は **repo に無い名前の host 私有
+#    ファイル**(例 compose.prod.zz-merged.yml — ship は LC_ALL=C で枚挙するので zz- は
+#    必ず -f 末尾 = command が必ず勝つ)に書く。repo 同名のホスト側コピーを直接編集しては
+#    いけない — ship が毎回 repo 版で上書きし統合結果が消える。
 #
 # ※ `command`(リスト)は後勝ちで全置換なので base(compose.prod.yml)の行も再掲する。`ports` はマージ
 #   (:6432 が base に足される)。pgbouncer の host publish は `!reset` で落とす — 公開 6432 は Traefik が

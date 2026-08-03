@@ -64,6 +64,7 @@ db-public(sni-gate + frp)と同じ骨格。違いは 2 点:
      ```
    - `.env.production` に `TSUBOMI_REGISTRY_DIRECT` / `CF_DNS_API_TOKEN` / `TSUBOMI_ACME_EMAIL`
    - `docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.registry-direct.yml up -d traefik`
+     (ホストに他の overlay も在るなら在るもの全部を `-f` に連ねる — `just ship` は自動で全載せ)
    - server を新イメージへ(`just ship`)→ 起動時 `sync_traefik` が registry.yml に直連 router を書く
 4. **検証**:
    - `docker login registry-direct.tsubomi-app.com`(既存アカウント)が通る

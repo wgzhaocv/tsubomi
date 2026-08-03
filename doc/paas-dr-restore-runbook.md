@@ -14,7 +14,7 @@ AI 審査 R11 への回答:日次バックアップ(`gc.rs::run_backup`)は「�
 |---|---|---|
 | **TSUBOMI_MASTER_KEY** | Pi の `~/tsubomi-deploy/.env.production` | **最重要**。DB 内の全暗号列(deploy_key_enc / password_enc 等)はこの鍵で封緘。鍵を失うと平文バックアップ以外は全て廃紙。**バックアップとは別の場所(パスワードマネージャ等)に必ず控える** |
 | 日次バックアップ | `/srv/tsubomi/backups/YYYY-MM-DD/` | サーバプロセスが毎日生成、**7 日で自動削除**(`BACKUP_RETAIN_DAYS`) |
-| compose 定義 | `~/tsubomi-deploy/compose.prod.yml` | `just ship` が毎回配布(git にもある) |
+| compose 定義 | `~/tsubomi-deploy/compose.prod*.yml` | `just ship` が毎回配布(git にもある)。**どの overlay を置いてあるか = そのホストの拓撲宣言**(現 Pi = cache-public + registry-direct)で、これは git に無い(git には全種類ある)。フル DR で base だけ復元すると cache TLS 口・registry 直連入口が**静かに**欠けるので、**選用 overlay の組も控えておく** |
 | .env.production | Pi のみ(git に無い) | master key / valkey admin pass / owner 種など。**これ自体も控えを取る** |
 | **acme.sh のアカウント + DNS API トークン** | Pi の `~/.acme.sh/`(`CF_Token` 等は同ディレクトリの account.conf) | **新たな単点**(2026-07-26)。`db.<域名>` の証書を再発行できないと、注入ホスト名が証書と食い違い**厳格検証する駆動系の app が全滅**する(§E)。バックアップに入っていない — 別途控える |
 | 証書更新 hook | 正本 = git の `deploy/db-public/reload-pgb-cert.sh`(cache 側は `deploy/cache-public/`) | ホストへは**手で配置**して acme.sh の `--reloadcmd` に登録する(compose は参照しない)。§5 で再配置が必要 |
@@ -131,10 +131,12 @@ app が bind mount で見ているのはホスト側の実ディレクトリな�
 
 順序が本体。**「compose → 管制面 → テナント → volumes → 検証」**:
 
-1. 新機に docker / justfile 前提を用意し、`~/tsubomi-deploy/` に `compose.prod.yml` と
-   **控えておいた `.env.production`**(master key 含む)を置く。
+1. 新機に docker / justfile 前提を用意し、`~/tsubomi-deploy/` に **`compose.prod*.yml` 一式**
+   (基底 + §0 で控えた**選用 overlay の組** — repo から取れる。host 私有の `zz-merged` 等は
+   repo に無いので**実体も控えから戻す**)と **控えておいた `.env.production`**(master key
+   含む)を置く。overlay を欠いたまま進めると cache TLS 口・registry 直連等が**静かに**欠ける。
 2. 外部に同期してあったバックアップを `/srv/tsubomi/backups/<日付>/` へ戻す。
-3. `docker compose -f compose.prod.yml up -d pg-platform pg-tenant` だけ起こし、
+3. `docker compose <在るもの全部を -f に> up -d pg-platform pg-tenant` だけ起こし、
    §2 で管制面を復元(server はまだ起こさない)。
 4. §3 の「クラスタごと失った場合」の手順で各テナント DB を復元(role 再作成 + rotate)。
 5. `volumes/` を `/srv/tsubomi/volumes/` へ rsync(§4、こちらは全量で良い)。
@@ -147,7 +149,8 @@ app が bind mount で見ているのはホスト側の実ディレクトリな�
    **acme.sh を通せないなら**、その間は `.env.production` の `TSUBOMI_DB_INTERNAL_HOST` を
    **容器名(`tsubomi-pgbouncer`)へ戻しておく** — 種の自己署名では厳格検証する駆動系が繋がらないので、
    検証しない駆動系だけでも動く状態に倒す(後で証書を入れたら戻して server 再起動 + 再デプロイ)。
-6. 残りの infra + server を起こす:`docker compose -f compose.prod.yml up -d`。
+6. 残りの infra + server を起こす:`docker compose <在るもの全部を -f に> up -d`
+   (以降は `just ship` が在る overlay を自動で全載せする)。
 7. **全 service を再デプロイ**(registry イメージはバックアップ外。CI 再実行か
    `tbm deploy --local`。rotate した DB の新パスワードもこの再デプロイで注入される)。
 8. DNS / CF Tunnel を新機へ向け直す。

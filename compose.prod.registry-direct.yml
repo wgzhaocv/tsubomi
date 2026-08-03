@@ -14,11 +14,13 @@
 #     CF_DNS_API_TOKEN=<Cloudflare API Token(Zone:DNS:Edit)>  # LE DNS-01 用(公網 :80 不要)
 #     TSUBOMI_ACME_EMAIL=<メール>
 #   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.registry-direct.yml up -d traefik
+#   (ホストに他の overlay も在るなら在るもの全部を -f に連ねる — `just ship` は自動で全載せ)
 #
 # 地雷:
 #  * **`command`(リスト)は後勝ちで全置換**なので base(compose.prod.yml)の行も再掲する
 #    (compose.prod.db-public.yml と同じ扱い)。tls.yml / db-public.yml と同居するときは
-#    3 者の command を**一つに統合**すること。
+#    3 者の command を**一つに統合**すること — 統合先は **repo に無い名前の host 私有ファイル**
+#    (例 compose.prod.zz-merged.yml。ship は repo 同名を毎回上書きするので、就地編集は消える)。
 #  * ports は 127.0.0.1 bind:公網から :8443 へ直接は届かない(frpc 経由のみ)。
 #  * 証明書は **DNS-01**(cloudflare provider):この部署は CF Tunnel で traefik が公網 :80 を
 #    持たないため HTTP-01 は不成立。CF_DNS_API_TOKEN はゾーンの DNS 編集権限だけの token にする。

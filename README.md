@@ -104,7 +104,8 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
      例(cloudflared / Caddy も同様に host で分岐)。
    - **(B) traefik 自身が :443 + Let's Encrypt**(直 VPS、`TSUBOMI_TLS=true`)— 前段プロキシ不要。
      `*.<ドメイン>` / `registry.<ドメイン>` の A を VPS のグローバル IP へ。起動は
-     `-f compose.prod.yml -f compose.prod.tls.yml`。
+     `-f compose.prod.yml -f compose.prod.tls.yml`(他の overlay も置いてあれば
+     在るもの全部を `-f` に — `just ship` は自動で全載せ)。
    - **M1 の DB 入口(pgbouncer :6432)を必ず会社 CIDR に絞る**(iptables の
      `DOCKER-USER` チェーン。ufw だけでは Docker を素通りする — design v2 §1)。
      `PGBOUNCER_BIND_ADDR=0.0.0.0` は「受ける」だけで、送信元制限はこの柵が担う。
@@ -119,7 +120,8 @@ amd64 = x86_64 VPS)。**運用側はこれを pull するだけ — 自前ビル
    docker compose -f compose.prod.yml logs -f server
    ```
 8. **更新(server だけ・ユーザ app 無瞬断)**:新しい `compose.prod.yml` を取得して
-   `TSUBOMI_IMAGE=...:vN docker compose --env-file .env.production -f compose.prod.yml up -d server`。
+   `TSUBOMI_IMAGE=...:vN docker compose --env-file .env.production -f compose.prod.yml up -d server`
+   (overlay を置いた機では在るもの全部を `-f` に連ねる — `just ship` は自動で全載せ)。
    **`up -d`(全 service)ではなく `up -d server` に絞る**のが要点 — traefik / pg / valkey などデータ面・
    入口を巻き込んで再生成せず、全 app の同時瞬断を避ける(infra は compose 内で digest 固定済みなので
    勝手に動かない)。停止は `docker compose -f compose.prod.yml stop`(`down` は使わない — コンテナを
