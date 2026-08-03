@@ -184,7 +184,15 @@ function ForkSection() {
     if (!trimmed || fork.isPending) return;
     fork.mutate(
       { name: trimmed, schemaOnly },
-      { onSuccess: (newDb) => navigate(`/databases/${newDb.id}`) },
+      {
+        onSuccess: (newDb) => {
+          // `/databases/:id` は id が変わっても同じ route コンポーネント = 再マウントされない
+          // ので、遷移前に Modal を明示的に閉じる(閉じないと新 DB のページに複製ダイアログが
+          // 開いたまま残る)。遷移が成功のフィードバック(toast は無い文化)。
+          setOpen(false);
+          navigate(`/databases/${newDb.id}`);
+        },
+      },
     );
   };
 

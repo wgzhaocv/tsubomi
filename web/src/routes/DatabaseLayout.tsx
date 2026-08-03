@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import { ArrowLeft, LayoutDashboard, SquareTerminal, Table2 } from "lucide-react";
 import { Link, NavLink, Outlet, useParams } from "react-router";
 
@@ -30,6 +30,14 @@ export default function DatabaseLayout() {
   const rename = useRenameDatabase(id);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
+
+  // 別 DB へ遷移したら先頭へ戻す。`/databases/:id` は id が違っても同じ route =
+  // 再マウントされないので、SPA ではスクロール位置がそのまま残る(複製で新 DB に
+  // 飛んだとき途中位置のままだった)。useLayoutEffect = 描画前に同期で滚る
+  // (useEffect だと「新 DB の内容 + 旧位置」が 1 フレーム見えてから跳ぶ)。
+  useLayoutEffect(() => {
+    window.scrollTo(0, 0);
+  }, [id]);
 
   const submitRename = () => {
     const trimmed = renameName.trim();
