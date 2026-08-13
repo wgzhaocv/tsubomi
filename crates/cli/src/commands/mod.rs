@@ -135,3 +135,121 @@ pub async fn resolve_service_id(
             .into()
         })
 }
+
+// ===== MSYS(Git Bash)パス正規化 =====
+
+/// MSYS 環境の情報。実行時は `msys_env()` で採取、テストでは直接組む
+/// (login.rs の choose_manual と同じ「検出と判定の分離」)。
+pub struct MsysEnv {
+    /// MSYSTEM(MINGW64 等)が立っている = Git Bash / MSYS2 配下。
+    pub in_msys: bool,
+    /// Git Bash が輸出する EXEPATH(Git インストールルート。例 `C:\Program Files\Git`)。
+    pub exepath: Option<String>,
+}
+
+/// 実行環境から MsysEnv を採取(Windows 以外は常に in_msys=false = 正規化は素通し)。
+pub fn msys_env() -> MsysEnv {
+    if !cfg!(windows) {
+        return MsysEnv {
+            in_msys: false,
+            exepath: None,
+        };
+    }
+    MsysEnv {
+        in_msys: std::env::var_os("MSYSTEM").is_some(),
+        exepath: std::env::var("EXEPATH").ok(),
+    }
+}
+
+/// **遠端パス引数**(volume 假根内パス / inject --mount)の MSYS 化けを復元する。
+/// Git Bash は POSIX 風の絶対パス引数(`/data/x`)をネイティブ exe に渡す瞬間に
+/// `<Git ルート>/data/x`(例 `C:/Program Files/Git/data/x`)へ書き換える。遠端パスは
+/// 協定上ドライブレターを持ち得ないため、この化けは**無歧義に**検出・復元できる
+/// (EXEPATH 前綴の完全一致 = 確定的。启发式ではない)。ローカルパス引数は変換の
+/// 恩恵を受ける(POSIX 風 `/c/Users/…` → 開ける Windows パス)ので触らないこと。
+/// - MSYS 外:原样(Windows ネイティブ shell のドライブレターも素通し — サーバ側で弾かれる)。
+/// - `//x…` → `/x…`(手動の双斜線エスケープ。MSYS は `//` 開頭を変換しない)。
+/// - ドライブレター + EXEPATH 前綴一致 → 前綴を剥がして `/rest` に復元。
+/// - ドライブレター + 不一致(純 MSYS2 等で EXEPATH 無し含む)→ 次の一手つきエラー。
+pub fn normalize_remote_path(arg: &str, env: &MsysEnv) -> Result<String> {
+    if !env.in_msys {
+        return Ok(arg.to_string());
+    }
+    if let Some(rest) = arg.strip_prefix("//") {
+        return Ok(format!("/{rest}"));
+    }
+    if !has_drive_prefix(arg) {
+        return Ok(arg.to_string());
+    }
+    if let Some(exepath) = &env.exepath {
+        let arg_s = slashify(arg);
+        let exe_s = slashify(exepath.trim_end_matches(['/', '\\']));
+        // eq_ignore_ascii_case は長さ保存(NTFS の大小文字ゆれだけ吸収、非 ASCII は厳密比較)。
+        // get(..) は文字境界も守る(境界を跨ぐなら一致し得ない = None で不一致扱い)。
+        if let Some(prefix) = arg_s.get(..exe_s.len())
+            && prefix.eq_ignore_ascii_case(&exe_s)
+            && arg_s[exe_s.len()..].starts_with('/')
+        {
+            return Ok(arg_s[exe_s.len()..].to_string());
+        }
+    }
+    anyhow::bail!(
+        "パス '{arg}' は MSYS(Git Bash)のパス変換で書き換えられたようです。\
+         `MSYS_NO_PATHCONV=1 tbm …` で変換を止めるか、先頭 `/` を外した相対パスで指定してください"
+    )
+}
+
+/// `X:` 開頭(Windows ドライブレター)か。遠端パスには現れ得ない形。
+fn has_drive_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+/// `\` → `/`(向きゆれの正規化。比較・復元は `/` 基準で行う)。
+fn slashify(s: &str) -> String {
+    s.replace('\\', "/")
+}
+
+#[cfg(test)]
+mod msys_tests {
+    use super::{MsysEnv, normalize_remote_path};
+
+    fn msys(exepath: Option<&str>) -> MsysEnv {
+        MsysEnv {
+            in_msys: true,
+            exepath: exepath.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn normalize_remote_path_truth_table() {
+        let plain = MsysEnv {
+            in_msys: false,
+            exepath: None,
+        };
+        let git = msys(Some(r"C:\Program Files\Git"));
+
+        // MSYS 外:原样(ドライブレターも触らない)
+        assert_eq!(normalize_remote_path("C:/x", &plain).unwrap(), "C:/x");
+        assert_eq!(normalize_remote_path("/a/b", &plain).unwrap(), "/a/b");
+        // 双斜線エスケープの還元
+        assert_eq!(normalize_remote_path("//data/x", &git).unwrap(), "/data/x");
+        // EXEPATH 前綴の剥離(斜線向き・大小文字ゆれを吸収、rest の大小文字は保存)
+        assert_eq!(
+            normalize_remote_path("C:/Program Files/Git/data/X.txt", &git).unwrap(),
+            "/data/X.txt"
+        );
+        assert_eq!(
+            normalize_remote_path(r"c:\program files\git\Data", &git).unwrap(),
+            "/Data"
+        );
+        // 前綴が似ているだけの別パスは剥がさない(Git2 ≠ Git)
+        assert!(normalize_remote_path("C:/Program Files/Git2/data", &git).is_err());
+        // EXEPATH 不明(純 MSYS2 等)でドライブレター → 次の一手つきエラー
+        assert!(normalize_remote_path("C:/msys64/data/x", &msys(None)).is_err());
+        // 相対・素の絶対・空は原样
+        assert_eq!(normalize_remote_path("data/x", &git).unwrap(), "data/x");
+        assert_eq!(normalize_remote_path("/data/x", &git).unwrap(), "/data/x");
+        assert_eq!(normalize_remote_path("", &git).unwrap(), "");
+    }
+}

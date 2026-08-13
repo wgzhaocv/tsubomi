@@ -4,7 +4,8 @@ use serde_json::json;
 
 use crate::api;
 use crate::commands::{
-    OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
+    OutputFormat, msys_env, normalize_remote_path, print_json, resolve_server_from,
+    resolve_service_id, resolve_token_from,
 };
 use crate::config;
 
@@ -44,6 +45,14 @@ pub async fn run_inject(
     let json = out.is_json();
     let c = reqwest::Client::new();
 
+    // --mount はコンテナ内パス(遠端)。MSYS(Git Bash)の化けを復元してからサーバへ
+    // (サーバは `:` 混入で弾くが、そのエラーは原因を指さない)。
+    let mount = args
+        .mount
+        .as_deref()
+        .map(|m| normalize_remote_path(m, &msys_env()))
+        .transpose()?;
+
     let svc_id = resolve_service_id(&c, &server_url, &token, &args.into).await?;
     let res_id = resolve_resource(&c, &server_url, &token, &args.resource).await?;
     let inj = api::inject_create(
@@ -53,7 +62,7 @@ pub async fn run_inject(
         &svc_id,
         &res_id,
         args.env_as.as_deref(),
-        args.mount.as_deref(),
+        mount.as_deref(),
     )
     .await?;
 

@@ -3,7 +3,10 @@ use clap::Subcommand;
 use serde_json::json;
 
 use crate::api;
-use crate::commands::{OutputFormat, print_json, resolve_server_from, resolve_token_from};
+use crate::commands::{
+    OutputFormat, msys_env, normalize_remote_path, print_json, resolve_server_from,
+    resolve_token_from,
+};
 use crate::config;
 use tsubomi_shared::VolumeDto;
 
@@ -135,6 +138,7 @@ pub async fn run(
             }
         }
         VolumeCmd::Ls { volume, path } => {
+            let path = normalize_remote_path(&path, &msys_env())?;
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
             let listing = api::volume_ls(&c, &server_url, &token, &id, &path).await?;
             if json {
@@ -164,7 +168,11 @@ pub async fn run(
             remote,
         } => {
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
-            let remote = remote.unwrap_or_else(|| basename(&local));
+            // remote 側だけ正規化(local は MSYS 変換の恩恵を受けるので触らない)。
+            let remote = match remote {
+                Some(r) => normalize_remote_path(&r, &msys_env())?,
+                None => basename(&local),
+            };
             // ストリーム上传(api 側でファイルを開いて逐次送信)。返り値が送信バイト数。
             let bytes = api::volume_upload(&c, &server_url, &token, &id, &remote, &local).await?;
             if json {
@@ -179,6 +187,8 @@ pub async fn run(
             local,
         } => {
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
+            // basename は正規化**後**の remote から取る(化けた前綴からファイル名を拾わない)。
+            let remote = normalize_remote_path(&remote, &msys_env())?;
             let local = local.unwrap_or_else(|| basename(&remote));
             // ストリーム下载(api 側で dest へ逐次書き込み)。返り値が書込バイト数。
             let bytes = api::volume_download(&c, &server_url, &token, &id, &remote, &local).await?;
@@ -189,6 +199,7 @@ pub async fn run(
             }
         }
         VolumeCmd::Rm { volume, path } => {
+            let path = normalize_remote_path(&path, &msys_env())?;
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
             api::volume_rm(&c, &server_url, &token, &id, &path).await?;
             if json {
@@ -198,6 +209,7 @@ pub async fn run(
             }
         }
         VolumeCmd::Mkdir { volume, path } => {
+            let path = normalize_remote_path(&path, &msys_env())?;
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
             api::volume_mkdir(&c, &server_url, &token, &id, &path).await?;
             if json {
@@ -207,6 +219,8 @@ pub async fn run(
             }
         }
         VolumeCmd::Mv { volume, from, to } => {
+            let from = normalize_remote_path(&from, &msys_env())?;
+            let to = normalize_remote_path(&to, &msys_env())?;
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
             api::volume_move(&c, &server_url, &token, &id, &from, &to).await?;
             if json {
