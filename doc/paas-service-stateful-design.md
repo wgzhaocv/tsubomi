@@ -252,6 +252,8 @@ env.push((format!("{base}_PORT"), port.to_string()));            // 追加
   セットでのみ解禁(§0-D の不整合を塞いでから)。
 - **§10-D stateful の後から変更入口**(false→true 片方向、visibility 同型の専用 POST):
   既存 workaround service(DB を stateless で走らせている人)が現れたら。
+  → **2026-08-13 解禁済み**(server v54:`POST /services/{id}/stateful` + `tbm service stateful`。
+  memory/cpus も同時に `POST /services/{id}/limits` で後変更可に。§10-C の port だけ不変のまま)。
 - **compose_spec 多容器**(tech-design M6):同生死 sidecar/worker の需要が立ってから。
 - **§10-E registry GC の keep-set 欠陥(既存バグ・本設計とは独立。S2 の dev e2e で発見 →
   2026-07-03 修正済み・v42)**:従来の日次 GC `--delete-untagged` は「tag 失参照 = ゴミ」と見なすが、

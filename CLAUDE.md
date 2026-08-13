@@ -385,6 +385,33 @@ CHECK 制約の関数等から `RESET ROLE` で superuser に戻れた = 跨租�
 platform 行の無い `db_*` を warn(`log_orphan_tenant_dbs`、spawn 化で起動非阻塞・自動削除はしない)。
 実装級・受容 6 項は **`doc/paas-db-fork-design.md`**。
 
+**AI フィードバック第 5 弾(2026-08-13、server v54 / tbm 1.0.35):「機制優先」の刚性緩和 4 点**。
+外部 AI の試用フィードバック 4 条への回答。方針 =「skill で AI を引導するのではなく CLI/server に
+固定する」(引導は速度・精度・コストで負ける — ユーザ定調)。(S1)**ゴミ箱は名前を占有しない**:
+表級 `UNIQUE(user_id,kind,display_name)` → 活体のみの部分ユニーク index(migration `20260813000001`)。
+delete → 同名 create が purge 不要で通る。restore は活体衝突を物理復元の**前**に 409 + TOCTOU は
+map_unique + **物理復元の巻き戻し**(undo_restore — 旧 DB 露出 / volume 孤児化を防ぐ)。restore/purge/gc
+は per-id ロック(deploy_lock 流用)で直列化 — GC が読んだ候補の復元後破壊を封殺。db restore は
+drop-first で再試行安全に。CLI trash は同名堆積を id(完全 UUID = id 語義 / 8 桁以上 hex 前方一致 /
+両方該当は曖昧エラー)で消歧。anon_seq の UNIQUE は**据え置き**(採番が全行を見る前提)。
+(S2)`tbm service rename`(PATCH /services/{id}。subdomain/URL/GitHub repo 不変 — db rename と同型)。
+(S3)`tbm service limits`(memory/cpus。**次のデプロイから反映** — run_digest が毎回 DB 直読)+
+`tbm service stateful`(false→true 単方向 §10-D。true→false は双開方向なので入口なし)。作成後不変は
+**port だけ**に縮小(§0-D は不変)。web 概要に上限表示 + 変更 UI(lost update は seed 快照 diff で防止)。
+(S4)**private の verify = 内網 TCP 探活**:`GET /services/{id}/probe`(単発 connect、全 attach 網、
+非 Linux は「探せない」と正直に返す)+ is_callee(**生きた** caller の注入だけ数える)。CLI の判定は
+三値(`ok: true/false/null` — listen しない worker は罰しない。自動分岐は json の ok を読む)+ serving
+照合材料付き。(S5)**MSYS パス化けの確定的復元**:volume 遠端パス / `--mount` は EXEPATH 前綴一致で
+CLI が自動復元(遠端パスはドライブレターを持ち得ない = 無歧義。ローカルパスは MSYS 変換の恩恵側なので
+不変)。(S6)**create の json 既定 = GitHub 編排**(秘密 stdin 直達 = 転録に残らない。旧摊平 DTO は
+`--no-github` に退避 — 明示 opt-in でのみ秘密が stdout に出る)。付随修理(codex 3 輪 + simplify 5 輪、
+真バグ 10+ 件):stop-first が RESTARTING を停止対象に(crash-loop 旧容器の双開)/ stateful 退路は
+「直近成功容器 1 つ + 新の不走行確認」の二重門 / deploy --watch は解決済み UUID を持ち回り rename に
+耐性(名前再解決を廃止。resolve への UUID 直通は「B の名前 = A の id」誤配送になるので不採用)/
+web は Outlet を id で key(同 route 遷移で modal・秘密・編集状態が別リソースへ持ち越される事故を
+一括封殺)。教訓:**「作成後変更可」を足したら、その不可能性を前提にした文案・skill・退路コードを
+全部掃く**(3 箇所の「visibility だけ」文案が審査 3 本全部に刺された)。
+
 ## 重要な約束事
 
 - **ドキュメント(md)もコードコメントも日本語で書く**(設計議論の中国語
