@@ -426,8 +426,19 @@ pub async fn run(
             for_sha,
             timeout,
         } => {
-            run_verify(&c, &server_url, &token, &name, wait, for_sha.as_deref(), timeout, json)
-                .await?;
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            run_verify(
+                &c,
+                &server_url,
+                &token,
+                &id,
+                &name,
+                wait,
+                for_sha.as_deref(),
+                timeout,
+                json,
+            )
+            .await?;
         }
         ServiceCmd::Delete { name, with_repo } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
@@ -1230,15 +1241,18 @@ fn short_deploy_id(s: &str) -> String {
 
 // ===== verify(公開 URL の存活検証) =====
 
-/// `tbm service verify` の本体(deploy --watch も CI 成功後にこれを呼ぶ)。名前解決 →
+/// `tbm service verify` の本体(deploy --watch も CI 成功後にこれを呼ぶ)。
 /// private / URL 無しの短絡 → (wait / for_sha なら)デプロイ完走待ち → 検証 → serving 付与 →
 /// 報告出力 + 検証結果を終了コードに映す(NG は exit 1)。`for_sha` の `HEAD` は手元 repo で解決、
 /// 非 sha は早期に弾く(満了空回り + 誤診を防ぐ)。
+/// 対象は **id(解決済み UUID)で受ける** — 長時間処理(--watch の CI 待ち)の後に名前を
+/// 再解決すると途中の rename で迷子になるため。`name` は文案用の表示名(陳腐でも無害)。
 #[allow(clippy::too_many_arguments)] // API triple(c/server/token)+ 対象 + 検証オプション。束ねる価値は薄い。
 pub(crate) async fn run_verify(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
+    id: &str,
     name: &str,
     wait: bool,
     for_sha: Option<&str>,
@@ -1260,8 +1274,7 @@ pub(crate) async fn run_verify(
             "--for-sha の値 '{s}' は commit sha ではありません。full/短縮 sha か `HEAD` を指定してください(例:--for-sha $(git rev-parse HEAD))"
         );
     }
-    let id = resolve_service_id(c, server_url, token, name).await?;
-    let svc = api::service_get(c, server_url, token, &id).await?;
+    let svc = api::service_get(c, server_url, token, id).await?;
     // private は公開 URL 自体が無効(route 無し)なので URL 検証はできない。代わりに
     // **内網 TCP 探活**(server 側から serving コンテナの container_port へ単発 connect)で
     // 「今この瞬間 listen しているか」を検証する。--wait / --for-sha はデプロイ完走を
@@ -1274,9 +1287,9 @@ pub(crate) async fn run_verify(
                 timeout_secs: timeout,
                 quiet: json,
             };
-            wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+            wait_for_deploy(c, server_url, token, id, name, spec).await?;
         }
-        return report_probe(c, server_url, token, &id, name, json).await;
+        return report_probe(c, server_url, token, id, name, json).await;
     }
     if svc.url.is_empty() {
         bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
@@ -1289,14 +1302,14 @@ pub(crate) async fn run_verify(
             timeout_secs: timeout,
             quiet: json,
         };
-        wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+        wait_for_deploy(c, server_url, token, id, name, spec).await?;
         verify_with_retry(c, &svc.url).await?
     } else {
         verify_url(c, &svc.url).await?
     };
     // いま serving 中のデプロイを報告に付す(「見ているのが新版か」の機械判別材料)。
     let mut report = report;
-    report.serving = fetch_serving(c, server_url, token, &id).await;
+    report.serving = fetch_serving(c, server_url, token, id).await;
     if json {
         // 報告は JSON で出しつつ、終了コードも検証結果を映す(grep 型の「チェック
         // コマンド」なのでシェル / CI が exit code だけで分岐できる — codex 監査)。
@@ -1346,50 +1359,120 @@ pub(crate) async fn run_verify(
 /// 指定 sha のデプロイの完走だけを待って結果を報告する(`run_verify` の private 短絡は
 /// `tbm service verify` としては正しいが、`deploy --watch` では「待たず失敗扱い」に見えるため
 /// この経路を分ける)。deploy が failed ならその error を出して非零終了する。
+#[allow(clippy::too_many_arguments)] // run_verify と同型(API triple + 対象 id/name + オプション)。
 pub(crate) async fn wait_deploy_only(
     c: &reqwest::Client,
     server_url: &str,
     token: &str,
+    id: &str,
     name: &str,
     for_sha: &str,
     timeout: u64,
     json: bool,
 ) -> Result<()> {
-    let id = resolve_service_id(c, server_url, token, name).await?;
     let spec = WaitSpec {
         for_sha: Some(for_sha),
         timeout_secs: timeout,
         quiet: json,
     };
-    wait_for_deploy(c, server_url, token, &id, name, spec).await?;
-    // 完走後に内網探活を一発(private の「URL 検証の代替」)。旧サーバは probe 未対応 =
-    // None で従来どおり完走報告だけに退化する(watch を落とさない)。
-    let probe = api::service_probe(c, server_url, token, &id).await.ok();
-    let verdict = probe.as_ref().map(|p| probe_verdict(p, name));
+    wait_for_deploy(c, server_url, token, id, name, spec).await?;
+    // 完走後に内網探活を一発(private の「URL 検証の代替」)。**旧サーバの端点欠如
+    // (not_found)だけ**従来の完走報告に退化し、それ以外(500 / 通信断)は握り潰さず
+    // 伝播する — 全エラーを飲むと probe:null + exit 0 が「検証済み」に見える(codex 審査)。
+    let probe = match build_probe_report(c, server_url, token, id, name).await {
+        Ok(r) => Some(r),
+        Err(e)
+            if e.downcast_ref::<api::ApiError>()
+                .is_some_and(|a| a.code == "not_found") =>
+        {
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let failed = probe.as_ref().is_some_and(|r| r.ok == Some(false));
     if json {
         print_json(&serde_json::json!({
             "status": "succeeded",
             "git_sha": for_sha,
             "probe": probe,
-            "probe_ok": verdict.as_ref().map(|(ok, _)| *ok),
-            "probe_note": verdict.as_ref().map(|(_, note)| note.clone()),
         }))?;
     } else {
         println!("デプロイ完了(private のため公開 URL 検証は無し)。");
-        match &verdict {
-            Some((ok, note)) => {
-                println!("{} {note}", probe_mark(*ok));
-            }
+        match &probe {
+            Some(r) => r.print_text(),
             None => println!(
                 "動作確認は `tbm service exec {name} -- <cmd>` / `tbm service logs {name}` で。"
             ),
         }
     }
-    if let Some((Some(false), _)) = verdict {
+    if failed {
         std::io::stdout().flush().ok();
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// probe の報告(json はこのまま serialize = 単一の形。text は print_text)。
+/// `ok`:true=検証 OK / false=NG(exit 1 相当)/ null=判定不能(listen しない worker は
+/// 合法なので、疑わしきは罰しない — 自動分岐は `ok` を三値で読むこと。exit code は
+/// true/null をどちらも 0 にする = 「失敗と断定できたときだけ非零」)。
+#[derive(serde::Serialize)]
+struct ProbeReport {
+    /// 常に "probe"(VerifyReport との機械判別用)。
+    kind: &'static str,
+    ok: Option<bool>,
+    note: String,
+    running: bool,
+    listening: Option<bool>,
+    is_callee: bool,
+    container_port: i32,
+    /// いま serving 中のデプロイ(「探ったのがどの版か」の照合材料。探活は対象 deploy に
+    /// ピン留めされない — 待った sha の直後に別 deploy が完走すると新しい方を見る — ので、
+    /// 消費側はこれで突き合わせる)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    serving: Option<ServingInfo>,
+}
+
+impl ProbeReport {
+    fn print_text(&self) {
+        let mark = match self.ok {
+            Some(true) => "✓",
+            Some(false) => "✗",
+            None => "–",
+        };
+        println!("{mark} {}", self.note);
+        if let Some(s) = &self.serving {
+            println!(
+                "  serving: {}(deploy {})",
+                short_sha(&s.git_sha),
+                short_deploy_id(&s.deploy_id)
+            );
+        }
+    }
+}
+
+/// probe DTO → 判定つき報告(serving 付与込み)。verify(report_probe)と
+/// deploy --watch(wait_deploy_only)が共有する単一の組み立て点。
+async fn build_probe_report(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Result<ProbeReport> {
+    let p = api::service_probe(c, server_url, token, id).await?;
+    let (ok, note) = probe_verdict(&p, name);
+    let serving = fetch_serving(c, server_url, token, id).await;
+    Ok(ProbeReport {
+        kind: "probe",
+        ok,
+        note,
+        running: p.running,
+        listening: p.listening,
+        is_callee: p.is_callee,
+        container_port: p.container_port,
+        serving,
+    })
 }
 
 /// probe の判定:Some(true)=検証 OK / Some(false)=NG(exit 1 相当)/ None=判定不能
@@ -1432,15 +1515,6 @@ fn probe_verdict(p: &ServiceProbeDto, name: &str) -> (Option<bool>, String) {
     }
 }
 
-/// verdict → 表示マーク(✓ / ✗ / –)。
-fn probe_mark(ok: Option<bool>) -> &'static str {
-    match ok {
-        Some(true) => "✓",
-        Some(false) => "✗",
-        None => "–",
-    }
-}
-
 /// private service の verify 本体:内網探活 1 発 + 判定を出力し、NG は exit 1。
 async fn report_probe(
     c: &reqwest::Client,
@@ -1450,23 +1524,13 @@ async fn report_probe(
     name: &str,
     json: bool,
 ) -> Result<()> {
-    let p = api::service_probe(c, server_url, token, id).await?;
-    let (ok, note) = probe_verdict(&p, name);
+    let report = build_probe_report(c, server_url, token, id, name).await?;
     if json {
-        print_json(&serde_json::json!({
-            "kind": "probe",
-            "ok": ok,
-            "running": p.running,
-            "probed": p.probed,
-            "listening": p.listening,
-            "is_callee": p.is_callee,
-            "container_port": p.container_port,
-            "note": note,
-        }))?;
+        print_json(&report)?;
     } else {
-        println!("{} {note}", probe_mark(ok));
+        report.print_text();
     }
-    if ok == Some(false) {
+    if report.ok == Some(false) {
         std::io::stdout().flush().ok();
         std::process::exit(1);
     }

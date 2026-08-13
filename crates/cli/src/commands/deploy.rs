@@ -201,6 +201,7 @@ async fn run_source(
                 &server_url,
                 &token,
                 &id,
+                &svc_name,
                 &resp.git_sha,
                 args.timeout,
                 json,
@@ -212,8 +213,9 @@ async fn run_source(
             &server_url,
             &token,
             &id,
+            &svc_name,
             /*wait*/ true,
-            Some(&resp.git_sha),
+            Some(resp.git_sha.as_str()),
             args.timeout,
             json,
         )
@@ -258,8 +260,8 @@ async fn run_watch(
         );
     }
 
-    // 対象 service(検証は UUID で持ち回る — CI 待ち中の rename に耐える)。
-    let (id, _svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+    // 対象 service(検証は UUID で持ち回る — CI 待ち中の rename に耐える。表示名は文案用)。
+    let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
 
     // preflight(既定 on):CI が同じ repo をビルドするので push 前に落とし穴を警告する。
     // --watch は cwd(=repo)を対象にする(--context は --local 用)。
@@ -370,8 +372,18 @@ async fn run_watch(
     if !json {
         eprintln!("CI 成功。デプロイ完走を待って検証します…");
     }
-    crate::commands::service::run_verify(&c, &server_url, &token, &id, true, Some(&sha), remaining(), json)
-        .await
+    crate::commands::service::run_verify(
+        &c,
+        &server_url,
+        &token,
+        &id,
+        &svc_name,
+        true,
+        Some(sha.as_str()),
+        remaining(),
+        json,
+    )
+    .await
 }
 
 /// GitHub Actions の run(id と URL)。

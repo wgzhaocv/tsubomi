@@ -777,7 +777,11 @@ pub async fn stop_running(
     service_id: Uuid,
     grace_secs: i32,
 ) -> AppResult<Vec<String>> {
-    let (_, running) = presence(state, service_id).await?;
+    // RUNNING だけでなく **RESTARTING も止める**(live_names)。presence の running_names は
+    // RESTARTING を含まず、crash-loop 中の旧コンテナが停止対象から漏れる — その後 restart
+    // policy で復帰し、新コンテナと同一データ目録を双開し得る(codex 審査 2026-08-13)。
+    // docker stop は restarting 容器にも効き、restart policy のループも止める。
+    let running = live_names(state, service_id).await?;
     for (i, name) in running.iter().enumerate() {
         let opts = StopContainerOptionsBuilder::default().t(grace_secs).build();
         if let Err(e) = state.docker.stop_container(name, Some(opts)).await {
@@ -786,6 +790,20 @@ pub async fn stop_running(
         }
     }
     Ok(running)
+}
+
+/// コンテナが「確実に走っていない」ことの確認(不在 = true / stopped = true /
+/// running・restarting = false)。stateful 退路が旧を再 start する前の門 —
+/// 新コンテナの除去は best-effort なので、生き残っていたら旧を起こさない(双開防止)。
+pub async fn confirmed_not_running(state: &AppState, name: &str) -> bool {
+    match state.docker.inspect_container(name, None).await {
+        Err(_) => true, // 見えない = 存在しない(除去済み)
+        Ok(info) => {
+            let st = info.state.as_ref();
+            !st.and_then(|s| s.running).unwrap_or(false)
+                && !st.and_then(|s| s.restarting).unwrap_or(false)
+        }
+    }
 }
 
 /// stop-first の退路:`stop_running` で温存した旧コンテナを再 start する(best-effort・
@@ -1537,13 +1555,10 @@ pub async fn wait_tcp_ready(
                     return Readiness::Died;
                 }
                 // IP は毎回 inspect から取る(再作成 / 再 attach で変わり得る)。
-                if let Some(ip) = container_ip(&info) {
-                    let connect = tokio::net::TcpStream::connect((ip.as_str(), port as u16));
-                    if let Ok(Ok(_)) =
-                        tokio::time::timeout(std::time::Duration::from_secs(2), connect).await
-                    {
-                        return Readiness::Ready;
-                    }
+                if let Some(ip) = container_ip(&info)
+                    && tcp_connect_ok(&ip, port).await
+                {
+                    return Readiness::Ready;
                 }
             }
             Err(_) => return Readiness::Died,
@@ -1559,8 +1574,11 @@ pub async fn wait_tcp_ready(
 /// あちらはデプロイ門禁(listen まで**待つ** + 非 Linux は Ready を返す妥協 = 門を塞がない)、
 /// こちらは**現況報告**(1 回だけ connect + 探せない環境では「探せない」を正直に None で返す。
 /// 報告で嘘をつくと private worker の診断を誤らせる)。
-/// 戻り値:(running, listening)。listening=None は「探測不能」(非 Linux / IP 未割当含まず —
-/// IP 未割当は Some(false))。
+/// 探測対象 IP:**attach されている全網**を試し、どれかで受けたら listening(門禁と違い、
+/// 探測時点の callee は M6 で複数の caller 網に attach 済みがあり得る — `container_ip` の
+/// 「任意の 1 エントリ」だと対象網が非決定になる。特定 IP だけに bind する容器の
+/// 「caller から見た到達性」までは保証しない = 受容。codex 審査 2026-08-13)。
+/// 戻り値:(running, listening)。listening=None は「探測不能」(非 Linux)。
 pub async fn probe_once(state: &AppState, name: &str, port: i32) -> (bool, Option<bool>) {
     let info = match state.docker.inspect_container(name, None).await {
         Ok(i) => i,
@@ -1577,17 +1595,34 @@ pub async fn probe_once(state: &AppState, name: &str, port: i32) -> (bool, Optio
     if !cfg!(target_os = "linux") {
         return (true, None); // dev macOS:ホスト → bridge IP 不達のため探測不能
     }
-    let listening = match container_ip(&info) {
-        Some(ip) => {
-            let connect = tokio::net::TcpStream::connect((ip.as_str(), port as u16));
-            matches!(
-                tokio::time::timeout(std::time::Duration::from_secs(2), connect).await,
-                Ok(Ok(_))
-            )
+    let ips: Vec<String> = info
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .map(|nets| {
+            nets.values()
+                .filter_map(|ep| ep.ip_address.clone())
+                .filter(|ip| !ip.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut listening = false;
+    for ip in &ips {
+        if tcp_connect_ok(ip, port).await {
+            listening = true;
+            break;
         }
-        None => false,
-    };
+    }
     (true, Some(listening))
+}
+
+/// 単発 TCP connect(2s timeout)。probe_once / wait_tcp_ready が共有する最小部品。
+async fn tcp_connect_ok(ip: &str, port: i32) -> bool {
+    let connect = tokio::net::TcpStream::connect((ip, port as u16));
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), connect).await,
+        Ok(Ok(_))
+    )
 }
 
 /// inspect 結果からコンテナの私網 IP を取り出す(空文字は「未割当」なので弾く)。

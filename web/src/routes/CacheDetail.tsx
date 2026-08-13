@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ArrowLeft, Eye, EyeOff, RotateCw, Trash2, TriangleAlert } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 
@@ -19,8 +19,17 @@ import { useCache, useDeleteCache, useRenameCache, useRevealUrl, useRotate } fro
 // 接続文字列はパスワードそのもの。既定は**内部入口**(注入された service コンテナからのみ)だが、
 // 公開 cache 有効時(cache_public_enabled)は外部 rediss:// = 手元から直接繋がる串を出す。
 
+// 同 route(/caches/:id)間の遷移では React が再マウントしないため、開いたままの
+// modal・表示中の接続文字列・**進行中の reveal/rotate の onSuccess** が別 cache に
+// 向く事故が起きる(rotate / delete は破壊的なので特に。codex 審査 2026-08-13)。
+// id を key にして本体を丸ごと再マウント = state も未着 callback も一括で畳む
+// (unmount 済みコンポーネントへの setState は React が捨てる)。
 export default function CacheDetail() {
   const { id = "" } = useParams();
+  return <CacheDetailInner key={id} id={id} />;
+}
+
+function CacheDetailInner({ id }: { id: string }) {
   const navigate = useNavigate();
   const { data: cache, error } = useCache(id);
   const { data: authInfo } = useAuthInfoQuery();
@@ -39,14 +48,6 @@ export default function CacheDetail() {
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
-  // 同 route 間遷移では再マウントされない — 開いたままの各 modal / 取得済み URL が
-  // 別 cache に向く事故を防ぐ(rotate / delete は破壊的なので特に)。
-  useEffect(() => {
-    setRenameOpen(false);
-    setRotateOpen(false);
-    setDeleteOpen(false);
-    setUrl(null);
-  }, [id]);
 
   const submitRename = () => {
     const trimmed = renameName.trim();

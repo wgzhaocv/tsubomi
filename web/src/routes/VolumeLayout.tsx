@@ -110,7 +110,10 @@ export default function VolumeLayout() {
           })}
         </nav>
 
-        <Outlet />
+        {/* Outlet 配下を id で強制再マウント:同じ route(/:id)間の遷移では子が再マウント
+            されず、開いたままの modal・取得済みの秘密・編集途中のフォームが**別リソース**に
+            持ち越される(codex 審査 2026-08-13)。key で子の state を丸ごと畳む。 */}
+        <Outlet key={id} />
       </div>
 
       {/* リネーム(表示名のみ。host_path・ファイルは不変)。 */}

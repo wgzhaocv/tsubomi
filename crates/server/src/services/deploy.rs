@@ -373,7 +373,29 @@ async fn run_digest_inner(
         // stop-first と同じ丁寧さをこの回滚路径にも)。stateless は即殺でよい(データ無共有)。
         let grace = stateful.then_some(docker::STATEFUL_STOP_GRACE_SECS);
         docker::remove_one(state, &new_name, grace).await;
-        docker::restart_stopped(state, &stopped_old).await;
+        // 旧版への自動復旧(§0-E)は **2 つの門**を通ったときだけ(codex 審査 2026-08-13):
+        //  1. 復旧対象 = 「直近成功 deploy の容器」**1 つに限定**。stateless 時代の掃除失敗で
+        //     stopped が複数残っていると、全再起動 = 同一データ目録の多重 writer になる。
+        //  2. 新コンテナが**確実に走っていない**こと。remove_one は best-effort なので、
+        //     生き残ったまま旧を起こすと双開。確認できなければ旧は停止のまま(deploys.error に
+        //     原因が残り、退路は rollback — 双開より停止が安全側)。
+        if !stopped_old.is_empty() {
+            let expected = crate::services::expected_container_name(state, service_id).await;
+            let target: Vec<String> = stopped_old
+                .iter()
+                .filter(|n| Some(n.as_str()) == expected.as_deref())
+                .cloned()
+                .collect();
+            if target.is_empty() {
+                tracing::error!(%service_id, ?stopped_old,
+                    "stateful 退路:停止済み一覧に直近成功 deploy の容器が無く、復旧対象を特定できない(service は停止状態。rollback / 再 deploy で復旧)");
+            } else if docker::confirmed_not_running(state, &new_name).await {
+                docker::restart_stopped(state, &target).await;
+            } else {
+                tracing::error!(%service_id, new = %new_name,
+                    "stateful 退路:失敗した新コンテナを停止できず、旧の再起動を見送る(双開防止。手動で新を止めてから rollback / 再 deploy)");
+            }
+        }
         return Err(e);
     }
 
@@ -492,11 +514,20 @@ async fn start_container(
 /// 探測可否の判定用。best-effort:DB エラー時は false(探測を増やす向きに倒さない — デプロイ自体を
 /// 止めないことを優先し、穴は次のユーザ契機デプロイで再判定される)。
 pub(crate) async fn is_linked_callee(state: &AppState, service_id: Uuid) -> bool {
-    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM injections WHERE resource_id = $1)")
-        .bind(service_id)
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(false)
+    // caller の生存(deleted_at IS NULL)まで見る — attach_as_callee(network.rs)と同じ条件。
+    // injection 行は caller のソフト削除では消えない(purge まで残る)ため、行の存在だけ見ると
+    // 「実際には生きた caller が居ない」worker を callee 扱いし、readiness 門禁と probe の
+    // 判定を誤らせる(codex 審査 2026-08-13)。DB 一過性障害は false = worker 側に倒れる
+    // (門禁が緩む方向。probe は ok:null の保守的判定になる)。
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM injections i
+           JOIN resources caller ON caller.id = i.service_id
+          WHERE i.resource_id = $1 AND caller.deleted_at IS NULL)",
+    )
+    .bind(service_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false)
 }
 
 /// 死んだ / 死につつある新コンテナから終了要因(events/inspect)とログ末尾を拾い、原因を 1 本の

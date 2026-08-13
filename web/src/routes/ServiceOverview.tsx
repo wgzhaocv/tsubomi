@@ -284,23 +284,42 @@ function LimitsSection({
   const setLimits = useSetServiceLimits(id);
   // 親が svc 確定後にだけレンダーするので、初期化子で現値を seed できる(初期化子は
   // 再実行されない = mutation 後の refetch が編集中の値を上書きしない)。
-  const [memory, setMemory] = useState(String(svc.memory_mb ?? ""));
-  const [cpus, setCpus] = useState(
-    svc.cpu_limit_millis != null ? String(svc.cpu_limit_millis / 1000) : "",
-  );
+  // **差分判定はこの seed 快照に対して行う**(最新の svc と比べると、polling が他所の変更を
+  // 取り込んだ後に「触っていない欄」まで差分扱いになり、他所の変更を古い値で巻き戻す —
+  // codex 審査 2026-08-13 の lost update)。
+  const [seed] = useState(() => ({
+    memory: String(svc.memory_mb ?? ""),
+    cpus: svc.cpu_limit_millis != null ? String(svc.cpu_limit_millis / 1000) : "",
+  }));
+  const [memory, setMemory] = useState(seed.memory);
+  const [cpus, setCpus] = useState(seed.cpus);
+  const [inputErr, setInputErr] = useState<string | null>(null);
 
   const submit = () => {
     if (setLimits.isPending) return;
+    setInputErr(null);
     const body: SetLimitsInput = {};
-    const mem = Number(memory);
-    if (memory.trim() && Number.isFinite(mem) && mem !== svc.memory_mb) body.memory_mb = mem;
-    const cpusTrim = cpus.trim();
-    if (cpusTrim === "") {
-      if (svc.cpu_limit_millis != null) body.clear_cpu_limit = true;
-    } else {
-      const millis = Math.round(Number(cpusTrim) * 1000);
-      if (Number.isFinite(millis) && millis !== svc.cpu_limit_millis)
-        body.cpu_limit_millis = millis;
+    // 触った欄だけ送る(seed 比較)。不正値は黙って捨てず明示エラー(部分保存を
+    // 「保存しました」と誤認させない — codex 審査)。
+    if (memory.trim() !== seed.memory.trim()) {
+      const mem = Number(memory.trim());
+      if (!memory.trim() || !Number.isInteger(mem) || mem < 128 || mem > 4096) {
+        setInputErr("メモリ上限は 128〜4096 の整数(MiB)で指定してください");
+        return;
+      }
+      body.memory_mb = mem;
+    }
+    if (cpus.trim() !== seed.cpus.trim()) {
+      if (cpus.trim() === "") {
+        body.clear_cpu_limit = true;
+      } else {
+        const c = Number(cpus.trim());
+        if (!Number.isFinite(c) || c < 0.1 || c > 16) {
+          setInputErr("CPU 上限は 0.1〜16(コア数)で指定してください(空欄 = 上限なし)");
+          return;
+        }
+        body.cpu_limit_millis = Math.round(c * 1000);
+      }
     }
     if (!body.memory_mb && !body.cpu_limit_millis && !body.clear_cpu_limit) return; // 変更なし
     setLimits.mutate(body);
@@ -318,6 +337,7 @@ function LimitsSection({
           label="メモリ上限(MiB、128〜4096)"
           value={memory}
           inputMode="numeric"
+          disabled={setLimits.isPending}
           onChange={(e) => setMemory(e.target.value)}
           className="w-44"
         />
@@ -326,6 +346,7 @@ function LimitsSection({
           value={cpus}
           inputMode="decimal"
           placeholder="なし"
+          disabled={setLimits.isPending}
           onChange={(e) => setCpus(e.target.value)}
           className="w-44"
         />
@@ -333,6 +354,7 @@ function LimitsSection({
           保存
         </Button>
       </div>
+      {inputErr && <p className="text-sm font-semibold text-[#e05a5a]">{inputErr}</p>}
       {setLimits.error && (
         <p className="text-sm font-semibold text-[#e05a5a]">{setLimits.error.message}</p>
       )}

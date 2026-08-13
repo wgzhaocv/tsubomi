@@ -368,15 +368,13 @@ pub struct RenameServiceReq {
 pub struct ServiceProbeDto {
     /// serving コンテナが走っているか(false なら以降のフィールドは判定材料なし)。
     pub running: bool,
-    /// 探測を実施できたか。false = 環境が探せない(dev macOS はホスト→bridge 不達)。
-    #[serde(default)]
-    pub probed: bool,
-    /// TCP 接続を受けたか(probed=true のときだけ Some)。false でも private worker
-    /// (listen しない常駐)は正常 — is_callee と併せて判定する。
+    /// TCP 接続を受けたか。None = 探測不能(dev macOS はホスト→bridge 不達、または
+    /// 走っていない = 探すものが無い)。false でも private worker(listen しない常駐)は
+    /// 正常 — is_callee と併せて判定する。
     #[serde(default)]
     pub listening: Option<bool>,
-    /// M6 内部リンクの callee(他 service から注入されている)か。callee は caller から
-    /// 呼ばれる前提 = listen していないのは異常。
+    /// M6 内部リンクの callee(**生きている** caller から注入されている)か。callee は
+    /// caller から呼ばれる前提 = listen していないのは異常。
     #[serde(default)]
     pub is_callee: bool,
     /// 探測対象 port(service_details.container_port)。

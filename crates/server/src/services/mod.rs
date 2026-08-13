@@ -443,7 +443,7 @@ pub(crate) async fn latest_succeeded_deploy_ref(
 
 /// serving すべき容器名 = **直近成功 deploy の容器**(`container_name`)を DB から導く
 /// (実走確認はしない)。成功 deploy 無し = 未デプロイは None。
-async fn expected_container_name(state: &AppState, id: Uuid) -> Option<String> {
+pub(crate) async fn expected_container_name(state: &AppState, id: Uuid) -> Option<String> {
     let deploy_id = match latest_succeeded_deploy_id(state, id).await {
         Ok(Some(d)) => d,
         Ok(None) => return None,
@@ -771,6 +771,21 @@ pub async fn set_stateful(
     .await?
     .rows_affected();
 
+    // 0 行 = 「既に true(冪等成功)」と「lock 待ち中に削除された」の両方があり得る。
+    // 後者に 204 を返すと、restore 後も stateful=false のまま「有効化済み」と誤認させる
+    // (codex 審査 2026-08-13)。生存確認で切り分ける。
+    if changed == 0 {
+        let alive: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM resources WHERE id = $1 AND deleted_at IS NULL)",
+        )
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+        if !alive {
+            return Err(AppError::NotFound);
+        }
+    }
+
     if changed > 0 {
         audit(
             &state.db,
@@ -822,8 +837,6 @@ pub async fn probe(
     };
     Ok(Json(tsubomi_shared::ServiceProbeDto {
         running,
-        // running かつ探測環境あり、のときだけ「探せた」。running=false は探すものが無い。
-        probed: listening.is_some(),
         listening,
         is_callee,
         container_port,
