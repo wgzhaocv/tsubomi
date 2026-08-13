@@ -138,7 +138,12 @@ pub async fn install_bat(State(state): State<AppState>) -> axum::response::Respo
         .replace('\n', "\r\n")
         .replace("__SERVER_URL__", &state.config.server_url);
     let (bytes, _, had_unmappable) = encoding_rs::SHIFT_JIS.encode(&crlf);
-    debug_assert!(!had_unmappable, "install.bat に CP932 非対応文字が混入");
+    if had_unmappable {
+        // encode は unmappable を `&#NNNN;` に置換する — `&` は cmd のコマンド区切りなので
+        // バッチの解釈を壊す(実害:U+301C 混入で REM 行が分割実行された 2026-08-13)。
+        // 配信は止めない(大半の行は無事)が、必ずログで気付けるようにする。
+        tracing::error!("install.bat に CP932 非対応文字が混入(&#…; に置換された — 該当行の cmd 解釈が壊れる。scripts/install.bat を修正すること)");
+    }
     (
         StatusCode::OK,
         [

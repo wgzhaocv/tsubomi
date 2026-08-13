@@ -17,8 +17,12 @@ REM UTF-8 のまま日本語を届けると誤対合で空白・改行が食わ�
 REM 実行される(実害あり)。CP932 で届けばネイティブに正しく解釈される。守ること:
 REM   1. 日本語は echo の文面と REM コメントだけ。コマンド行のトークンは ASCII のまま。
 REM   2. echo 文面の括弧は全角()を使う(半角括弧は if ブロック内で ^ エスケープが要る)。
-REM   3. CP932 に無い文字(例: 〜 U+301C)を使わない -- 転碼が ? に落とす。
+REM   3. CP932 に無い文字を使わない(波ダッシュ U+301C が典型 -- 全角チルダ U+FF5E は可)。
 setlocal enabledelayedexpansion
+
+REM 最初の 1 行を何より先に出す:これが出ない = スクリプト自体が実行されていない
+REM (ダウンロード失敗 / 実行ポリシーによるブロック)と切り分けられる。
+echo tbm インストーラを開始します...
 
 if not defined TSUBOMI_SERVER_URL set "TSUBOMI_SERVER_URL=__SERVER_URL__"
 set "INSTALL_DIR=%LOCALAPPDATA%\tbm\bin"
