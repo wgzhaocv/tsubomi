@@ -3,6 +3,7 @@ import { BarChart3, Boxes, type LucideIcon, Server, Users } from "lucide-react";
 
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
+import { MetricRow } from "@/components/usage-metric";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Divider } from "@/components/ui/divider";
@@ -16,7 +17,7 @@ import {
 } from "@/lib/admin";
 import { type HostMetrics, type TempSensor, useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
-import { formatBytes } from "@/lib/format";
+import { formatBytes, formatBytesPair } from "@/lib/format";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + リソース保有ユーザ数。
 // 匿名化(設計 v2 §7):リソースの名前・内容は出さない。owner ゲートは <RequireOwner>
@@ -79,50 +80,6 @@ function KindCard({ kind, row }: { kind: string; row: AdminOverviewKind | null }
   );
 }
 
-// 用量バー(VolumeFileBrowser のアップロード進捗バーと同じ意匠)。pct が null なら 0 幅。
-function UsageBar({ pct }: { pct: number | null }) {
-  return (
-    <div className="h-2 w-full overflow-hidden rounded-full bg-[rgba(196,184,158,0.3)]">
-      <div
-        className="h-full rounded-full bg-[#0CC0B5] transition-[width] duration-150 ease-out"
-        style={{ width: `${Math.min(100, Math.max(0, pct ?? 0))}%` }}
-      />
-    </div>
-  );
-}
-
-function MetricRow({
-  label,
-  pct,
-  detail,
-  loading,
-}: {
-  label: string;
-  pct: number | null;
-  detail: string;
-  loading: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-bold text-foreground">{label}</span>
-        {loading ? (
-          <Skeleton className="h-4 w-20" />
-        ) : (
-          <span className="font-mono text-sm font-bold text-[#0b9c93]">{detail}</span>
-        )}
-      </div>
-      {loading ? <Skeleton className="h-2 w-full rounded-full" /> : <UsageBar pct={pct} />}
-    </div>
-  );
-}
-
-// used / total を「1.2 GB / 8.0 GB」に。どちらか欠ければ「—」(dev macOS は /proc 無しで null)。
-function formatPair(used: number | null | undefined, total: number | null | undefined): string {
-  if (used == null || total == null) return "—";
-  return `${formatBytes(used)} / ${formatBytes(total)}`;
-}
-
 // サーバー本体(ホスト)の使用状況。データは WS(useHostMetrics)で 5s 毎に更新。来る前 /
 // 取得不能(dev の CPU・メモリ)は「—」と 0 幅バー。HTTP の overview とは独立。
 function HostCard({ data, connected }: { data: HostMetrics | null; connected: boolean }) {
@@ -158,13 +115,13 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
           <MetricRow
             label="メモリ"
             pct={memPct}
-            detail={formatPair(data?.mem_used, data?.mem_total)}
+            detail={formatBytesPair(data?.mem_used, data?.mem_total)}
             loading={loading}
           />
           <MetricRow
             label="ディスク"
             pct={diskPct}
-            detail={formatPair(data?.disk_used, data?.disk_total)}
+            detail={formatBytesPair(data?.disk_used, data?.disk_total)}
             loading={loading}
           />
           <TempRow temps={data?.temps ?? []} />

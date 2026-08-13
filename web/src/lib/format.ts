@@ -13,6 +13,16 @@ export function formatBytes(bytes: number): string {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
+// 「使用中 / 上限」を「1.2 GB / 8.0 GB」に。どちらか欠ければ「—」(取得不能)。
+// 管理概要のホスト指標と service の使用量が同じ書式で並ぶように共有する。
+export function formatBytesPair(
+  used: number | null | undefined,
+  total: number | null | undefined,
+): string {
+  if (used == null || total == null) return "—";
+  return `${formatBytes(used)} / ${formatBytes(total)}`;
+}
+
 // ISO 時刻 → 絶対日付(ja-JP)。一覧カードのフッタ等、日付だけ見せたい場面の単一の書式。
 export function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("ja-JP");

@@ -7,14 +7,19 @@ import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Radio } from "@/components/ui/radio";
+import { MetricRow } from "@/components/usage-metric";
+import { formatBytesPair, formatRelative } from "@/lib/format";
 import {
   desiredLabel,
   phaseLabel,
+  type Service,
+  type ServiceMetrics,
   serviceVisibility,
   type SetLimitsInput,
   shortDigest,
   useDeleteService,
   useService,
+  useServiceMetrics,
   useSetServiceLimits,
   useSetServiceVisibility,
   useStartService,
@@ -130,7 +135,12 @@ export default function ServiceOverview() {
               ? `${svc.cpu_limit_millis / 1000} CPU`
               : "なし(相対的な重み付けのみ)"}
           </Stat>
-          <Stat label="ステートフル">{svc?.stateful ? "はい(stop-first デプロイ)" : "いいえ"}</Stat>
+          {/* 「ステートフル」は用語だけでは何が変わるか伝わらない(非エンジニア向け)。
+              実際に変わるのは**デプロイのやり方**なので、そちらを主に据えて用語は括弧で残す
+              (CLI の `tbm service stateful` と結び付けられるように)。 */}
+          <Stat label="デプロイ方式">
+            {svc?.stateful ? "停止してから入替(ステートフル)" : svc ? "無瞬断で入替" : "…"}
+          </Stat>
         </dl>
       </section>
 
@@ -272,6 +282,73 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
+// 実行中コンテナの使用量(上限を決めるための材料)。上限の入力欄の**上**に置く —
+// 「95% まで来ている / OOM で落ちた」を見てから上限を触る、という順序にするため。
+// docker の CPU% は 100% = 1 コアなので、`--cpus` と同じ **コア数**に直して見せる
+// (単位が揃っていないと入力欄の値と突き合わせられない)。
+function CurrentUsage({ svc, id }: { svc: Service; id: string }) {
+  const running = svc.phase === "running";
+  const { data: m, isLoading, isError } = useServiceMetrics(id, running);
+  // 補助情報なので、取得できない環境(未対応サーバ等)では黙って出さない。
+  if (isError) return null;
+  if (!isLoading && m && !m.running) {
+    return (
+      <p className="text-sm font-medium text-muted-foreground">
+        コンテナは停止中です(使用量は取得できません)。
+      </p>
+    );
+  }
+
+  const memPct =
+    m?.mem_bytes != null && m.mem_limit_bytes != null
+      ? (m.mem_bytes / m.mem_limit_bytes) * 100
+      : null;
+  // docker の CPU% は 100% = 1 コア。上限(millicores)があれば占有率も出せる。
+  const cores = m?.cpu_pct != null ? m.cpu_pct / 100 : null;
+  const cpuLimitCores = svc.cpu_limit_millis != null ? svc.cpu_limit_millis / 1000 : null;
+  const cpuPct = cores != null && cpuLimitCores ? (cores / cpuLimitCores) * 100 : null;
+  const facts = usageFacts(m);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card/40 p-4">
+      <MetricRow
+        label="メモリ使用量"
+        pct={memPct}
+        detail={
+          memPct != null
+            ? `${formatBytesPair(m?.mem_bytes, m?.mem_limit_bytes)}(${Math.round(memPct)}%)`
+            : "—"
+        }
+        loading={isLoading}
+      />
+      <MetricRow
+        label="CPU 使用量"
+        // 上限が無いときは分母が無いのでバーを出さない(0 幅バーは「使っていない」に見える)。
+        pct={cpuLimitCores ? cpuPct : undefined}
+        detail={
+          cores == null
+            ? "—"
+            : cpuLimitCores
+              ? `${cores.toFixed(2)} / ${cpuLimitCores} CPU(${Math.round(cpuPct ?? 0)}%)`
+              : `${cores.toFixed(2)} CPU 相当`
+        }
+        loading={isLoading}
+      />
+      {facts && <p className="text-xs font-medium text-muted-foreground">{facts}</p>}
+    </div>
+  );
+}
+
+// 使用量バーに添える短い事実(再起動回数 / 起動からの経過 / 直近 OOM)。値が無いものは出さない。
+function usageFacts(m?: ServiceMetrics): string {
+  if (!m) return "";
+  const parts: string[] = [];
+  if (m.restart_count != null) parts.push(`再起動 ${m.restart_count} 回`);
+  if (m.started_at) parts.push(`起動 ${formatRelative(m.started_at)}`);
+  if (m.oom_killed) parts.push("直近の終了は OOM(メモリ不足)");
+  return parts.join(" · ");
+}
+
 // リソース上限の変更(memory / cpus)。値は次のデプロイから反映 — 実行中のコンテナには影響しない
 // (server の run_digest がデプロイのたびに DB から読み直す)。cpus 欄は空 = 上限なし。
 function LimitsSection({
@@ -328,6 +405,7 @@ function LimitsSection({
   return (
     <section className="flex flex-col gap-3">
       <h2 className="text-lg font-bold text-foreground">リソース上限</h2>
+      <CurrentUsage svc={svc} id={id} />
       <p className="text-sm font-medium text-muted-foreground">
         変更は<strong>次のデプロイから</strong>反映されます(実行中のコンテナには影響しません)。CPU
         欄を空にすると上限なし(相対的な重み付けのみ)に戻ります。

@@ -120,6 +120,18 @@ export type Deploy = {
   finished_at: string | null;
 };
 
+// 稼働中コンテナの 1 発メトリクス(ServiceMetricsDto 鏡)。停止中でも 200 で
+// running:false が返る。取得できなかった項目は null(サーバが docker から拾えない場合)。
+export type ServiceMetrics = {
+  running: boolean;
+  cpu_pct?: number | null;
+  mem_bytes?: number | null;
+  mem_limit_bytes?: number | null;
+  restart_count?: number | null;
+  started_at?: string | null;
+  oom_killed?: boolean | null;
+};
+
 // 注入のバインディング(InjectionDto 鏡)。valid=false は失効(注入元が削除済み)。
 export type Injection = {
   id: string;
@@ -144,6 +156,7 @@ export const serviceKeys = {
   injections: (id: string) => ["services", id, "injections"] as const,
   env: (id: string) => ["services", id, "env"] as const,
   logs: (id: string) => ["services", id, "logs"] as const,
+  metrics: (id: string) => ["services", id, "metrics"] as const,
 };
 
 // エラー本文(サーバは AppError の日本語メッセージを text で返す)を投げる。
@@ -252,6 +265,20 @@ export function useServiceLogs(id: string, poll = true) {
     queryKey: serviceKeys.logs(id),
     queryFn: () => getJson<{ logs: string }>(`/api/services/${id}/logs`),
     refetchInterval: poll ? 5000 : false,
+  });
+}
+
+// 稼働中コンテナの使用量。**上限を決めるための材料**なので概要ページで上限の隣に出す。
+// 20 秒間隔:サーバ側は CPU% を出すのに docker stats を 2 サンプル取る(1 回 1〜2 秒、
+// 共有ホストの Pi)ので、ログ(5 秒)より粗くする。画面を離れている間は取りに行かない
+// (TanStack の既定 = background では refetchInterval が止まる)。取得失敗は
+// 補助情報なので黙って諦める(概要の他の部分を赤字で汚さない)。
+export function useServiceMetrics(id: string, poll = true) {
+  return useQuery({
+    queryKey: serviceKeys.metrics(id),
+    queryFn: () => getJson<ServiceMetrics>(`/api/services/${id}/metrics`),
+    refetchInterval: poll ? 20_000 : false,
+    retry: false,
   });
 }
 

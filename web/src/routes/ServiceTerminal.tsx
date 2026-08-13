@@ -1,6 +1,6 @@
-import { Terminal, useTerminal } from "@wterm/react";
+import { Terminal, useTerminal, type WTerm } from "@wterm/react";
 import { RotateCw } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -55,10 +55,59 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
   // effect の依存に入れても貼り直しは起きない。
   const { ref, write, focus } = useTerminal();
   const wsRef = useRef<WebSocket | null>(null);
+  // 端末のスクロール要素(WTerm.element)。**最下部への貼り付けを自前でやる**ため保持する:
+  // ライブラリは「書く直前に最下部にいたか」で追従を決めるが、その最下部復帰は scrollTop を
+  // 行高の倍数へ丸める(最大 1 行ぶん手前に着地する)。判定の許容は 5px しかないので、
+  // 一度その位置に着くと以後ずっと「下にいない」扱いになり、**新しい出力が見えなくなる**
+  // (ユーザ報告 2026-08-13)。こちらで書き込みのたびに貼り直す。
+  const scrollElRef = useRef<HTMLElement | null>(null);
+  const stickPendingRef = useRef(false);
+  // 「最下部に貼り付いて追う」状態か。**scroll イベントで更新する**のが要点:
+  // 書き込み時点で測ると resize 経路(下記 onResize)では測れない — ライブラリの resize は
+  // 先に描画コンテナを空にするので、その瞬間の距離は常に 0 に見えるため。
+  const followRef = useRef(true);
+  const wtRef = useRef<WTerm | null>(null);
+  // 接続前に発生した送信(初回 resize / 早すぎる打鍵)の待ち行列。onopen で流す。
+  const queueRef = useRef<(string | BufferSource)[]>([]);
   const [state, setState] = useState<ConnState>("connecting");
   // WTerm の WASM 初期化は非同期で、就緒前の write() はサイレント破棄される。WS の方が先に
   // 繋がると初期プロンプトやバックエンドの一次性失敗通知が消えるため、onReady まで WS を開かない。
   const [ready, setReady] = useState(false);
+
+  // 最下部へ貼り付ける。ライブラリの描画は write → setTimeout(0) → rAF なので、同じ順で
+  // 1 つ後ろに並べて**描画後**の scrollHeight で貼る。ライブラリが描画の組み方を変えても
+  // 静かに壊れないよう、貼った次のフレームで距離を検算して 1 度だけ貼り直す。
+  const stickToBottom = useCallback(() => {
+    if (stickPendingRef.current) return;
+    stickPendingRef.current = true;
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        stickPendingRef.current = false;
+        const el = scrollElRef.current;
+        if (!el) return;
+        el.scrollTop = el.scrollHeight;
+        requestAnimationFrame(() => {
+          const e2 = scrollElRef.current;
+          if (e2 && e2.scrollHeight - e2.scrollTop - e2.clientHeight > 1) {
+            e2.scrollTop = e2.scrollHeight;
+          }
+        });
+      });
+    }, 0);
+  }, []);
+
+  // 追従状態はユーザのスクロール(と貼り付けの結果)から拾う。許容 40px は、ライブラリが
+  // 最下部復帰で scrollTop を行高の倍数へ丸めた結果の端数(実測 7px)を「まだ下にいる」と
+  // 見なすため — ここが 5px しかないのがライブラリ側の追従が止まる原因だった。
+  useEffect(() => {
+    const el = scrollElRef.current;
+    if (!ready || !el) return;
+    const onScroll = () => {
+      followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [ready]);
 
   useEffect(() => {
     if (!ready) return;
@@ -73,13 +122,22 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
     ws.onopen = () => {
       if (wsRef.current !== ws) return;
       setState("open");
+      // **接続前に溜めた制御フレームをここで流す**。端末の ResizeObserver は init の次フレーム
+      // (≤16ms)で最初の resize を出すが、WS はまだ CONNECTING(本番は CF Tunnel 経由で
+      // 数十 ms)。捨てると PTY は docker 既定の 80×24 のままになり、表示は 26 行 100 列なのに
+      // shell は 24 行 80 列だと思い込む(折り返し・vi/top の描画崩れ)。dev は握手が速くて
+      // 表に出ない = 本番だけで起きる型(review 2026-08-13)。
+      for (const q of queueRef.current) ws.send(q);
+      queueRef.current = [];
       focus();
     };
     ws.onmessage = (ev) => {
       if (wsRef.current !== ws) return;
+      const follow = followRef.current;
       // 出力は Binary(失敗通知も人間可読バイト)。互換のため string も書ける。
       if (ev.data instanceof ArrayBuffer) write(new Uint8Array(ev.data));
       else if (typeof ev.data === "string") write(ev.data);
+      if (follow) stickToBottom();
     };
     ws.onclose = () => {
       if (wsRef.current === ws) setState("closed");
@@ -90,11 +148,18 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
       wsRef.current = null;
       ws.close();
     };
-  }, [id, ready, write, focus]);
+  }, [id, ready, write, focus, stickToBottom]);
 
   const send = (data: string | BufferSource) => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+      return;
+    }
+    // 未接続なら少しだけ溜めて onopen で流す(初回 resize と、開く前に叩かれたキー)。
+    // 上限は暴走防止のためだけ — 溢れたら古い方から捨てる。
+    if (queueRef.current.length >= 32) queueRef.current.shift();
+    queueRef.current.push(data);
   };
 
   return (
@@ -111,9 +176,23 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
           cursorBlink
           theme="tsubomi"
           className="h-[480px] rounded-2xl border-2 border-[#e8e2d6] shadow-none"
-          onReady={() => setReady(true)}
+          onReady={(wt: WTerm) => {
+            // スクロール要素は WTerm が持つ本体 div(= この Terminal が描く要素)。
+            wtRef.current = wt;
+            scrollElRef.current = wt.element;
+            setReady(true);
+          }}
+          // 初期化に失敗したら「接続しています…」で固まらせない(WASM 不可・CSP 等)。
+          // 切断オーバーレイに倒して再接続の入口を出す。
+          onError={() => setState("closed")}
           onData={(d) => send(enc.encode(d))}
-          onResize={(cols, rows) => send(JSON.stringify({ type: "resize", cols, rows }))}
+          onResize={(cols, rows) => {
+            send(JSON.stringify({ type: "resize", cols, rows }));
+            // ライブラリの resize は描画コンテナを空にするので、ブラウザが scrollTop を 0 へ
+            // 詰める。追従中だったら貼り直す(貼らないと履歴の先頭で固まり、以後の出力も
+            // 追わなくなる)。ここで距離を測り直してはいけない — 空の瞬間は常に「最下部」に見える。
+            if (followRef.current) stickToBottom();
+          }}
         />
         {/* 切断は端末全面のオーバーレイで知らせる(ヘッダの一行だけでは気づけない)。
             handler は Button だけに置き、`static` + after 疑似要素で当たり判定を
