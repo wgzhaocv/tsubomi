@@ -1,0 +1,64 @@
+name: tsubomi deploy
+on:
+  # main / master どちらの既定ブランチでも起動する(既存 repo が master のこともある)。
+  push: { branches: [main, master] }
+  # シークレット修正後などに手動で再デプロイできるよう(空コミット不要)。
+  workflow_dispatch: {}
+jobs:
+  deploy:
+    # ランナーは gh variable TSUBOMI_RUNNER で決まる(service create 時に平台が platforms から
+    # 導出して設定。arm64 のみ → ubuntu-24.04-arm 原生 = Rust 等のビルドが QEMU 比で桁違いに速い)。
+    # 変数が無い古い repo は ubuntu-latest(amd64 + QEMU)へフォールバック。手動切替も
+    # `gh variable set TSUBOMI_RUNNER --body ubuntu-24.04-arm` だけ(yml は不変)。
+    runs-on: ${{ vars.TSUBOMI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.TSUBOMI_REGISTRY }}
+          username: ${{ secrets.TSUBOMI_REGISTRY_USER }}
+          password: ${{ secrets.TSUBOMI_REGISTRY_PASS }}
+      # build:Dockerfile があればそれ、無ければ nixpacks。--platform は平台が公布する
+      # arch(既定 linux/arm64)。Dockerfile 経路は GHA 層キャッシュで再 build 数十秒
+      # (nixpacks 経路はキャッシュ無しで毎回フル build)。
+      - id: build
+        run: |
+          IMAGE=${{ vars.TSUBOMI_REGISTRY }}/${{ vars.TSUBOMI_SERVICE_ID }}:${{ github.sha }}
+          if [ -f Dockerfile ]; then
+            docker buildx build --platform "${{ vars.TSUBOMI_PLATFORMS }}" \
+              --cache-from type=gha --cache-to type=gha,mode=max \
+              --push -t "$IMAGE" --metadata-file meta.json .
+            DIGEST=$(jq -r '."containerimage.digest"' meta.json)
+          else
+            # Dockerfile が無ければ nixpacks。npm 配布は無い(npx 経由は 404)ので公式インストーラで
+            # CLI を入れる。nixpacks は単一 build で多 arch を作れない(公式仕様)ため、
+            # arch 毎に build → push し docker manifest で 1 つの IMAGE に集約する(単一 arch なら 1 回)。
+            curl -fsSL https://nixpacks.com/install.sh | bash
+            REFS=""
+            for P in $(echo "${{ vars.TSUBOMI_PLATFORMS }}" | tr ',' ' '); do
+              ARCH_IMAGE="$IMAGE-${P//\//-}"
+              nixpacks build . --name "$ARCH_IMAGE" --platform "$P"
+              docker push "$ARCH_IMAGE"
+              REFS="$REFS $ARCH_IMAGE"
+            done
+            docker manifest create "$IMAGE" $REFS
+            docker manifest push "$IMAGE"
+            DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          fi
+          # digest が空なら hook は必ず 400 になる。原因が分かるよう CI 側で先に止める。
+          [ -n "$DIGEST" ] || { echo "image digest を取得できませんでした" >&2; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: notify tsubomi
+        run: |
+          # commit の件名(deploy 履歴の見出し)。checkout 済みなので git log が使える
+          # (workflow_dispatch でも HEAD の件名が取れる)。jq --arg なので引用符/改行は安全。
+          BODY=$(jq -nc --arg s "${{ vars.TSUBOMI_SERVICE_ID }}" \
+            --arg sha "${{ github.sha }}" --arg d "${{ steps.build.outputs.digest }}" \
+            --arg msg "$(git log -1 --pretty=%s)" \
+            --argjson ts "$(date +%s)" --arg n "$(openssl rand -hex 16)" \
+            '{service_id:$s, git_sha:$sha, image_digest:$d, commit_message:$msg, ts:$ts, nonce:$n}')
+          SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "${{ secrets.TSUBOMI_DEPLOY_KEY }}" -hex | sed 's/^.* //')
+          curl -fsS -X POST "${{ vars.TSUBOMI_HOOK_URL }}" \
+            -H "content-type: application/json" -H "x-tsubomi-signature: $SIG" -d "$BODY"

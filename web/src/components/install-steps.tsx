@@ -54,7 +54,7 @@ export function installTargets(): InstallTarget[] {
     // 影響を受けにくい。PowerShell 版はタブで選べる形で残す。
     {
       key: "cmd",
-      label: "Windows",
+      label: "Windows(cmd)",
       terminal: "コマンドプロンプト(cmd)",
       note: "%LOCALAPPDATA%\\tbm\\bin に入れて、ユーザ PATH に追加します(管理者権限は不要)。スタートメニューで「cmd」を検索して開いてください。",
       command: `curl -fsSL ${origin}/install.bat -o %TEMP%\\tbm-install.bat && %TEMP%\\tbm-install.bat`,
