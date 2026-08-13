@@ -7,8 +7,9 @@ use tsubomi_shared::{
     DatabaseDto,
     DeployConfig, DeployDto, ExecReq, ExecResult, ForkDatabaseReq, Health, InjectionDto,
     ListDirResp, LogsResp, Me,
-    MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameVolumeReq, RollbackReq,
-    ServiceDto, SetEnvReq, SetEnvResp, SetServiceVisibilityReq, TrashItemDto, VolumeDto,
+    MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameServiceReq,
+    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp, SetServiceVisibilityReq,
+    TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -665,6 +666,24 @@ pub async fn service_get(
     resp.json()
         .await
         .context("failed to parse service response")
+}
+
+pub async fn service_rename(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+) -> Result<ServiceDto> {
+    let resp = send_ok(
+        c.patch(format!("{server_url}/api/services/{id}"))
+            .bearer_auth(token)
+            .json(&RenameServiceReq {
+                name: name.to_owned(),
+            }),
+    )
+    .await?;
+    resp.json().await.context("failed to parse rename response")
 }
 
 pub async fn service_deploys(

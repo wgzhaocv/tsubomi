@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   ArrowLeft,
   History,
@@ -11,12 +12,16 @@ import { Link, NavLink, Outlet, useParams } from "react-router";
 import { PageContainer } from "@/components/page-container";
 import { PageMeta } from "@/components/page-meta";
 import { PhaseBadge } from "@/components/phase-badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Modal } from "@/components/ui/modal";
 import { Title } from "@/components/ui/title";
-import { useService } from "@/lib/services";
+import { useRenameService, useService } from "@/lib/services";
 import { cn } from "@/lib/utils";
 
-// サービス詳細の外殻:戻りリンク + 見出し(phase バッジ)+ サブナビ(概要 / デプロイ /
-// 環境変数 / ログ / ターミナル)。各ページはこの <Outlet> に差さる。DatabaseLayout と同じ構造。
+// サービス詳細の外殻:戻りリンク + 見出し(phase バッジ + リネーム)+ サブナビ(概要 /
+// デプロイ / 環境変数 / ログ / ターミナル)。各ページはこの <Outlet> に差さる。
+// DatabaseLayout / VolumeLayout と同じ構造(見出しクリックでリネーム)。
 // 注入は環境変数タブに統合済み(容器が受け取る変数の全体像を 1 画面で。注入は「注入」バッジで特別表示)。
 
 const NAV = [
@@ -30,6 +35,16 @@ const NAV = [
 export default function ServiceLayout() {
   const { id = "" } = useParams();
   const { data: svc } = useService(id);
+
+  const rename = useRenameService(id);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameName, setRenameName] = useState("");
+
+  const submitRename = () => {
+    const trimmed = renameName.trim();
+    if (!trimmed || rename.isPending) return; // 二重送信を防ぐ
+    rename.mutate(trimmed, { onSuccess: () => setRenameOpen(false) });
+  };
 
   return (
     <PageContainer>
@@ -46,9 +61,30 @@ export default function ServiceLayout() {
           </Link>
           <header className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-wrap items-center gap-3">
-              <Title size="large" color="app-teal">
-                {svc ? svc.display_name : id}
-              </Title>
+              {svc ? (
+                <button
+                  type="button"
+                  aria-label="サービス名を変更"
+                  title="クリックして名前を変更"
+                  onClick={() => {
+                    setRenameName(svc.display_name);
+                    setRenameOpen(true);
+                  }}
+                  className="group w-fit cursor-pointer rounded-2xl outline-none focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-4"
+                >
+                  <Title
+                    size="large"
+                    color="app-teal"
+                    className="group-hover:[--rb:#0aa79d] group-hover:[--rf:#2adfd2]"
+                  >
+                    {svc.display_name}
+                  </Title>
+                </button>
+              ) : (
+                <Title size="large" color="app-teal">
+                  {id}
+                </Title>
+              )}
               {svc && <PhaseBadge phase={svc.phase} />}
             </div>
             {svc && (
@@ -88,6 +124,49 @@ export default function ServiceLayout() {
 
         <Outlet />
       </div>
+
+      {/* リネーム(表示名のみ。subdomain = 公開 URL / GitHub repo は不変)。 */}
+      <Modal
+        open={renameOpen}
+        title="サービス名を変更"
+        typewriter={false}
+        width={460}
+        onClose={() => setRenameOpen(false)}
+        footer={
+          <>
+            <Button type="text" onClick={() => setRenameOpen(false)}>
+              キャンセル
+            </Button>
+            <Button
+              type="primary"
+              loading={rename.isPending}
+              disabled={!renameName.trim()}
+              onClick={submitRename}
+            >
+              変更
+            </Button>
+          </>
+        }
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitRename();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
+          <Input
+            label="名前"
+            value={renameName}
+            autoFocus
+            onChange={(e) => setRenameName(e.target.value)}
+            description="表示名だけ変わります。公開 URL(subdomain)と GitHub repo はそのままです。"
+          />
+          {rename.error && (
+            <p className="text-sm font-semibold text-[#e05a5a]">{rename.error.message}</p>
+          )}
+        </form>
+      </Modal>
     </PageContainer>
   );
 }

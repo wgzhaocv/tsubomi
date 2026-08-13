@@ -355,6 +355,12 @@ pub struct RenameVolumeReq {
     pub name: String,
 }
 
+/// `PATCH /api/services/:id`:表示名のリネーム(subdomain = 公開 URL / GitHub repo は不変)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameServiceReq {
+    pub name: String,
+}
+
 /// ディレクトリ内の 1 エントリ(`GET /api/volumes/:id/files`)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntryDto {

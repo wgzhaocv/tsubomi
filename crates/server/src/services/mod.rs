@@ -115,7 +115,10 @@ fn default_visibility(container_port: i32) -> Visibility {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/services", get(list).post(create))
-        .route("/services/{id}", get(get_one).delete(delete_service))
+        .route(
+            "/services/{id}",
+            get(get_one).patch(rename).delete(delete_service),
+        )
         .route("/services/{id}/start", post(start))
         .route("/services/{id}/stop", post(stop))
         .route("/services/{id}/logs", get(logs))
@@ -216,6 +219,62 @@ pub async fn get_one(
     )
     .bind(id)
     .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    row.map(|r| service_row_to_dto(r, &state.config))
+        .map(Json)
+        .ok_or(AppError::NotFound)
+}
+
+/// `PATCH /api/services/:id`:表示名のリネーム。**subdomain は不変** — 公開 URL・
+/// GitHub repo 名・registry repo・route ファイルはすべて subdomain / id に紐づくので
+/// 何も動かない(db rename の「接続文字列は変えない」と同型)。display_name は
+/// 表示と名前→id 解決にだけ効く。同名衝突は活体の部分ユニークが 409 に落とす。
+pub async fn rename(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<tsubomi_shared::RenameServiceReq>,
+) -> AppResult<Json<ServiceDto>> {
+    let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
+
+    let updated: Option<(Uuid,)> = sqlx::query_as(
+        "UPDATE resources SET display_name = $1
+          WHERE id = $2 AND user_id = $3 AND kind = 'service' AND deleted_at IS NULL
+      RETURNING id",
+    )
+    .bind(&display_name)
+    .bind(id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        map_unique(
+            e,
+            format!("サービス名 '{display_name}' は既に使われています"),
+        )
+    })?;
+    updated.ok_or(AppError::NotFound)?;
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.rename",
+        id,
+        json!({ "display_name": display_name }),
+        auth.client_ip.as_deref(),
+    )
+    .await;
+
+    // 改名後の全量 DTO(get_one と同じ行形)を返す — subdomain/url が不変なことが応答で見える。
+    let row: Option<ServiceRow> = sqlx::query_as(
+        "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
+                s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis
+           FROM resources r JOIN service_details s ON s.resource_id = r.id
+          WHERE r.id = $1",
+    )
+    .bind(id)
     .fetch_optional(&state.db)
     .await?;
     row.map(|r| service_row_to_dto(r, &state.config))

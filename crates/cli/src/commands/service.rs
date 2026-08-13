@@ -55,6 +55,13 @@ pub enum ServiceCmd {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
     },
+    /// 表示名を変更(subdomain = 公開 URL / GitHub repo は変わらない)
+    Rename {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// 新しい表示名
+        new_name: String,
+    },
     /// サービスを開始(現 image_digest で再起動)
     Start {
         /// 対象サービスの表示名
@@ -225,6 +232,16 @@ pub async fn run(
                 )?;
             } else {
                 print_status(&svc, &deploys, &injections, &env);
+            }
+        }
+        ServiceCmd::Rename { name, new_name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let svc = api::service_rename(&c, &server_url, &token, &id, &new_name).await?;
+            if json {
+                print_json(&svc)?;
+            } else {
+                println!("名前を変更しました:{}", svc.display_name);
+                println!("(公開 URL / GitHub repo は subdomain 由来なので変わりません: {})", svc.subdomain);
             }
         }
         ServiceCmd::Start { name } => {

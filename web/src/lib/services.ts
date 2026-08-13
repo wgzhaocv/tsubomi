@@ -183,6 +183,23 @@ export function useCreateService() {
   });
 }
 
+// リネーム(表示名のみ。subdomain = 公開 URL / GitHub repo は不変)。一覧 + 詳細を無効化。
+export function useRenameService(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string): Promise<Service> => {
+      const res = await fetch(`/api/services/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as Service;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.all }),
+  });
+}
+
 // ===== 詳細ページ(S7b)=====
 
 // GET して JSON を返す小ヘルパ(エラー本文は failBody で投げる)。詳細の各 query が使う。
