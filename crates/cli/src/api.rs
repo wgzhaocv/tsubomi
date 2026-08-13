@@ -686,40 +686,39 @@ pub async fn service_rename(
     resp.json().await.context("failed to parse rename response")
 }
 
+/// 「サーバがこの機能に未対応」の単一真源(文言と最低バージョンを 1 箇所に)。
+fn endpoint_unsupported(feature: &str, min_version: &str) -> ApiError {
+    ApiError {
+        code: "not_found",
+        message: format!(
+            "サーバがこの機能({feature})に未対応です(サーバ更新が必要 — {min_version} 以降)"
+        ),
+    }
+}
+
 /// 旧サーバで端点が無いときの 404 を「未対応」の文案に振り替える(v44+ は /api 未マッチ =
-/// 404。id は一覧から解決済みなので、この 404 はほぼ端点欠如)。上古サーバ(SPA fallback が
-/// 200+HTML を返す)は成功扱いになるのを防ぐため、成功応答の content-type も見る。
-fn remap_endpoint_missing(e: anyhow::Error, feature: &str) -> anyhow::Error {
+/// 404。id は一覧から解決済みなので、この 404 はほぼ端点欠如)。
+fn remap_endpoint_missing(e: anyhow::Error, feature: &str, min_version: &str) -> anyhow::Error {
     match e.downcast_ref::<ApiError>() {
-        Some(api) if api.code == "not_found" => ApiError {
-            code: "not_found",
-            message: format!(
-                "サーバがこの機能({feature})に未対応です(サーバ更新が必要 — v54 以降)"
-            ),
-        }
-        .into(),
+        Some(api) if api.code == "not_found" => endpoint_unsupported(feature, min_version).into(),
         _ => e,
     }
 }
 
-/// 204 を期待する POST の共通形:上古サーバの SPA fallback(200+HTML)を成功と誤認しない。
+/// 204 を期待する POST の共通形。判定は HTML **陰性**(metrics の JSON 陽性判定と逆向き)—
+/// 204 応答には content-type が無いので「JSON であること」は確かめられない。上古サーバの
+/// SPA fallback(200+HTML)を成功と誤認しないための最小チェック。
 async fn post_no_content(rb: reqwest::RequestBuilder, feature: &str) -> Result<()> {
     let resp = send_ok(rb)
         .await
-        .map_err(|e| remap_endpoint_missing(e, feature))?;
+        .map_err(|e| remap_endpoint_missing(e, feature, "v54"))?;
     let is_html = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("text/html"));
     if is_html {
-        return Err(ApiError {
-            code: "not_found",
-            message: format!(
-                "サーバがこの機能({feature})に未対応です(サーバ更新が必要 — v54 以降)"
-            ),
-        }
-        .into());
+        return Err(endpoint_unsupported(feature, "v54").into());
     }
     Ok(())
 }
@@ -737,19 +736,14 @@ pub async fn service_probe(
             .bearer_auth(token),
     )
     .await
-    .map_err(|e| remap_endpoint_missing(e, "probe"))?;
+    .map_err(|e| remap_endpoint_missing(e, "probe", "v54"))?;
     let is_json = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("application/json"));
     if !is_json {
-        return Err(ApiError {
-            code: "not_found",
-            message: "サーバがこの機能(probe)に未対応です(サーバ更新が必要 — v54 以降)"
-                .to_owned(),
-        }
-        .into());
+        return Err(endpoint_unsupported("probe", "v54").into());
     }
     resp.json().await.context("failed to parse probe response")
 }
@@ -762,8 +756,8 @@ pub async fn service_set_limits(
     memory_mb: Option<i32>,
     cpu_limit_millis: Option<i32>,
     clear_cpu_limit: bool,
-) -> Result<()> {
-    post_no_content(
+) -> Result<tsubomi_shared::ServiceLimitsDto> {
+    let resp = send_ok(
         c.post(format!("{server_url}/api/services/{id}/limits"))
             .bearer_auth(token)
             .json(&SetServiceLimitsReq {
@@ -771,9 +765,18 @@ pub async fn service_set_limits(
                 cpu_limit_millis,
                 clear_cpu_limit,
             }),
-        "limits",
     )
     .await
+    .map_err(|e| remap_endpoint_missing(e, "limits", "v54"))?;
+    let is_json = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/json"));
+    if !is_json {
+        return Err(endpoint_unsupported("limits", "v54").into());
+    }
+    resp.json().await.context("failed to parse limits response")
 }
 
 pub async fn service_set_stateful(
@@ -959,11 +962,7 @@ pub async fn service_metrics(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.contains("application/json"));
     if !is_json {
-        return Err(ApiError {
-            code: "not_found",
-            message: "このサーバは metrics に未対応です(サーバ更新が必要 — v43 以降)".to_owned(),
-        }
-        .into());
+        return Err(endpoint_unsupported("metrics", "v43").into());
     }
     resp.json()
         .await

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, Eye, EyeOff, RotateCw, Trash2, TriangleAlert } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 
@@ -39,6 +39,14 @@ export default function CacheDetail() {
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
+  // 同 route 間遷移では再マウントされない — 開いたままの各 modal / 取得済み URL が
+  // 別 cache に向く事故を防ぐ(rotate / delete は破壊的なので特に)。
+  useEffect(() => {
+    setRenameOpen(false);
+    setRotateOpen(false);
+    setDeleteOpen(false);
+    setUrl(null);
+  }, [id]);
 
   const submitRename = () => {
     const trimmed = renameName.trim();

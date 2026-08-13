@@ -277,6 +277,30 @@ pub async fn rename(
     Ok(Json(service_row_to_dto(row, &state.config)))
 }
 
+/// memory_mb の範囲検証(create / limits 共有。定数・文案の単一真源)。
+fn check_memory_mb(m: i32) -> AppResult<()> {
+    if !MEMORY_MB_RANGE.contains(&m) {
+        return Err(AppError::BadRequest(format!(
+            "memory_mb は {}〜{} にしてください",
+            MEMORY_MB_RANGE.start(),
+            MEMORY_MB_RANGE.end()
+        )));
+    }
+    Ok(())
+}
+
+/// cpu_limit_millis の範囲検証(create / limits 共有)。
+fn check_cpu_limit_millis(cpu: i32) -> AppResult<()> {
+    if !CPU_LIMIT_MILLIS_RANGE.contains(&cpu) {
+        return Err(AppError::BadRequest(format!(
+            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
+            CPU_LIMIT_MILLIS_RANGE.start(),
+            CPU_LIMIT_MILLIS_RANGE.end()
+        )));
+    }
+    Ok(())
+}
+
 /// 自分の service か確認する(他人 / 不在 / 削除済みは 404)。所有権ゲート。
 pub(crate) async fn ensure_owned(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<()> {
     let ok: bool = sqlx::query_scalar(
@@ -663,7 +687,7 @@ pub async fn set_limits(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<tsubomi_shared::SetServiceLimitsReq>,
-) -> AppResult<StatusCode> {
+) -> AppResult<Json<tsubomi_shared::ServiceLimitsDto>> {
     ensure_owned(&state, auth.user_id, id).await?;
 
     if req.memory_mb.is_none() && req.cpu_limit_millis.is_none() && !req.clear_cpu_limit {
@@ -676,24 +700,12 @@ pub async fn set_limits(
             "cpu_limit_millis と clear_cpu_limit は同時に指定できません".into(),
         ));
     }
-    // 範囲検証は create と同じ定数・同じ文案(単一真源はこのモジュールの定数)。
-    if let Some(m) = req.memory_mb
-        && !MEMORY_MB_RANGE.contains(&m)
-    {
-        return Err(AppError::BadRequest(format!(
-            "memory_mb は {}〜{} にしてください",
-            MEMORY_MB_RANGE.start(),
-            MEMORY_MB_RANGE.end()
-        )));
+    // 範囲検証は create と共有(check_* が定数・文案ごと単一真源)。
+    if let Some(m) = req.memory_mb {
+        check_memory_mb(m)?;
     }
-    if let Some(cpu) = req.cpu_limit_millis
-        && !CPU_LIMIT_MILLIS_RANGE.contains(&cpu)
-    {
-        return Err(AppError::BadRequest(format!(
-            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
-            CPU_LIMIT_MILLIS_RANGE.start(),
-            CPU_LIMIT_MILLIS_RANGE.end()
-        )));
+    if let Some(cpu) = req.cpu_limit_millis {
+        check_cpu_limit_millis(cpu)?;
     }
 
     let row: Option<(i32, Option<i32>)> = sqlx::query_as(
@@ -722,7 +734,11 @@ pub async fn set_limits(
         auth.client_ip.as_deref(),
     )
     .await;
-    Ok(StatusCode::NO_CONTENT)
+    // 変更後の確定値を返す(部分変更でも全量 — CLI/web が「今の姿」をそのまま出せる)。
+    Ok(Json(tsubomi_shared::ServiceLimitsDto {
+        memory_mb,
+        cpu_limit_millis,
+    }))
 }
 
 /// `POST /api/services/:id/stateful`:stateful を **false→true の単方向**で有効化する
@@ -1603,13 +1619,7 @@ pub async fn create(
         )));
     }
     let memory_mb = req.memory_mb.unwrap_or(DEFAULT_MEMORY_MB);
-    if !MEMORY_MB_RANGE.contains(&memory_mb) {
-        return Err(AppError::BadRequest(format!(
-            "memory_mb は {}〜{} にしてください",
-            MEMORY_MB_RANGE.start(),
-            MEMORY_MB_RANGE.end()
-        )));
-    }
+    check_memory_mb(memory_mb)?;
     // visibility:明示指定 > port からの推導(§0-B。8080 → company / それ以外 → private)。
     let visibility = match req.visibility.as_deref() {
         Some(s) => Visibility::parse(s).ok_or_else(|| {
@@ -1621,14 +1631,8 @@ pub async fn create(
     };
     let stateful = req.stateful.unwrap_or(false);
     // CPU 硬上限は任意(None = 従来どおりソフト権重のみ)。指定時だけ範囲を検証。
-    if let Some(cpu) = req.cpu_limit_millis
-        && !CPU_LIMIT_MILLIS_RANGE.contains(&cpu)
-    {
-        return Err(AppError::BadRequest(format!(
-            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
-            CPU_LIMIT_MILLIS_RANGE.start(),
-            CPU_LIMIT_MILLIS_RANGE.end()
-        )));
+    if let Some(cpu) = req.cpu_limit_millis {
+        check_cpu_limit_millis(cpu)?;
     }
 
     // 同名チェック(UNIQUE が最終ガードだが、先に弾いて分かりやすく)。

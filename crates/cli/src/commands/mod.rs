@@ -117,6 +117,12 @@ pub async fn resolve_service_id(
     token: &str,
     name: &str,
 ) -> Result<String> {
+    // 完全な UUID は id としてそのまま通す(存在検証は各 API の 404 に委ねる)。
+    // 長時間処理(deploy --watch の CI 待ち等)の途中で rename されても、UUID を
+    // 持ち回れば名前の再解決で迷子にならない(codex 監査 2026-08-13)。
+    if let Ok(u) = name.parse::<uuid::Uuid>() {
+        return Ok(u.to_string());
+    }
     let svcs = api::service_list(c, server_url, token).await?;
     svcs.iter()
         .find(|s| s.display_name == name)

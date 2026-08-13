@@ -37,6 +37,8 @@ export default function DatabaseLayout() {
   // (useEffect だと「新 DB の内容 + 旧位置」が 1 フレーム見えてから跳ぶ)。
   useLayoutEffect(() => {
     window.scrollTo(0, 0);
+    // 開いたままの rename modal が**別 DB** に送信される事故も同時に防ぐ。
+    setRenameOpen(false);
   }, [id]);
 
   const submitRename = () => {

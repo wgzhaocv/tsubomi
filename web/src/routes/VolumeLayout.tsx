@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowLeft, FolderOpen, LayoutDashboard } from "lucide-react";
 import { Link, NavLink, Outlet, useParams } from "react-router";
 
@@ -28,6 +28,8 @@ export default function VolumeLayout() {
   const rename = useRenameVolume(id);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
+  // 同 route 間遷移では再マウントされない — 開いたままの modal が別 volume に送信される事故を防ぐ。
+  useEffect(() => setRenameOpen(false), [id]);
 
   const submitRename = () => {
     const trimmed = renameName.trim();

@@ -136,8 +136,9 @@ export default function ServiceOverview() {
 
       <Divider type="line-brown" />
 
-      {/* ===== 資源上限(次のデプロイから反映)===== */}
-      <LimitsSection svc={svc} id={id} />
+      {/* ===== 資源上限(次のデプロイから反映)=====
+          svc 確定後に条件レンダー = useState 初期化子で現値を seed できる(render 中 setState 不要)。 */}
+      {svc && <LimitsSection svc={svc} id={id} />}
 
       <Divider type="line-brown" />
 
@@ -273,21 +274,23 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
 
 // 資源上限の変更(memory / cpus)。値は次のデプロイから反映 — 走行中コンテナには効かない
 // (server の run_digest がデプロイのたびに DB から読み直す)。cpus 欄は空 = 上限なし。
-function LimitsSection({ svc, id }: { svc: ReturnType<typeof useService>["data"]; id: string }) {
+function LimitsSection({
+  svc,
+  id,
+}: {
+  svc: NonNullable<ReturnType<typeof useService>["data"]>;
+  id: string;
+}) {
   const setLimits = useSetServiceLimits(id);
-  const [memory, setMemory] = useState("");
-  const [cpus, setCpus] = useState("");
-  const [saved, setSaved] = useState(false);
-  // svc 到着時に一度だけ現値をフォームへ(編集中の上書きを避けるため svc 変化では同期しない)。
-  const [seeded, setSeeded] = useState(false);
-  if (svc && !seeded) {
-    setMemory(String(svc.memory_mb ?? ""));
-    setCpus(svc.cpu_limit_millis != null ? String(svc.cpu_limit_millis / 1000) : "");
-    setSeeded(true);
-  }
+  // 親が svc 確定後にだけレンダーするので、初期化子で現値を seed できる(初期化子は
+  // 再実行されない = mutation 後の refetch が編集中の値を上書きしない)。
+  const [memory, setMemory] = useState(String(svc.memory_mb ?? ""));
+  const [cpus, setCpus] = useState(
+    svc.cpu_limit_millis != null ? String(svc.cpu_limit_millis / 1000) : "",
+  );
 
   const submit = () => {
-    if (!svc || setLimits.isPending) return;
+    if (setLimits.isPending) return;
     const body: SetLimitsInput = {};
     const mem = Number(memory);
     if (memory.trim() && Number.isFinite(mem) && mem !== svc.memory_mb) body.memory_mb = mem;
@@ -300,8 +303,7 @@ function LimitsSection({ svc, id }: { svc: ReturnType<typeof useService>["data"]
         body.cpu_limit_millis = millis;
     }
     if (!body.memory_mb && !body.cpu_limit_millis && !body.clear_cpu_limit) return; // 変更なし
-    setSaved(false);
-    setLimits.mutate(body, { onSuccess: () => setSaved(true) });
+    setLimits.mutate(body);
   };
 
   return (
@@ -334,7 +336,7 @@ function LimitsSection({ svc, id }: { svc: ReturnType<typeof useService>["data"]
       {setLimits.error && (
         <p className="text-sm font-semibold text-[#e05a5a]">{setLimits.error.message}</p>
       )}
-      {saved && !setLimits.isPending && (
+      {setLimits.isSuccess && !setLimits.isPending && (
         <p className="text-sm font-semibold text-[#11a89b]">
           保存しました。次のデプロイから反映されます。
         </p>

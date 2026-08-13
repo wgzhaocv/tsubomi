@@ -272,17 +272,16 @@ pub async fn run(
                             "--cpus はコア数(例 0.5)か `none`(解除)で指定してください"
                         )
                     })?;
-                    if !(0.1..=16.0).contains(&c) {
-                        bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)");
-                    }
-                    (Some((c * 1000.0).round() as i32), false)
+                    (Some(cpus_to_millis(c)?), false)
                 }
             };
             if memory.is_none() && cpu_limit_millis.is_none() && !clear_cpu_limit {
                 bail!("変更する項目を指定してください(--memory / --cpus)");
             }
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
-            api::service_set_limits(
+            // 応答は変更後の**確定値**(部分変更でも全量)。リクエスト値のエコーだと
+            // 指定しなかった項目が null になり「上限なし」と紛らわしい。
+            let limits = api::service_set_limits(
                 &c,
                 &server_url,
                 &token,
@@ -296,13 +295,19 @@ pub async fn run(
             if json {
                 print_json(&json!({
                     "status": "updated",
-                    "memory_mb": memory,
-                    "cpu_limit_millis": cpu_limit_millis,
-                    "cpu_limit_cleared": clear_cpu_limit,
+                    "memory_mb": limits.memory_mb,
+                    "cpu_limit_millis": limits.cpu_limit_millis,
                     "hint": hint,
                 }))?;
             } else {
-                println!("上限を変更しました。{hint}");
+                let cpus = limits
+                    .cpu_limit_millis
+                    .map(|m| format!("{}m", m))
+                    .unwrap_or_else(|| "なし".into());
+                println!(
+                    "上限を変更しました(memory={}MB / cpus={cpus})。{hint}",
+                    limits.memory_mb
+                );
             }
         }
         ServiceCmd::Stateful { name } => {
@@ -500,13 +505,7 @@ pub async fn run(
             cpus,
         } => {
             // CPU 上限はコア数(人間の単位)で受け、wire は millicores(整数)に変換する。
-            let cpu_limit_millis = match cpus {
-                Some(c) if !(0.1..=16.0).contains(&c) => {
-                    bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)")
-                }
-                Some(c) => Some((c * 1000.0).round() as i32),
-                None => None,
-            };
+            let cpu_limit_millis = cpus.map(cpus_to_millis).transpose()?;
             // GitHub 連携(`gh repo create --source=.` と後の `git push`)は **カレントを git
             // リポジトリとして** GitHub に繋ぐので、repo でなければ service 作成(= サーバ側の
             // 副作用)の **前** に `git init` して半端な状態(service だけ出来て連携が失敗)を防ぐ。
@@ -627,8 +626,8 @@ fn print_status(
         println!("  url:         {}{suffix}", svc.url);
     }
     // 旧サーバ(フィールド無し = 空文字)は行ごと出さない。
-    // port / stateful / memory / cpus は**作成後に変えられない**のに、以前は作成時に 1 度回显する
-    // だけで後から確認する手段が無かった。create と同じ 1 行を共有して出す。
+    // service の「形」の現値確認の入口(create と同じ 1 行を共有)。limits / stateful で
+    // 後から変えられるようになった今も、「今どうなっているか」を見る場所はここ。
     if !svc.visibility.is_empty() {
         println!("  形:          {}", shape_line(svc));
     }
@@ -684,6 +683,15 @@ fn print_status(
             err
         );
     }
+}
+
+/// コア数(人間の単位)→ millicores(wire)。範囲検証込みの単一真源(create / limits 共用。
+/// サーバ側 CPU_LIMIT_MILLIS_RANGE = 100..=16000 と対で、こちらはコア数で 0.1〜16)。
+fn cpus_to_millis(c: f64) -> Result<i32> {
+    if !(0.1..=16.0).contains(&c) {
+        bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)");
+    }
+    Ok((c * 1000.0).round() as i32)
 }
 
 /// `sha256:<64hex>` → `sha256:<先頭 12>`(表示用の短縮)。

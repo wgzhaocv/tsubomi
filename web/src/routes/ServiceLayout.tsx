@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowLeft,
   History,
@@ -39,6 +39,9 @@ export default function ServiceLayout() {
   const rename = useRenameService(id);
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState("");
+  // 同じ route(/services/:id)間の遷移では Layout が再マウントされないため、開いたままの
+  // modal が**別サービス**に送信される事故を防ぐ(codex 監査 2026-08-13)。
+  useEffect(() => setRenameOpen(false), [id]);
 
   const submitRename = () => {
     const trimmed = renameName.trim();

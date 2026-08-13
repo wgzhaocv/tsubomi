@@ -193,13 +193,14 @@ async fn run_source(
         // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は完走待ち + 内網探活
         // (wait_deploy_only。run_verify の private 分岐と同じ着地だが、deploy 文脈の
         // status/git_sha 込みの JSON 形を保つためこちらを使う)。
+        // 対象は UUID で渡す(取得待ちの間の rename に耐える — resolve が UUID を素通し)。
         let svc = api::service_get(&c, &server_url, &token, &id).await?;
         if svc.visibility == tsubomi_shared::VISIBILITY_PRIVATE {
             return crate::commands::service::wait_deploy_only(
                 &c,
                 &server_url,
                 &token,
-                &svc_name,
+                &id,
                 &resp.git_sha,
                 args.timeout,
                 json,
@@ -210,7 +211,7 @@ async fn run_source(
             &c,
             &server_url,
             &token,
-            &svc_name,
+            &id,
             /*wait*/ true,
             Some(&resp.git_sha),
             args.timeout,
@@ -257,8 +258,8 @@ async fn run_watch(
         );
     }
 
-    // 対象 service(--watch は subdomain=repo 名の解決に表示名も使う)。
-    let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
+    // 対象 service(検証は UUID で持ち回る — CI 待ち中の rename に耐える)。
+    let (id, _svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
 
     // preflight(既定 on):CI が同じ repo をビルドするので push 前に落とし穴を警告する。
     // --watch は cwd(=repo)を対象にする(--context は --local 用)。
@@ -364,20 +365,13 @@ async fn run_watch(
     }
 
     // 4) CI 成功 = hook 到達済み。この sha のデプロイ完走を待って検証(端到端)。
+    // 対象は表示名ではなく **UUID** で渡す(resolve_service_id が UUID を素通しする)—
+    // CI 待ちの間に rename されると旧名の再解決が not_found で落ちるため。
     if !json {
         eprintln!("CI 成功。デプロイ完走を待って検証します…");
     }
-    crate::commands::service::run_verify(
-        &c,
-        &server_url,
-        &token,
-        &svc_name,
-        true,
-        Some(&sha),
-        remaining(),
-        json,
-    )
-    .await
+    crate::commands::service::run_verify(&c, &server_url, &token, &id, true, Some(&sha), remaining(), json)
+        .await
 }
 
 /// GitHub Actions の run(id と URL)。

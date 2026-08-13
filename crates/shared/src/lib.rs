@@ -384,6 +384,16 @@ pub struct ServiceProbeDto {
     pub container_port: i32,
 }
 
+/// `POST /api/services/:id/limits` の応答:変更後の確定値。部分変更(memory だけ等)でも
+/// 全量を返す — リクエスト値のエコーだと「指定しなかった項目 = null」が「上限なし」と
+/// 紛らわしいため。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceLimitsDto {
+    pub memory_mb: i32,
+    /// None = CPU 硬上限なし(相対権重のみ)。
+    pub cpu_limit_millis: Option<i32>,
+}
+
 /// `POST /api/services/:id/limits`:資源上限の変更。**次のデプロイから反映**
 /// (docker の memory / nano_cpus はコンテナ作成時パラメータ。走行中コンテナには遡及しない)。
 /// 少なくとも 1 項目の指定が必要。`clear_cpu_limit` は CPU 硬上限の解除
