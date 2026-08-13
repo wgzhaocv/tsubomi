@@ -8,8 +8,8 @@ use tsubomi_shared::{
     DeployConfig, DeployDto, ExecReq, ExecResult, ForkDatabaseReq, Health, InjectionDto,
     ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameServiceReq,
-    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp, SetServiceVisibilityReq,
-    TrashItemDto, VolumeDto,
+    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp, SetServiceLimitsReq,
+    SetServiceVisibilityReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -684,6 +684,80 @@ pub async fn service_rename(
     )
     .await?;
     resp.json().await.context("failed to parse rename response")
+}
+
+/// 旧サーバで端点が無いときの 404 を「未対応」の文案に振り替える(v44+ は /api 未マッチ =
+/// 404。id は一覧から解決済みなので、この 404 はほぼ端点欠如)。上古サーバ(SPA fallback が
+/// 200+HTML を返す)は成功扱いになるのを防ぐため、成功応答の content-type も見る。
+fn remap_endpoint_missing(e: anyhow::Error, feature: &str) -> anyhow::Error {
+    match e.downcast_ref::<ApiError>() {
+        Some(api) if api.code == "not_found" => ApiError {
+            code: "not_found",
+            message: format!(
+                "サーバがこの機能({feature})に未対応です(サーバ更新が必要 — v54 以降)"
+            ),
+        }
+        .into(),
+        _ => e,
+    }
+}
+
+/// 204 を期待する POST の共通形:上古サーバの SPA fallback(200+HTML)を成功と誤認しない。
+async fn post_no_content(rb: reqwest::RequestBuilder, feature: &str) -> Result<()> {
+    let resp = send_ok(rb)
+        .await
+        .map_err(|e| remap_endpoint_missing(e, feature))?;
+    let is_html = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/html"));
+    if is_html {
+        return Err(ApiError {
+            code: "not_found",
+            message: format!(
+                "サーバがこの機能({feature})に未対応です(サーバ更新が必要 — v54 以降)"
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+pub async fn service_set_limits(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    memory_mb: Option<i32>,
+    cpu_limit_millis: Option<i32>,
+    clear_cpu_limit: bool,
+) -> Result<()> {
+    post_no_content(
+        c.post(format!("{server_url}/api/services/{id}/limits"))
+            .bearer_auth(token)
+            .json(&SetServiceLimitsReq {
+                memory_mb,
+                cpu_limit_millis,
+                clear_cpu_limit,
+            }),
+        "limits",
+    )
+    .await
+}
+
+pub async fn service_set_stateful(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<()> {
+    post_no_content(
+        c.post(format!("{server_url}/api/services/{id}/stateful"))
+            .bearer_auth(token),
+        "stateful",
+    )
+    .await
 }
 
 pub async fn service_deploys(

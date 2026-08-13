@@ -11,9 +11,11 @@ import {
   desiredLabel,
   phaseLabel,
   serviceVisibility,
+  type SetLimitsInput,
   shortDigest,
   useDeleteService,
   useService,
+  useSetServiceLimits,
   useSetServiceVisibility,
   useStartService,
   useStopService,
@@ -122,8 +124,20 @@ export default function ServiceOverview() {
           <Stat label="最終デプロイ">
             {svc?.last_deploy_at ? new Date(svc.last_deploy_at).toLocaleString("ja-JP") : "—"}
           </Stat>
+          <Stat label="メモリ上限">{svc?.memory_mb != null ? `${svc.memory_mb} MiB` : "—"}</Stat>
+          <Stat label="CPU 上限">
+            {svc?.cpu_limit_millis != null
+              ? `${svc.cpu_limit_millis / 1000} CPU`
+              : "なし(相対権重のみ)"}
+          </Stat>
+          <Stat label="有状態">{svc?.stateful ? "はい(stop-first デプロイ)" : "いいえ"}</Stat>
         </dl>
       </section>
+
+      <Divider type="line-brown" />
+
+      {/* ===== 資源上限(次のデプロイから反映)===== */}
+      <LimitsSection svc={svc} id={id} />
 
       <Divider type="line-brown" />
 
@@ -254,5 +268,77 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
       <dt className="text-xs font-semibold text-muted-foreground">{label}</dt>
       <dd className="truncate text-sm font-bold text-foreground">{children}</dd>
     </div>
+  );
+}
+
+// 資源上限の変更(memory / cpus)。値は次のデプロイから反映 — 走行中コンテナには効かない
+// (server の run_digest がデプロイのたびに DB から読み直す)。cpus 欄は空 = 上限なし。
+function LimitsSection({ svc, id }: { svc: ReturnType<typeof useService>["data"]; id: string }) {
+  const setLimits = useSetServiceLimits(id);
+  const [memory, setMemory] = useState("");
+  const [cpus, setCpus] = useState("");
+  const [saved, setSaved] = useState(false);
+  // svc 到着時に一度だけ現値をフォームへ(編集中の上書きを避けるため svc 変化では同期しない)。
+  const [seeded, setSeeded] = useState(false);
+  if (svc && !seeded) {
+    setMemory(String(svc.memory_mb ?? ""));
+    setCpus(svc.cpu_limit_millis != null ? String(svc.cpu_limit_millis / 1000) : "");
+    setSeeded(true);
+  }
+
+  const submit = () => {
+    if (!svc || setLimits.isPending) return;
+    const body: SetLimitsInput = {};
+    const mem = Number(memory);
+    if (memory.trim() && Number.isFinite(mem) && mem !== svc.memory_mb) body.memory_mb = mem;
+    const cpusTrim = cpus.trim();
+    if (cpusTrim === "") {
+      if (svc.cpu_limit_millis != null) body.clear_cpu_limit = true;
+    } else {
+      const millis = Math.round(Number(cpusTrim) * 1000);
+      if (Number.isFinite(millis) && millis !== svc.cpu_limit_millis)
+        body.cpu_limit_millis = millis;
+    }
+    if (!body.memory_mb && !body.cpu_limit_millis && !body.clear_cpu_limit) return; // 変更なし
+    setSaved(false);
+    setLimits.mutate(body, { onSuccess: () => setSaved(true) });
+  };
+
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="text-lg font-bold text-foreground">資源上限</h2>
+      <p className="text-sm font-medium text-muted-foreground">
+        変更は<strong>次のデプロイから</strong>反映されます(走行中のコンテナには効きません)。CPU
+        欄を空にすると硬上限なし(相対権重のみ)に戻ります。
+      </p>
+      <div className="flex flex-wrap items-end gap-3">
+        <Input
+          label="メモリ上限(MiB、128〜4096)"
+          value={memory}
+          inputMode="numeric"
+          onChange={(e) => setMemory(e.target.value)}
+          className="w-44"
+        />
+        <Input
+          label="CPU 上限(コア数、0.1〜16)"
+          value={cpus}
+          inputMode="decimal"
+          placeholder="なし"
+          onChange={(e) => setCpus(e.target.value)}
+          className="w-44"
+        />
+        <Button type="primary" loading={setLimits.isPending} onClick={submit}>
+          保存
+        </Button>
+      </div>
+      {setLimits.error && (
+        <p className="text-sm font-semibold text-[#e05a5a]">{setLimits.error.message}</p>
+      )}
+      {saved && !setLimits.isPending && (
+        <p className="text-sm font-semibold text-[#11a89b]">
+          保存しました。次のデプロイから反映されます。
+        </p>
+      )}
+    </section>
   );
 }

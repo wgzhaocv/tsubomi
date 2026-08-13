@@ -128,6 +128,8 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
         .route("/services/{id}/visibility", post(set_visibility))
+        .route("/services/{id}/limits", post(set_limits))
+        .route("/services/{id}/stateful", post(set_stateful))
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
         .route("/services/{id}/deploy-source", post(source::deploy_source))
@@ -238,10 +240,16 @@ pub async fn rename(
 ) -> AppResult<Json<ServiceDto>> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
 
-    let updated: Option<(Uuid,)> = sqlx::query_as(
-        "UPDATE resources SET display_name = $1
-          WHERE id = $2 AND user_id = $3 AND kind = 'service' AND deleted_at IS NULL
-      RETURNING id",
+    // db/cache rename と同型:UPDATE…FROM…RETURNING の 1 文で全量 DTO 行まで取る
+    // (subdomain/url が不変なことが応答で見える)。
+    let row: Option<ServiceRow> = sqlx::query_as(
+        "UPDATE resources r SET display_name = $1
+           FROM service_details s
+          WHERE r.id = $2 AND r.user_id = $3 AND r.kind = 'service' AND r.deleted_at IS NULL
+            AND s.resource_id = r.id
+      RETURNING r.id, r.display_name, r.anon_seq, r.created_at,
+                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
+                s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis",
     )
     .bind(&display_name)
     .bind(id)
@@ -254,7 +262,7 @@ pub async fn rename(
             format!("サービス名 '{display_name}' は既に使われています"),
         )
     })?;
-    updated.ok_or(AppError::NotFound)?;
+    let row = row.ok_or(AppError::NotFound)?;
 
     audit(
         &state.db,
@@ -265,21 +273,7 @@ pub async fn rename(
         auth.client_ip.as_deref(),
     )
     .await;
-
-    // 改名後の全量 DTO(get_one と同じ行形)を返す — subdomain/url が不変なことが応答で見える。
-    let row: Option<ServiceRow> = sqlx::query_as(
-        "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
-                s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
-                s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis
-           FROM resources r JOIN service_details s ON s.resource_id = r.id
-          WHERE r.id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?;
-    row.map(|r| service_row_to_dto(r, &state.config))
-        .map(Json)
-        .ok_or(AppError::NotFound)
+    Ok(Json(service_row_to_dto(row, &state.config)))
 }
 
 /// 自分の service か確認する(他人 / 不在 / 削除済みは 404)。所有権ゲート。
@@ -654,6 +648,122 @@ pub async fn set_visibility(
                 .map_err(converge_err)?;
             }
         }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/services/:id/limits`:memory / cpus 上限の変更。値は run_digest_inner が
+/// デプロイのたびに DB から読み直すので、**次のデプロイから反映**(走行中コンテナには
+/// 遡及しない — docker の memory / nano_cpus はコンテナ作成時パラメータ)。visibility と
+/// 違い現実収束段が無い = DB 更新だけなので deploy_lock も不要(UPDATE は原子的で、
+/// 進行中デプロイは自分が読んだ時点の値で完走する。それも仕様どおり「次から」)。
+pub async fn set_limits(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<tsubomi_shared::SetServiceLimitsReq>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+
+    if req.memory_mb.is_none() && req.cpu_limit_millis.is_none() && !req.clear_cpu_limit {
+        return Err(AppError::BadRequest(
+            "変更する項目を指定してください(memory_mb / cpu_limit_millis / clear_cpu_limit)".into(),
+        ));
+    }
+    if req.cpu_limit_millis.is_some() && req.clear_cpu_limit {
+        return Err(AppError::BadRequest(
+            "cpu_limit_millis と clear_cpu_limit は同時に指定できません".into(),
+        ));
+    }
+    // 範囲検証は create と同じ定数・同じ文案(単一真源はこのモジュールの定数)。
+    if let Some(m) = req.memory_mb
+        && !MEMORY_MB_RANGE.contains(&m)
+    {
+        return Err(AppError::BadRequest(format!(
+            "memory_mb は {}〜{} にしてください",
+            MEMORY_MB_RANGE.start(),
+            MEMORY_MB_RANGE.end()
+        )));
+    }
+    if let Some(cpu) = req.cpu_limit_millis
+        && !CPU_LIMIT_MILLIS_RANGE.contains(&cpu)
+    {
+        return Err(AppError::BadRequest(format!(
+            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
+            CPU_LIMIT_MILLIS_RANGE.start(),
+            CPU_LIMIT_MILLIS_RANGE.end()
+        )));
+    }
+
+    let row: Option<(i32, Option<i32>)> = sqlx::query_as(
+        "UPDATE service_details s SET
+                memory_mb        = COALESCE($2, s.memory_mb),
+                cpu_limit_millis = CASE WHEN $4 THEN NULL
+                                        ELSE COALESCE($3, s.cpu_limit_millis) END
+           FROM resources r
+          WHERE s.resource_id = $1 AND r.id = s.resource_id AND r.deleted_at IS NULL
+      RETURNING s.memory_mb, s.cpu_limit_millis",
+    )
+    .bind(id)
+    .bind(req.memory_mb)
+    .bind(req.cpu_limit_millis)
+    .bind(req.clear_cpu_limit)
+    .fetch_optional(&state.db)
+    .await?;
+    let (memory_mb, cpu_limit_millis) = row.ok_or(AppError::NotFound)?;
+
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.limits",
+        id,
+        json!({ "memory_mb": memory_mb, "cpu_limit_millis": cpu_limit_millis }),
+        auth.client_ip.as_deref(),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/services/:id/stateful`:stateful を **false→true の単方向**で有効化する
+/// (stateful 設計 §0-C / §10-D)。true→false は入口ごと作らない — stateless の swap
+/// デプロイは新旧コンテナが同一データ目録を同時に開く方向で、既に貯めたデータを
+/// 壊し得る。false→true は既存 workaround(DB を stateless で走らせてしまった)の救済で、
+/// 次のデプロイから stop-first になるだけ(走行中コンテナには遡及しない)。
+/// 既に true なら冪等成功(触らない・audit も書かない)。
+pub async fn set_stateful(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    ensure_owned(&state, auth.user_id, id).await?;
+
+    // deploy_lock で進行中デプロイと直列化する:swap デプロイの最中に flag が立つと
+    // 「stateless 前提で新旧併走中なのにもう stateful のつもり」という取り違えを生む。
+    // 待ってから立てれば「次のデプロイから stop-first」が正確に成立する。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+
+    let changed = sqlx::query(
+        "UPDATE service_details s SET stateful = true
+           FROM resources r
+          WHERE s.resource_id = $1 AND r.id = s.resource_id AND r.deleted_at IS NULL
+            AND s.stateful = false",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+
+    if changed > 0 {
+        audit(
+            &state.db,
+            Some(auth.user_id),
+            "service.stateful",
+            id,
+            json!({ "stateful": true }),
+            auth.client_ip.as_deref(),
+        )
+        .await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

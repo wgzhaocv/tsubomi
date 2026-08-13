@@ -361,6 +361,21 @@ pub struct RenameServiceReq {
     pub name: String,
 }
 
+/// `POST /api/services/:id/limits`:資源上限の変更。**次のデプロイから反映**
+/// (docker の memory / nano_cpus はコンテナ作成時パラメータ。走行中コンテナには遡及しない)。
+/// 少なくとも 1 項目の指定が必要。`clear_cpu_limit` は CPU 硬上限の解除
+/// (`cpu_limit_millis` との同時指定は 400)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetServiceLimitsReq {
+    /// メモリ硬上限(MiB)。None = 変更しない。
+    pub memory_mb: Option<i32>,
+    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 変更しない。
+    pub cpu_limit_millis: Option<i32>,
+    /// true = CPU 硬上限を解除(NULL に戻す)。
+    #[serde(default)]
+    pub clear_cpu_limit: bool,
+}
+
 /// ディレクトリ内の 1 エントリ(`GET /api/volumes/:id/files`)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEntryDto {

@@ -62,6 +62,23 @@ pub enum ServiceCmd {
         /// 新しい表示名
         new_name: String,
     },
+    /// メモリ / CPU 上限を変更する(次のデプロイから反映 — 走行中コンテナには効かない)
+    Limits {
+        /// 対象サービスの表示名
+        name: String,
+        /// メモリ硬上限 MiB(範囲 128〜4096)
+        #[arg(long)]
+        memory: Option<i32>,
+        /// CPU 硬上限(コア数。例 0.5 / 2。範囲 0.1〜16)。`none` で上限を解除
+        #[arg(long)]
+        cpus: Option<String>,
+    },
+    /// stateful(有状態コンテナ)を有効化する(false→true の一方向のみ。次のデプロイから
+    /// stop-first になる。データ目録は volume 注入に置くこと)
+    Stateful {
+        /// 対象サービスの表示名
+        name: String,
+    },
     /// サービスを開始(現 image_digest で再起動)
     Start {
         /// 対象サービスの表示名
@@ -242,6 +259,61 @@ pub async fn run(
             } else {
                 println!("名前を変更しました:{}", svc.display_name);
                 println!("(公開 URL / GitHub repo は subdomain 由来なので変わりません: {})", svc.subdomain);
+            }
+        }
+        ServiceCmd::Limits { name, memory, cpus } => {
+            // `--cpus none` = 硬上限の解除。数値はコア数 → millicores(create と同じ変換)。
+            let (cpu_limit_millis, clear_cpu_limit) = match cpus.as_deref() {
+                None => (None, false),
+                Some("none") => (None, true),
+                Some(s) => {
+                    let c: f64 = s.parse().map_err(|_| {
+                        anyhow::anyhow!(
+                            "--cpus はコア数(例 0.5)か `none`(解除)で指定してください"
+                        )
+                    })?;
+                    if !(0.1..=16.0).contains(&c) {
+                        bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)");
+                    }
+                    (Some((c * 1000.0).round() as i32), false)
+                }
+            };
+            if memory.is_none() && cpu_limit_millis.is_none() && !clear_cpu_limit {
+                bail!("変更する項目を指定してください(--memory / --cpus)");
+            }
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_set_limits(
+                &c,
+                &server_url,
+                &token,
+                &id,
+                memory,
+                cpu_limit_millis,
+                clear_cpu_limit,
+            )
+            .await?;
+            let hint = "次のデプロイから反映されます(`tbm deploy` または `tbm service start` で再作成)";
+            if json {
+                print_json(&json!({
+                    "status": "updated",
+                    "memory_mb": memory,
+                    "cpu_limit_millis": cpu_limit_millis,
+                    "cpu_limit_cleared": clear_cpu_limit,
+                    "hint": hint,
+                }))?;
+            } else {
+                println!("上限を変更しました。{hint}");
+            }
+        }
+        ServiceCmd::Stateful { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            api::service_set_stateful(&c, &server_url, &token, &id).await?;
+            let hint =
+                "次のデプロイから stop-first(数秒の瞬断でデータ目録を単独占有)になります。データは volume 注入に置くこと";
+            if json {
+                print_json(&json!({ "status": "stateful", "hint": hint }))?;
+            } else {
+                println!("stateful を有効化しました。{hint}");
             }
         }
         ServiceCmd::Start { name } => {
@@ -695,9 +767,10 @@ fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
              データは volume 注入に置くこと"
         );
     }
-    // 変更端点があるのは visibility だけ — 他は作り直しになるので、その場で気付けるように言う。
+    // port だけは作成後に変更できない(§0-D:route/リンクの真源)— その場で気付けるように言う。
     eprintln!(
-        "  ※ 作成後に変更できるのは visibility だけです(port / stateful / memory / cpus は作り直し)"
+        "  ※ port は作成後に変更できません(間違えたら作り直し)。visibility / memory / cpus は \
+         `tbm service visibility|limits`、stateful は `tbm service stateful`(false→true のみ)で後から変更できます"
     );
 }
 
@@ -1123,10 +1196,9 @@ fn print_metrics(name: &str, m: &ServiceMetricsDto) {
         println!("  再起動:   {rc} 回{}", if rc > 0 { "(クラッシュ / 再起動の疑い)" } else { "" });
     }
     if m.oom_killed == Some(true) {
-        // memory は作成後に変更できない(変更端点が無い)ので、「上げる」= 作り直しだと明示する。
         println!(
-            "  ⚠ 直近の終了は OOM でした(使用量を減らす、または `--memory` を上げて**作り直す** \
-             — memory は作成後に変更できません)"
+            "  ⚠ 直近の終了は OOM でした(使用量を減らすか、`tbm service limits <名前> --memory <MiB>` \
+             で上限を上げて再デプロイ)"
         );
     }
 }

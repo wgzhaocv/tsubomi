@@ -31,6 +31,8 @@ export type Service = {
   stateful?: boolean;
   // メモリ硬上限 MiB。旧サーバ相手では欠ける。
   memory_mb?: number;
+  // CPU 硬上限(millicores、1000 = 1 CPU)。null / 欠け = 硬上限なし(相対権重のみ)。
+  cpu_limit_millis?: number | null;
 };
 
 export type RegistryCreds = { host: string; user: string; pass: string };
@@ -315,6 +317,19 @@ export function useSetServiceVisibility(id: string) {
       method: "POST",
       body: { visibility },
     }),
+    () => serviceKeys.all,
+  );
+}
+
+// memory / cpus 上限の変更。**次のデプロイから反映**(走行中コンテナには効かない)。
+export type SetLimitsInput = {
+  memory_mb?: number;
+  cpu_limit_millis?: number;
+  clear_cpu_limit?: boolean;
+};
+export function useSetServiceLimits(id: string) {
+  return useServiceAction<SetLimitsInput>(
+    (body) => ({ url: `/api/services/${id}/limits`, method: "POST", body }),
     () => serviceKeys.all,
   );
 }
