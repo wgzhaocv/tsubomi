@@ -64,7 +64,7 @@ pub async fn run(
             }
         }
         TrashCmd::Restore { name } => {
-            // 回显は解決した実物の名前で(id 指定でも本当の対象名を報告する)。
+            // 表示は解決した実物の名前で(id 指定でも本当の対象名を報告する)。
             let it = resolve_item(&c, &server_url, &token, &name).await?;
             api::trash_restore(&c, &server_url, &token, &it.id.to_string()).await?;
             if json {
@@ -111,7 +111,7 @@ fn looks_like_id_prefix(s: &str) -> bool {
     s.len() >= 8 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-/// 表示名 or id → ゴミ箱一覧から対象を解決する(回显用に行ごと返す)。
+/// 表示名 or id → ゴミ箱一覧から対象を解決する(表示用に行ごと返す)。
 /// ゴミ箱は名前を占有しないため同名(同種別含む)が複数あり得る:
 /// - 完全な UUID は **id として**解決する(名前は見ない — 一覧で見た id は常に正しく効く)。
 /// - それ以外は名前の完全一致と id 前方一致(8 桁以上)を両方引き、**片方だけが一意**の

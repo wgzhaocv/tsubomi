@@ -1,7 +1,7 @@
 //! deploy hook(no-auth、HMAC 検証)と `run_digest`(build 済みイメージを起こす単一操作)。
 //!
-//! build と run は別部分(m3-design §6.8 / 決定 #3):平台は **build しない**。CI か
-//! `tbm deploy --local` が registry に push し、hook が digest を運んでくる。平台の仕事は
+//! build と run は別部分(m3-design §6.8 / 決定 #3):プラットフォームは **build しない**。CI か
+//! `tbm deploy --local` が registry に push し、hook が digest を運んでくる。プラットフォームの仕事は
 //! 「digest を受けて起こす」だけ。run_digest は hook / --local / start / rollback /
 //! reconcile が共有する(注入は S6 — ここは PORT のみ)。
 //!
@@ -225,7 +225,7 @@ pub async fn run_digest(
     git_sha: &str,
     trigger: DeployTrigger,
 ) -> AppResult<()> {
-    // 同一 service の deploy を直列化(コンテナ / route / 状態の競合を防ぐ。単機インメモリ)。
+    // 同一 service の deploy を直列化(コンテナ / route / 状態の競合を防ぐ。単一ホストインメモリ)。
     let lock = state.deploy_lock(service_id);
     let _guard = lock.lock().await;
 
@@ -334,10 +334,10 @@ async fn run_digest_inner(
         binds,
     };
 
-    // stateful は **stop-first**(設計 §3):swap は新旧コンテナが同一データ目録を同時に開く
-    // (postgres の postmaster.pid 防双開は跨 PID namespace で信頼できない → 双開 = 破壊)ため
+    // stateful は **stop-first**(設計 §3):swap は新旧コンテナが同一データディレクトリを同時に開く
+    // (postgres の postmaster.pid 防二重オープンはPID namespace をまたぐ で信頼できない → 二重オープン = 破壊)ため
     // 禁忌。先に旧を止める — ただし **remove はしない**(§0-E:新の起動が失敗したら再 start で
-    // 自動復旧する退路。stopped 容器の網 endpoint / binds は docker が温存する)。瞬断は stateful
+    // 自動復旧する退路。stopped コンテナの網 endpoint / binds は docker が温存する)。瞬断は stateful
     // の契約(§0-F)。pull / 注入解決は上で済ませてある = 停止窓を最小にする順序。
     // stateless は空 Vec = 以後の復旧呼び出しが全て no-op(現行の start-first と完全に同じ動き)。
     let stopped_old: Vec<String> = if stateful {
@@ -353,13 +353,13 @@ async fn run_digest_inner(
     // 設計 §6 地雷 2。stateless は stopped_old が空 = no-op で、旧が走ったまま = 従来どおり)。
     // readiness 探測を課す条件(どれも欠けたら存活確認のみ):
     //  - **ユーザ契機のみ**(審査指摘):reconcile の復活対象は一度 succeeded した版 = readiness は
-    //    初回デプロイで検証済み。復活は容器一斉消失後の再建等で Pi が飽和し「健全だが遅い」が
+    //    初回デプロイで検証済み。復活はコンテナ一斉消失後の再建等で Pi が飽和し「健全だが遅い」が
     //    起きやすく、ここで failed にすると phase=failed で converge_running の候補から永久に
-    //    外れる(自沉静化は壊れたイメージ向けの安全弁で、健全な app の静默停止に使わない)。
+    //    外れる(自己サイレント化は壊れたイメージ向けの安全弁で、健全な app のサイレント停止に使わない)。
     //  - **company/public、または「M6 リンクの callee になっている private」**(codex 審査):
     //    素の private は listen しない純 worker を許容する契約なので門を掛けないが、誰かに注入
     //    されている private は内部リンク先 = listen する契約なので、監听錯 port のまま succeeded →
-    //    attach_as_callee が呼び出し元を不達の新容器へ切り替える穴をここで塞ぐ。
+    //    attach_as_callee が呼び出し元を不達の新コンテナへ切り替える穴をここで塞ぐ。
     let probe = trigger == DeployTrigger::User
         && (visibility != Visibility::Private || is_linked_callee(state, service_id).await);
     let staged = async {
@@ -368,17 +368,17 @@ async fn run_digest_inner(
     }
     .await;
     if let Err(e) = staged {
-        // readiness TimedOut では新コンテナは**走行中**のまま消される。stateful は起動期の
+        // readiness TimedOut では新コンテナは**実行中**のまま消される。stateful は起動期の
         // WAL 回復 / 迁移中に SIGKILL しないよう 30s 猶予で止める(§0-G。審査指摘 —
-        // stop-first と同じ丁寧さをこの回滚路径にも)。stateless は即殺でよい(データ無共有)。
+        // stop-first と同じ丁寧さをこのロールバックパスにも)。stateless は即殺でよい(データ無共有)。
         let grace = stateful.then_some(docker::STATEFUL_STOP_GRACE_SECS);
         docker::remove_one(state, &new_name, grace).await;
         // 旧版への自動復旧(§0-E)は **2 つの門**を通ったときだけ(codex 審査 2026-08-13):
-        //  1. 復旧対象 = 「直近成功 deploy の容器」**1 つに限定**。stateless 時代の掃除失敗で
-        //     stopped が複数残っていると、全再起動 = 同一データ目録の多重 writer になる。
+        //  1. 復旧対象 = 「直近成功 deploy のコンテナ」**1 つに限定**。stateless 時代の掃除失敗で
+        //     stopped が複数残っていると、全再起動 = 同一データディレクトリの多重 writer になる。
         //  2. 新コンテナが**確実に走っていない**こと。remove_one は best-effort なので、
-        //     生き残ったまま旧を起こすと双開。確認できなければ旧は停止のまま(deploys.error に
-        //     原因が残り、退路は rollback — 双開より停止が安全側)。
+        //     生き残ったまま旧を起こすと二重オープン。確認できなければ旧は停止のまま(deploys.error に
+        //     原因が残り、退路は rollback — 二重オープンより停止が安全側)。
         if !stopped_old.is_empty() {
             let expected = crate::services::expected_container_name(state, service_id).await;
             let target: Vec<String> = stopped_old
@@ -388,12 +388,12 @@ async fn run_digest_inner(
                 .collect();
             if target.is_empty() {
                 tracing::error!(%service_id, ?stopped_old,
-                    "stateful 退路:停止済み一覧に直近成功 deploy の容器が無く、復旧対象を特定できない(service は停止状態。rollback / 再 deploy で復旧)");
+                    "stateful 退路:停止済み一覧に直近成功 deploy のコンテナが無く、復旧対象を特定できない(service は停止状態。rollback / 再 deploy で復旧)");
             } else if docker::confirmed_not_running(state, &new_name).await {
                 docker::restart_stopped(state, &target).await;
             } else {
                 tracing::error!(%service_id, new = %new_name,
-                    "stateful 退路:失敗した新コンテナを停止できず、旧の再起動を見送る(双開防止。手動で新を止めてから rollback / 再 deploy)");
+                    "stateful 退路:失敗した新コンテナを停止できず、旧の再起動を見送る(二重オープン防止。手動で新を止めてから rollback / 再 deploy)");
             }
         }
         return Err(e);
@@ -406,7 +406,7 @@ async fn run_digest_inner(
     let cutover = if visibility == Visibility::Private {
         // private の期望状態 = route ファイル無し(公開範囲設計 §6)。旧 visibility の残骸を掃く(冪等)。
         // remove 失敗でも cutover を進めるのは意図した **fail-closed**:陳腐ファイルは消えた backend を
-        // 指し公網は最悪 502(= 内容不可達)で、旧掃除を止めて旧版が公網に出続けるより安全側。
+        // 指し、外部からは最悪 502(= 内容不可達)で、旧掃除を止めて旧版がインターネットに出続けるより安全側。
         // reconcile の private 分岐が ≤30s でファイルを回収し /noservice へ収束する。
         if let Err(e) = crate::services::route::remove(state, service_id) {
             tracing::error!(error = ?e, %service_id, "private の route 撤去に失敗(fail-closed で続行。reconcile が回収)");
@@ -436,7 +436,7 @@ async fn run_digest_inner(
     };
     if cutover {
         // route が新を指した(private は公開 route 無し = 切替点は commit_success)。**内部リンクも
-        // 同一の瞬間に切替える**:この service を callee として注入している caller 群の私網へ、新コンテナを
+        // 同一の瞬間に切替える**:この service を callee として注入している caller 群のプライベートネットワークへ、新コンテナを
         // 別名で attach する。commit_success より後 = 旧版にしか繋がっていなかった内部呼び出しも、ここで
         // 初めて新版へ向く(公開と内部のカットオーバーが揃う)。先に新を付けてから旧を消す(旧 endpoint は
         // 旧コンテナ削除で自然消滅 = 別名は新へ収束。新を付ける前に旧を消すと一瞬 A→B が切れるため順序が肝心)。

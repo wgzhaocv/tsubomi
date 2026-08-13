@@ -26,7 +26,7 @@ import {
 } from "@/lib/services";
 
 // サービス一覧 + 作成導線。サービスは GitHub repo と 1:1 のデプロイ単位。
-// 平台は GitHub に触れないので、作成後は「次の一手」(setup_commands + workflow)を
+// プラットフォームは GitHub に触れないので、作成後は「次の一手」(setup_commands + workflow)を
 // 表示する(CLI の json「方案だけ返す」と同じ思想)。カードクリックで詳細ページへ。
 
 // モーダルの状態(作成フォーム / 作成後の連携手順 / 閉)を 1 つの型で表す。
@@ -45,7 +45,7 @@ export default function Services() {
 
   const [modal, setModal] = useState<ModalState>(null);
   const [name, setName] = useState("");
-  // 詳細設定(自帯コンテナ用)。空 / auto = 送らない — 既定と visibility 推導の単一真源はサーバ。
+  // 詳細設定(持ち込みコンテナ用)。空 / auto = 送らない — 既定と visibility 推導の単一真源はサーバ。
   const [advanced, setAdvanced] = useState(false);
   const [port, setPort] = useState("");
   const [visibility, setVisibility] = useState("auto");
@@ -190,7 +190,7 @@ export default function Services() {
                     {svc.container_port !== 8080 && (
                       <CardChip>ポート {svc.container_port}</CardChip>
                     )}
-                    {svc.stateful && <CardChip>有状態</CardChip>}
+                    {svc.stateful && <CardChip>ステートフル</CardChip>}
                   </div>
                 </ResourceCard>
               </li>
@@ -250,7 +250,7 @@ export default function Services() {
                   placeholder="8080"
                   value={port}
                   onChange={(e) => setPort(e.target.value)}
-                  description="app が listen するポート。8080 以外は公開範囲の既定が「非公開」になります(自帯 DB 等の非 HTTP コンテナ用)。"
+                  description="app が listen するポート。8080 以外は公開範囲の既定が「非公開」になります(持ち込み DB 等の非 HTTP コンテナ用)。"
                 />
                 <Select
                   label="公開範囲"
@@ -265,7 +265,7 @@ export default function Services() {
                   options={[
                     {
                       label:
-                        "有状態コンテナ(自帯 DB 等。デプロイは数秒の瞬断と引き換えにデータ目録を保護)",
+                        "ステートフルコンテナ(持ち込み DB 等。デプロイは数秒の瞬断と引き換えにデータディレクトリを保護)",
                       value: "stateful",
                     },
                   ]}
@@ -278,7 +278,7 @@ export default function Services() {
                   placeholder="1024"
                   value={memory}
                   onChange={(e) => setMemory(e.target.value)}
-                  description="コンテナのメモリ硬上限(128〜4096、既定 1024)。"
+                  description="コンテナのメモリ上限(128〜4096、既定 1024)。"
                 />
               </div>
             )}

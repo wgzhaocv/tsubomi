@@ -12,8 +12,8 @@ import { useAuditLog } from "@/lib/admin";
 import { cn } from "@/lib/utils";
 
 // 監査ログ閲覧(owner 専用)。誰が・いつ・何をしたか。owner ゲートは <RequireOwner>(router)。
-// 後端も owner + session を毎回検証。件数が増えうるので **TanStack Virtual で仮想リスト化**:
-// 見える行だけ DOM に描き、末尾に近づくと自動で次頁を取る(キーセット分頁の「もっと読む」を
+// バックエンドも owner + session を毎回検証。件数が増えうるので **TanStack Virtual で仮想リスト化**:
+// 見える行だけ DOM に描き、末尾に近づくと自動で次頁を取る(キーセットページングの「もっと読む」を
 // スクロールに置き換え)。行高は一定にするため詳細は 1 行省略(全文は title 属性で出す)。
 
 const FILTERS: { key: string; label: string }[] = [

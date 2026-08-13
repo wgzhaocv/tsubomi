@@ -33,7 +33,7 @@ const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// reconcile ループを起こす(gc::spawn と同型)。最初のフルパスは起動直後(interval の 0 tick)。
 /// パスは逐次(`tick.tick().await; pass().await;`)なので重ならない — 遅いパス(イメージ pull)は
-/// その回だけ他 service を待たせるが、単機規模では許容。
+/// その回だけ他 service を待たせるが、単一ホスト規模では許容。
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         // 起動時に一度だけ:server がデプロイ途中で再起動した service を収束させてから周期へ。
@@ -111,7 +111,7 @@ async fn recover_interrupted(state: &AppState) {
         }
 
         // 中断した in-flight deploy 行を閉じる(succeeded/failed 以外 → failed)。lock を持っているので
-        // 走行中の deploy は無い(割り込んだ新 deploy は lock 待ち。failed にしても自分の run_digest が
+        // 実行中の deploy は無い(割り込んだ新 deploy は lock 待ち。failed にしても自分の run_digest が
         // 動き出した時に status を上書きするので無害)。
         let _ = sqlx::query(
             "UPDATE deploys SET status='failed', error='server がデプロイ中に再起動しました', finished_at=now()
@@ -133,13 +133,13 @@ async fn recover_interrupted(state: &AppState) {
             // 旧(routed)コンテナを残し、孤児の新コンテナだけ掃除する(stateless はダウンタイム無し)。
             // **stateful の中断は特別**(codex 審査 2026-07-08):stop-first なので「旧は停止済み・
             // 走っているのは未 commit の新だけ」があり得る。その新は孤児として掃除する(DB の正は
-            // 旧 digest — 失敗デプロイの契約どおり旧版で着地)が、①走行中の stateful を消すので
+            // 旧 digest — 失敗デプロイの契約どおり旧版で着地)が、①実行中の stateful を消すので
             // 30s 猶予で止め(§0-G)、②温存されている旧コンテナを再 start して復旧する
-            // (run_digest_inner の失敗回滚と同じ「旧版自動復旧」をクラッシュ跨ぎでも成立させる)。
+            // (run_digest_inner の失敗ロールバックと同じ「旧版自動復旧」をクラッシュ跨ぎでも成立させる)。
             let keep = container_name(id, sdid);
             let keep_running = match docker::presence(state, id).await {
                 Ok((_, running)) => running.iter().any(|n| n == &keep),
-                Err(_) => true, // 確認不能なら再 start を試みない(走行中に start は 304 で無害だが騒がしい)
+                Err(_) => true, // 確認不能なら再 start を試みない(実行中に start は 304 で無害だが騒がしい)
             };
             let grace = stateful.then_some(docker::STATEFUL_STOP_GRACE_SECS);
             if let Err(e) = docker::remove_others_grace(state, id, &keep, grace).await {
@@ -153,7 +153,7 @@ async fn recover_interrupted(state: &AppState) {
             }
             // private は「route ファイル無し」が期望状態:中断が route 撤去の前後どちらでも陳腐
             // ファイルが残り得るので、起動時にここで確実に掃く(周期 converge の実行順序に依存
-            // させない — codex 監査 2026-07-02)。company/public の陳腐 route(旧容器指し)は
+            // させない — codex 監査 2026-07-02)。company/public の陳腐 route(旧コンテナ指し)は
             // 従来どおり温存が正しい(旧版が serving 中)。
             if Visibility::from_db(&visibility) == Visibility::Private
                 && let Err(e) = route::remove(state, id)
@@ -211,11 +211,11 @@ async fn reconcile_pass(state: &AppState) {
     // M5 cache:valkey の per-cache ACL を期望状態へ収束(揮発なので。valkey 単独再起動からの
     // 自己回復をここで担保する — 起動時収束だけでは塞げない穴。§7.3)。best-effort(内部で log)。
     crate::valkey::reconcile_acls(state).await;
-    // M6 網隔離:生存 service の per-service 私網 + infra attach を保証し、コンテナ皆無の孤児私網を
-    // 撤去する。cleanup_orphans は管理**コンテナ**を走査するので、コンテナを持たない孤児私網は
+    // M6 ネットワーク隔離:生存 service の per-service プライベートネットワーク + infra attach を保証し、コンテナ皆無の孤児プライベートネットワークを
+    // 撤去する。cleanup_orphans は管理**コンテナ**を走査するので、コンテナを持たない孤児プライベートネットワークは
     // ここでしか拾えない(両者は相補的)。infra 単独再起動からの再 attach もここで自己回復。
     network::reconcile_networks(state).await;
-    // M6 egress:出站フィルタ(宿主 + 私網遮断)を現実へ収束。生存 subnet が変わっても(網の
+    // M6 egress:アウトバウンドフィルタ(宿主 + プライベートネットワーク遮断)を現実へ収束。生存 subnet が変わっても(網の
     // 増減)毎 tick 追従する。network 収束の**後**に呼ぶ — 同桥 RETURN 例外に最新の subnet を反映。
     egress::reconcile(state).await;
 }
@@ -223,15 +223,15 @@ async fn reconcile_pass(state: &AppState) {
 /// running 収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service を
 /// **1 service あたり 1 回の docker 問い合わせ**(`docker::presence`)で点検し、(a) コンテナが消えて
 /// いれば直近成功 deploy の digest で起こし直し(route も書き直される)、(b) 走っているのに route
-/// (`svc-<id>.yml`)の backend が走行容器と食い違っていれば route を書き直す。後者は deploy 末尾の
+/// (`svc-<id>.yml`)の backend が実行中コンテナと食い違っていれば route を書き直す。後者は deploy 末尾の
 /// `route::write` 失敗(ro dir / disk full / rename 失敗)で、DB は succeeded・新版稼働なのに公開 URL が
-/// 旧容器を指したまま漂流する穴の収束(§6.4 は「route 失敗を致命にしない」= 旧版で着地させるが、収束役が
+/// 旧コンテナを指したまま漂流する穴の収束(§6.4 は「route 失敗を致命にしない」= 旧版で着地させるが、収束役が
 /// 居なかった)。
 ///
 /// 対象を `phase=running` に絞るのが **churn の安全弁** — failed / deploying / created / stopped は
 /// 触らない(壊れたイメージを毎パス再起動し続ける暴走を作らない)。復活に失敗すれば run_digest が
 /// phase=failed にし、次パスからは対象外になる(= 自己沈静化)。route 書き直しは deploy_lock +
-/// 取得後の再確認で進行中 deploy と競合しない(取得待ちの間に deploy が容器を入れ替え route も直せば、
+/// 取得後の再確認で進行中 deploy と競合しない(取得待ちの間に deploy がコンテナを入れ替え route も直せば、
 /// 再確認で一致 → 何もしない。start-first の一瞬の新旧共存中も lock 待ちで定常状態を見るので誤修正しない)。
 async fn converge_running(state: &AppState) {
     let candidates: Vec<(Uuid, String, i32, String)> = match sqlx::query_as(
@@ -340,18 +340,18 @@ async fn converge_running(state: &AppState) {
             continue;
         }
 
-        //     company/public の期望状態は「backend = 直近成功 deploy の容器 かつ ipallow = visibility
+        //     company/public の期望状態は「backend = 直近成功 deploy のコンテナ かつ ipallow = visibility
         //     どおり」。ipallow も組に入れるのは、public→company の切替書込だけが失敗すると「DB は
         //     社内限定・現実は全網公開」の fail-open ドリフトが黙って残るため(公開範囲設計 §0-F)。
-        //     backend が「走っている任意の容器」でないのは従来どおり(旧片付け失敗時に route を旧版へ
-        //     巻き戻さない)。その容器が実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
+        //     backend が「走っている任意のコンテナ」でないのは従来どおり(旧片付け失敗時に route を旧版へ
+        //     巻き戻さない)。そのコンテナが実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
         let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
         if route_matches(state, id, &expected, vis) {
             continue; // backend も ipallow も正しい(定常状態の大多数)
         }
-        // ドリフト確定(route 無し / 別容器 / ipallow 不一致)。deploy_lock を取り進行中の deploy と
+        // ドリフト確定(route 無し / 別コンテナ / ipallow 不一致)。deploy_lock を取り進行中の deploy と
         // 競合しない。取得後の fresh 再確認は **4 点セット**(visibility / 期望 backend / ファイル存在 /
         // ipallow)— 取得待ちの間に toggle や deploy が走った可能性があり、どれか一つでも古い値で書くと
         // 陳腐な flavor の route を書き戻す(codex 監査 2026-07-02)。
@@ -385,7 +385,7 @@ async fn converge_running(state: &AppState) {
                     None,
                 )
                 .await;
-                tracing::info!(%id, backend = %expected, "reconcile: route drift を修正(backend を直近成功 deploy の容器へ)");
+                tracing::info!(%id, backend = %expected, "reconcile: route drift を修正(backend を直近成功 deploy のコンテナへ)");
             }
             Err(e) => tracing::warn!(error = ?e, %id, "reconcile: route drift の修正に失敗"),
         }
@@ -490,12 +490,12 @@ async fn remove_orphan_service(state: &AppState, sid: Uuid) {
     if let Err(e) = route::remove(state, sid) {
         tracing::warn!(error = ?e, %sid, "reconcile: 孤児 route 削除に失敗");
     }
-    // 私網撤去は **コンテナ全削除に成功した時だけ**(endpoint が残ると remove は失敗 + infra を
-    // 先に剥がして走行中の孤児コンテナを孤立させる)。失敗時は網を残し、次パスで stop_remove から再試行。
+    // プライベートネットワーク撤去は **コンテナ全削除に成功した時だけ**(endpoint が残ると remove は失敗 + infra を
+    // 先に剥がして実行中の孤児コンテナを孤立させる)。失敗時は網を残し、次パスで stop_remove から再試行。
     if stopped.is_ok()
         && let Err(e) = network::remove_service_network(state, sid).await
     {
-        tracing::warn!(error = ?e, %sid, "reconcile: 孤児私網の撤去に失敗");
+        tracing::warn!(error = ?e, %sid, "reconcile: 孤児プライベートネットワークの撤去に失敗");
     }
 }
 

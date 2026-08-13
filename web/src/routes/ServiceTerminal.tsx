@@ -10,11 +10,11 @@ import { useService } from "@/lib/services";
 // (web 専用 — 対話 PTY は CLI の AI フレンドリ JSON 契約に合わない。CLI は一発 `tbm service exec`)。
 // 暴露レベルは web SQL と同一ティア(env 注入値が見える等は受容済み)。
 //
-// ワイヤープロトコル(後端 docker::handle_terminal と対):
+// ワイヤープロトコル(バックエンド docker::handle_terminal と対):
 //   client→server  Binary=生 stdin / Text(JSON)=制御 `{"type":"resize","cols","rows"}`
 //   server→client  Binary=exec 出力(失敗通知も人間可読の Binary)
 // 稼働中(phase==="running")のときだけ端末を mount = WS を開く。それ以外は案内のみ
-// (後端でも ensure_owned + 稼働中を二重に検証)。
+// (バックエンドでも ensure_owned + 稼働中を二重に検証)。
 
 export default function ServiceTerminal() {
   const { id = "" } = useParams();
@@ -49,15 +49,15 @@ const enc = new TextEncoder();
 
 // 1 セッション。WS を張り、端末の入力(onData)を Binary で送り、サーバからの Binary を端末へ書く。
 // resize は Text(JSON)で送る。unmount(タブ離脱 / 親の key 更新)で WS を閉じる
-// = 後端で sh が終了する。再接続は親が key を変えて丸ごと作り直す。
+// = バックエンドで sh が終了する。再接続は親が key を変えて丸ごと作り直す。
 function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void }) {
   // write/focus は useCallback([]) の恒等安定(呼び出し時に ref 経由で実体へ届く)なので、
   // effect の依存に入れても貼り直しは起きない。
   const { ref, write, focus } = useTerminal();
   const wsRef = useRef<WebSocket | null>(null);
   const [state, setState] = useState<ConnState>("connecting");
-  // WTerm の WASM 初期化は非同期で、就緒前の write() は静默破棄される。WS の方が先に
-  // 繋がると初期プロンプトや後端の一次性失敗通知が消えるため、onReady まで WS を開かない。
+  // WTerm の WASM 初期化は非同期で、就緒前の write() はサイレント破棄される。WS の方が先に
+  // 繋がると初期プロンプトやバックエンドの一次性失敗通知が消えるため、onReady まで WS を開かない。
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
@@ -85,7 +85,7 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
       if (wsRef.current === ws) setState("closed");
     };
 
-    // unmount で必ず閉じる(後端は input drop → stdin EOF → sh 終了 = ゾンビを残さない)。
+    // unmount で必ず閉じる(バックエンドは input drop → stdin EOF → sh 終了 = ゾンビを残さない)。
     return () => {
       wsRef.current = null;
       ws.close();

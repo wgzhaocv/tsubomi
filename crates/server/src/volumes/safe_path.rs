@@ -1,6 +1,6 @@
 //! 假根(volume の host_path)内にユーザ/AI 由来の相対パスを必ず収める —
 //! **唯一のハード安全境界**(design v2 §6 / tech-design §7)。漏らせば假根が
-//! 穿透され、他人や宿主機のファイルに届く。
+//! 穿透され、他人やホストのファイルに届く。
 //!
 //! 二段構え:
 //!  1. `normalize_rel` — 純粋・プラットフォーム非依存。`..` / NUL / 制御文字を拒否し、
@@ -15,9 +15,9 @@
 //!       path ベースの軟い網。openat2 が無いので fd 相対化はしない。**本番は必ず Linux**。
 //!
 //! 脅威モデル(改訂):**volume は service 注入で rw bind マウントされコンテナの中から書ける**
-//! (inject.rs)。つまりテナントの容器が自分の volume 内に symlink を仕込める = サーバは
+//! (inject.rs)。つまりテナントのコンテナが自分の volume 内に symlink を仕込める = サーバは
 //! 「唯一の書き手」ではない。だから「検証してから path で操作」は危険(検証と操作の隙に
-//! symlink へ差し替えられ、root のサーバが宿主機 / 他テナントの path を辿らされる)。これを
+//! symlink へ差し替えられ、root のサーバがホスト / 他テナントの path を辿らされる)。これを
 //! 上記の fd 相対操作で塞ぐ。openat2 の NO_SYMLINKS は多層防御の一枚。
 
 use crate::error::{AppError, AppResult};
@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 /// 相対パスを正規化して root 相対の綺麗な `PathBuf` にする(root は空 PathBuf)。
 /// 拒否:`..` 成分 / NUL / 制御文字。畳む:先頭・連続スラッシュ / `.` / 空成分。
-/// 先頭の `/` は「假根のルート」を意味するものとして剥がす(宿主機の絶対パスではない)。
+/// 先頭の `/` は「假根のルート」を意味するものとして剥がす(ホストの絶対パスではない)。
 pub fn normalize_rel(rel: &str) -> AppResult<PathBuf> {
     if rel.as_bytes().contains(&0) {
         return Err(AppError::BadRequest(

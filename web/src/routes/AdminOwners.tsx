@@ -13,7 +13,7 @@ import { type AdminOwner, useAddOwner, useOwners, useRemoveOwner } from "@/lib/o
 
 // owner 管理(owner 専用)。design v2 §7:最大 2 名の対等 owner、互いに外せるが自分は外せない
 // (最低 1 名)、外された人へメール通知。env は冷启动种のみ — 運用中はここで増減する。
-// 表示制御はただの UX(後端が require_owner_web で守る)。
+// 表示制御はただの UX(バックエンドが require_owner_web で守る)。
 
 const MAX_OWNERS = 2;
 
@@ -27,7 +27,7 @@ export default function AdminOwners() {
   const [removeTarget, setRemoveTarget] = useState<AdminOwner | null>(null);
 
   // owner ゲートはルート単位の <RequireOwner>(router)に集約 — ここでは弾かない
-  // (降格は親守衛が me の更新で再描画して受ける)。後端も require_owner_web で守る。
+  // (降格は親守衛が me の更新で再描画して受ける)。バックエンドも require_owner_web で守る。
   const submit = () => {
     const trimmed = email.trim();
     if (!trimmed || add.isPending) return; // 二重送信を防ぐ
@@ -67,7 +67,7 @@ export default function AdminOwners() {
         <Divider type="line-brown" />
 
         <p className="text-sm font-medium text-foreground">
-          管理者は管理画面の操作(他人の資源の停止 / 削除、共有パスワード、IP 許可リスト)を
+          管理者は管理画面の操作(他人のリソースの停止 / 削除、共有パスワード、IP 許可リスト)を
           行えます。<strong>最大 {MAX_OWNERS} 名</strong>・自分自身は外せません(最低 1 名必要)。
           外された人にはメールで通知します。
         </p>
@@ -105,7 +105,7 @@ export default function AdminOwners() {
                         </span>
                       </div>
                     </div>
-                    {/* 自分は外せない(最低 1 名)。後端でも二重に守る。 */}
+                    {/* 自分は外せない(最低 1 名)。バックエンドでも二重に守る。 */}
                     {!o.is_current && (
                       <Button
                         type="default"

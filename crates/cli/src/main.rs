@@ -117,7 +117,7 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls ring provider");
 
-    // --help に「プラットフォーム / 本機のアーキ」を載せるため、after_help を実行時に組んでから
+    // --help に「プラットフォーム / 手元のマシンのアーキ」を載せるため、after_help を実行時に組んでから
     // パースする(clap derive の after_help は文字列リテラルしか取れない)。プラットフォームアーキは
     // リリース時に焼き込んだ値(`platform::host_arch`)— どのマシンにデプロイしてもよく、arm を仮定しない。
     let cmd = Cli::command().after_help(format!(

@@ -1,5 +1,5 @@
 //! 管制面の可視化(M4 S1):overview(種別ごと集計)+ ranking(匿名行を使用量降順)。
-//! 指標採集はオンデマンド + best-effort(§3.4):service=bollard stats(稼働中内存 + CPU%)、
+//! 指標採取はオンデマンド + best-effort(§3.4):service=bollard stats(稼働中メモリ + CPU%)、
 //! database=`pg_database_size`、volume=`volumes::dir_usage`(時間予算で打ち切り)。取得不能は null / 0。
 
 use crate::admin::require_viewer_web;
@@ -30,8 +30,8 @@ type RawRow = (
     Option<String>,
 );
 
-/// 削除されていない全資源を跨ユーザで引き、各々の指標を**並行**に解決する。
-/// pg_dbname / host_path / namespace は指標採集にだけ使い、DTO には載せない(匿名化の趣旨)。
+/// 削除されていない全リソースをユーザ横断で引き、各々の指標を**並行**に解決する。
+/// pg_dbname / host_path / namespace は指標採取にだけ使い、DTO には載せない(匿名化の趣旨)。
 async fn gather_rows(state: &AppState) -> AppResult<Vec<AdminResourceRow>> {
     let raw: Vec<RawRow> = sqlx::query_as(
         "SELECT r.id, COALESCE(u.name, u.email) AS owner_name, r.kind, r.anon_seq,
@@ -59,7 +59,7 @@ async fn gather_rows(state: &AppState) -> AppResult<Vec<AdminResourceRow>> {
         .await)
 }
 
-/// 指標採集の同時実行上限(単一 ARM64 ホストを飽和させない)。
+/// 指標採取の同時実行上限(単一 ARM64 ホストを飽和させない)。
 const METRIC_CONCURRENCY: usize = 6;
 
 async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
@@ -103,7 +103,7 @@ async fn db_size(state: &AppState, dbname: Option<&str>) -> Option<i64> {
         .remove(dbname)
 }
 
-/// volume の占用(bytes)。M2 の `volumes::dir_usage`(symlink を辿らない再帰走査 +
+/// volume の使用量(bytes)。M2 の `volumes::dir_usage`(symlink を辿らない再帰走査 +
 /// 時間予算で打ち切り)を再利用する。走査は blocking なので spawn_blocking で。失敗は None。
 async fn dir_size_bytes(path: Option<&str>) -> Option<i64> {
     let root = std::path::PathBuf::from(path?);
@@ -141,7 +141,7 @@ pub async fn ranking(
     Ok(Json(rows))
 }
 
-/// `GET /api/admin/overview`:種別ごと総数 + 総使用量 + 資源保有ユーザ数。owner または viewer(web)。
+/// `GET /api/admin/overview`:種別ごと総数 + 総使用量 + リソース保有ユーザ数。owner または viewer(web)。
 pub async fn overview(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -166,7 +166,7 @@ pub async fn overview(
         })
         .collect();
 
-    // 資源を 1 つ以上持つユーザ数(owner_name は同名衝突しうるので user_id で distinct)。
+    // リソースを 1 つ以上持つユーザ数(owner_name は同名衝突しうるので user_id で distinct)。
     let user_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT user_id) FROM resources WHERE deleted_at IS NULL",
     )

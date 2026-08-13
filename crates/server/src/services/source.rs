@@ -4,7 +4,7 @@
 //! 「ビルド環境が無いと現成イメージすら部署できない」という §4 闸門の意味論的な穴を塞ぐ。
 //!
 //! 設計の要点:
-//! - **配方は Dockerfile(世界共通の形式)か image 参照**。平台私有の DSL は作らない。
+//! - **配方は Dockerfile(世界共通の形式)か image 参照**。プラットフォーム私有の DSL は作らない。
 //!   配方原文は `service_details.source_kind / source_spec` に期望状態として保存する。
 //! - **無 context の一線**:COPY / ADD は拒否。ファイルが要る = app のコード = 従来の
 //!   GitHub / --local 経路の領分(この一線を越えると CI の再発明になる)。
@@ -39,9 +39,9 @@ const MAX_IMAGE_REF_LEN: usize = 512;
 /// 値として rollback 守卫 / GC skip が識別する(is_sha256_digest = false)。
 pub(crate) const PLACEHOLDER_DIGEST: &str = "pending";
 
-/// コンテキスト無しビルドで許す Dockerfile 命令の白名単。
+/// コンテキスト無しビルドで許す Dockerfile 命令の許可リスト。
 /// COPY / ADD(ファイル要求 = 無 context の契約違反)、VOLUME(匿名 volume はデータが
-/// deploy ごとに消える罠 — 永続は平台の volume 注入で)、ONBUILD 等は拒否。
+/// deploy ごとに消える罠 — 永続はプラットフォームの volume 注入で)、ONBUILD 等は拒否。
 const ALLOWED_INSTRUCTIONS: &[&str] = &[
     "FROM",
     "RUN",
@@ -58,7 +58,7 @@ const ALLOWED_INSTRUCTIONS: &[&str] = &[
     "STOPSIGNAL",
 ];
 
-/// Dockerfile を検証する(白名単方式)。行継続 `\` を論理行に畳んでから先頭語を判定。
+/// Dockerfile を検証する(許可リスト方式)。行継続 `\` を論理行に畳んでから先頭語を判定。
 /// コメント / 空行 / parser directive(`# syntax=` 等)は許容。
 fn validate_dockerfile(text: &str) -> AppResult<()> {
     if text.trim().is_empty() {
@@ -125,7 +125,7 @@ fn validate_dockerfile(text: &str) -> AppResult<()> {
 }
 
 /// 行継続 `\`(行末バックスラッシュ)を畳んで論理行を返す。素朴な結合で足りる —
-/// 白名単判定に使うのは**先頭語だけ**で、RUN の中身の複雑さ(ヒアドキュメント等)は
+/// 許可リスト判定に使うのは**先頭語だけ**で、RUN の中身の複雑さ(ヒアドキュメント等)は
 /// 先頭語が RUN である時点で許可済み。ヒアドキュメント本文の行が独立の論理行に見えても、
 /// 未知命令として**拒否側に倒れる**(fail-closed。必要になったら緩める)。
 fn logical_lines(text: &str) -> Vec<String> {

@@ -1,6 +1,6 @@
 //! 共有パスワード viewer(M4 S5、web 専用)。design v2 §7「見るは共有密码」。
 //! ログイン済み社内ユーザが共有パスワードを入れると、その session に 8h の閲覧 grant が
-//! 立ち、管制面(overview / ranking)を只读で見られる(`require_viewer_web`)。
+//! 立ち、管制面(overview / ranking)を読み取り専用で見られる(`require_viewer_web`)。
 //!
 //! - `login`:任意の session(Bearer は拒否 — viewer は web 専用)。bcrypt::verify。
 //! - `set_password` / `status`:owner のみ(`require_owner_web`)。

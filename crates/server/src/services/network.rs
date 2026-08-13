@@ -1,20 +1,20 @@
-//! M6 網隔離:service ごとに専用 bridge 私網 `<prefix><id>` を与え、テナント app を
+//! M6 ネットワーク隔離:service ごとに専用 bridge プライベートネットワーク `<prefix><id>` を与え、テナント app を
 //! 互いに隔離する(東西向=横移動の遮断。背骨「隔離は仕組みで守る」)。
 //!
-//! infra(traefik / pgbouncer / valkey)はこの私網へ on-demand で attach され、
-//! ルーティング(traefik が **コンテナ名**で後端を引く route.rs)と注入(`tsubomi-pgbouncer` /
+//! infra(traefik / pgbouncer / valkey)はこのプライベートネットワークへ on-demand で attach され、
+//! ルーティング(traefik が **コンテナ名**でバックエンドを引く route.rs)と注入(`tsubomi-pgbouncer` /
 //! `tsubomi-valkey` の DNS 解決 — inject.rs)を per-service 網内でも成立させる。**注入文字列・
-//! route の yaml は無改修**:同名コンテナ DNS は私網に attach すれば引けるため。pgbouncer/valkey
-//! は私網からも到達可だが、隔離は資格(pg role / valkey ACL)が担保 = データ安全は本変更で不変。
+//! route の yaml は無改修**:同名コンテナ DNS はプライベートネットワークに attach すれば引けるため。pgbouncer/valkey
+//! はプライベートネットワークからも到達可だが、隔離は資格(pg role / valkey ACL)が担保 = データ安全は本変更で不変。
 //!
 //! **service↔service 内部リンク**(`doc/paas-service-link-design.md`):A が B を注入すると、B(callee)
-//! の稼働コンテナを A(caller)の私網へ **docker 網別名 = B の subdomain** で客人 attach する。A は
-//! `http://<subdomain>:<port>` を docker DNS で引いて B へ直連できる(公網を通らない)。同一 owner 限定
-//! (注入作成時に担保)= 跨租户の東西向は開かない。caller 側は `ensure_service_network`(deploy 前 +
+//! の稼働コンテナを A(caller)のプライベートネットワークへ **docker ネットワーク別名 = B の subdomain** で客人 attach する。A は
+//! `http://<subdomain>:<port>` を docker DNS で引いて B へ直接接続できる(インターネットを通らない)。同一 owner 限定
+//! (注入作成時に担保)= テナント横断の東西向は開かない。caller 側は `ensure_service_network`(deploy 前 +
 //! reconcile)、callee 側は `attach_as_callee`(B の deploy 直後)で収束、eject は `detach_callee` で即掃除。
 //!
 //! ライフサイクルは **service 紐づき**(deploy ではない):start-first swap の新旧コンテナは
-//! 同じ私網に同居する。create は冪等(`run()` がコンテナ起動の直前に ensure)、撤去は
+//! 同じプライベートネットワークに同居する。create は冪等(`run()` がコンテナ起動の直前に ensure)、撤去は
 //! 削除 / 購読 + reconcile の孤児 GC。infra 単独再起動や手動削除からは reconcile が自己回復する。
 
 use crate::error::{AppError, AppResult};
@@ -34,13 +34,13 @@ use uuid::Uuid;
 
 use super::docker::{LABEL_MANAGED, LABEL_SERVICE_ID};
 
-/// service の私網名 `<prefix><service_id>`(prefix は config、既定 `tsubomi-svc-`)。
+/// service のプライベートネットワーク名 `<prefix><service_id>`(prefix は config、既定 `tsubomi-svc-`)。
 pub(crate) fn svc_network_name(state: &AppState, service_id: Uuid) -> String {
     format!("{}{}", state.config.svc_network_prefix, service_id)
 }
 
-/// per-service 私網へ attach / detach する infra コンテナ名(単一の出所)。
-/// traefik=route の後端解決 / pgbouncer=DB 注入の DNS / valkey=cache 注入の DNS。
+/// per-service プライベートネットワークへ attach / detach する infra コンテナ名(単一の出所)。
+/// traefik=route のバックエンド解決 / pgbouncer=DB 注入の DNS / valkey=cache 注入の DNS。
 fn infra_containers(state: &AppState) -> [&str; 3] {
     let cfg = &state.config;
     [
@@ -50,13 +50,13 @@ fn infra_containers(state: &AppState) -> [&str; 3] {
     ]
 }
 
-/// pgbouncer を私網へ attach するときに付ける docker 網別名。**注入する接続文字列の host**
-/// (`db_internal_host`)が容器名と違う部署では、その名前で引けないと繋がらない — 名前を
+/// pgbouncer をプライベートネットワークへ attach するときに付ける docker ネットワーク別名。**注入する接続文字列の host**
+/// (`db_internal_host`)がコンテナ名と違う部署では、その名前で引けないと繋がらない — 名前を
 /// pgbouncer の client TLS 証書の公開名に揃える設計(m3 設計 §11 決定 A')の実体はここ。
-/// 容器名と同じ(dev / 旧部署)なら別名は不要 = 空。
+/// コンテナ名と同じ(dev / 旧部署)なら別名は不要 = 空。
 ///
-/// **なぜ compose ではここなのか**:テナント容器は per-service 私網にしか居らず(M6 網隔離、
-/// `docker.rs` の `network_mode`)、`tsubomi-edge` は平台コードから参照されない残骸。compose 側で
+/// **なぜ compose ではここなのか**:テナントコンテナは per-service プライベートネットワークにしか居らず(M6 ネットワーク隔離、
+/// `docker.rs` の `network_mode`)、`tsubomi-edge` はプラットフォームコードから参照されない残骸。compose 側で
 /// edge に別名を生やしてもテナントからは見えない。
 fn pgbouncer_aliases(state: &AppState) -> Vec<String> {
     let cfg = &state.config;
@@ -74,7 +74,7 @@ fn is_status(e: &bollard::errors::Error, code: u16) -> bool {
     )
 }
 
-/// テナント私網の subnet サイズ。`tenant_pool`(/24 以上を起動時検証済み)から この大きさで切り出す。
+/// テナントプライベートネットワークの subnet サイズ。`tenant_pool`(/24 以上を起動時検証済み)から この大きさで切り出す。
 const TENANT_SUBNET_PREFIX_LEN: u8 = 24;
 
 /// 網の「採番 → 作成」を直列化するプロセス内ロック。これが無いと、別 service の同時 deploy が同じ
@@ -84,7 +84,7 @@ const TENANT_SUBNET_PREFIX_LEN: u8 = 24;
 /// tokio の Mutex::new は const ではないので LazyLock で包む。
 static NET_ALLOC_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-/// テナント私網に与える (subnet, gateway) を `config.tenant_pool` から採番する。pool 内で、現存する
+/// テナントプライベートネットワークに与える (subnet, gateway) を `config.tenant_pool` から採番する。pool 内で、現存する
 /// **全 docker 網**のどれとも重ならない最初の `/24` を返す(gateway はその `/24` の `.1`)。空きが
 /// 無ければ **Err**(黙って docker 自動割当に倒さない — pool 外の subnet は egress が識別できず E2 の
 /// 「全租户網は pool 内」不変条件を壊すため。プール拡張を促す)。
@@ -136,7 +136,7 @@ fn extract_subnets(networks: &[bollard::models::Network]) -> Vec<Ipv4Net> {
         .collect()
 }
 
-/// 生存する tsubomi-svc 網(`tsubomi.managed=true`)の subnet 一覧。egress の「同桥東西向は放行」
+/// 生存する tsubomi-svc 網(`tsubomi.managed=true`)の subnet 一覧。egress の「同桥東西向は許可」
 /// (同 subnet 宛 RETURN)を組むのに使う。pool 外の旧網も混ざり得るが、RETURN 例外なので無害。
 pub(crate) async fn tenant_subnets(state: &AppState) -> AppResult<Vec<Ipv4Net>> {
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
@@ -150,7 +150,7 @@ pub(crate) async fn tenant_subnets(state: &AppState) -> AppResult<Vec<Ipv4Net>> 
     Ok(extract_subnets(&networks))
 }
 
-/// service の私網を冪等に用意する:無ければ pool から /24 を採番して作成 → infra(traefik/pgbouncer/
+/// service のプライベートネットワークを冪等に用意する:無ければ pool から /24 を採番して作成 → infra(traefik/pgbouncer/
 /// valkey)を attach。**順序が肝心** — app コンテナ起動の直前に呼び、DNS 解決 + traefik 経路を成立させて
 /// から start する。既存網は inspect で検出して作成を飛ばし(subnet 据え置き = 冪等。旧 pool 外網の移行は
 /// 手動)、競合作成の 409・既接続 infra の 403 は冪等に握り潰す(2 回目以降の deploy は全部この経路)。
@@ -168,7 +168,7 @@ pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -
             labels.insert(LABEL_MANAGED.to_string(), "true".to_string());
             labels.insert(LABEL_SERVICE_ID.to_string(), service_id.to_string());
 
-            // 租户私網に pool 内の /24 を明示割当し、源 CIDR で識別可能にする(egress の前提・§3.1)。
+            // 租户プライベートネットワークに pool 内の /24 を明示割当し、源 CIDR で識別可能にする(egress の前提・§3.1)。
             let (subnet, gateway) = allocate_subnet(state).await?;
             let req = NetworkCreateRequest {
                 name: name.clone(),
@@ -203,7 +203,7 @@ pub(crate) async fn ensure_service_network(state: &AppState, service_id: Uuid) -
         connect(state, &name, container, &aliases).await?;
     }
 
-    // この service が注入する別 service(callee)を私網へ客人 attach(別名=callee.subdomain)。
+    // この service が注入する別 service(callee)をプライベートネットワークへ客人 attach(別名=callee.subdomain)。
     // **失敗は伝播させない** — リンク 1 本の不調で caller 全体の deploy を止めない(reconcile が後で拾う)。
     // infra と違い「届かなくても caller 自身は起動できる」ので best-effort が正しい。
     attach_callees(state, &name, service_id).await;
@@ -225,7 +225,7 @@ async fn service_callees(state: &AppState, caller_id: Uuid) -> AppResult<Vec<(Uu
     Ok(rows)
 }
 
-/// caller の私網へ、その callee 群の稼働コンテナを別名 attach する(best-effort・per-item で log)。
+/// caller のプライベートネットワークへ、その callee 群の稼働コンテナを別名 attach する(best-effort・per-item で log)。
 /// callee が未稼働(停止/未デプロイ/削除)なら skip。`ensure_service_network` と reconcile から呼ぶ。
 async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
     let callees = match service_callees(state, caller_id).await {
@@ -236,7 +236,7 @@ async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
         }
     };
     for (callee_id, subdomain) in callees {
-        // 対象は callee の **serving 容器**(= 直近成功 deploy の容器が実走中の時だけ Some)。
+        // 対象は callee の **serving コンテナ**(= 直近成功 deploy のコンテナが稼働中の時だけ Some)。
         // DB + docker から解決し **route ファイルに依存しない** — private callee(route 無し)への
         // リンクを成立させるのが要点(公開範囲設計 §5)。in-flight な swap 中も commit 済みの版
         // だけを指すので別名を取り違えない。未稼働(停止 / 未デプロイ / 削除)なら skip。
@@ -248,7 +248,7 @@ async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
     }
 }
 
-/// B(callee)の新コンテナを、**B を注入している caller 群**の私網へ別名=B.subdomain で attach する。
+/// B(callee)の新コンテナを、**B を注入している caller 群**のプライベートネットワークへ別名=B.subdomain で attach する。
 /// B の deploy(start-first swap)直後に `docker::run` から呼ぶ(旧コンテナ撤去で消えた endpoint を
 /// 即補い、次 reconcile までの A→B 断を塞ぐ)。caller 未デプロイ(網無し)なら skip — その caller の
 /// deploy 時に `attach_callees` が付ける。best-effort(reconcile が漏れを拾う)。
@@ -285,7 +285,7 @@ pub(crate) async fn attach_as_callee(state: &AppState, callee_id: Uuid, subdomai
     }
 }
 
-/// eject(リンク削除)時に caller の私網から callee コンテナを即切断(best-effort)。これが無いと
+/// eject(リンク削除)時に caller のプライベートネットワークから callee コンテナを即切断(best-effort)。これが無いと
 /// callee は次の自分の redeploy まで caller 網に客人として残る(同 owner なので無害だが掃く)。
 pub(crate) async fn detach_callee(state: &AppState, caller_id: Uuid, callee_id: Uuid) {
     let net = svc_network_name(state, caller_id);
@@ -294,7 +294,7 @@ pub(crate) async fn detach_callee(state: &AppState, caller_id: Uuid, callee_id: 
     }
 }
 
-/// 私網が既に在るか(inspect で軽く確認)。エラーは「無い」扱い — 新規作成パスへ倒し、実在していれば
+/// プライベートネットワークが既に在るか(inspect で軽く確認)。エラーは「無い」扱い — 新規作成パスへ倒し、実在していれば
 /// create が 409 で冪等に握り潰す。
 async fn network_exists(state: &AppState, name: &str) -> bool {
     state
@@ -304,7 +304,7 @@ async fn network_exists(state: &AppState, name: &str) -> bool {
         .is_ok()
 }
 
-/// 平台が作った per-service 私網の**名前**の集合(`tsubomi.managed=true` ラベルで確定)。
+/// プラットフォームが作った per-service プライベートネットワークの**名前**の集合(`tsubomi.managed=true` ラベルで確定)。
 /// 名前接頭辞での判定と違い、compose の網や共有網を絶対に掴まない。
 async fn managed_network_names(state: &AppState) -> AppResult<std::collections::HashSet<String>> {
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
@@ -318,35 +318,35 @@ async fn managed_network_names(state: &AppState) -> AppResult<std::collections::
     Ok(networks.into_iter().filter_map(|n| n.name).collect())
 }
 
-/// 既に在る私網の pgbouncer endpoint に**別名を後付けする**(起動時 1 回)。docker の網別名は
-/// **初回 connect 時にしか確定しない**ので、`pgbouncer_aliases` を導入する前から在った私網は
+/// 既に在るプライベートネットワークの pgbouncer endpoint に**別名を後付けする**(起動時 1 回)。docker のネットワーク別名は
+/// **初回 connect 時にしか確定しない**ので、`pgbouncer_aliases` を導入する前から在ったプライベートネットワークは
 /// `connect` の 403(既接続)で冪等に握り潰されて別名が永遠に生えない。そこを塞ぐ移行処理。
 ///
 /// 手順は endpoint 単位の disconnect → 別名付き reconnect。その service の DB 接続は一瞬切れるが
-/// (プールが張り直す)、放置すると**注入ホスト名が私網で引けない** = 公網 DNS に落ちて通信が網外へ
-/// 出る / 届かない、という遥かに悪い状態が続く。別名が要らない部署(容器名と同じ = dev / 旧部署)は
+/// (プールが張り直す)、放置すると**注入ホスト名がプライベートネットワークで引けない** = 公開 DNS に落ちて通信が網外へ
+/// 出る / 届かない、という遥かに悪い状態が続く。別名が要らない部署(コンテナ名と同じ = dev / 旧部署)は
 /// 何もしない。best-effort:失敗しても起動は続け、次の deploy / この関数の次回起動で再試行される。
 pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
     let aliases = pgbouncer_aliases(state);
     let Some(want) = aliases.first().cloned() else {
-        return; // 容器名と同じ = 別名不要
+        return; // コンテナ名と同じ = 別名不要
     };
     let container = state.config.pgbouncer_container.clone();
-    // **対象は平台が作った per-service 私網だけ**をラベルで確定する(名前接頭辞で判定すると
+    // **対象はプラットフォームが作った per-service プライベートネットワークだけ**をラベルで確定する(名前接頭辞で判定すると
     // `TSUBOMI_SVC_NETWORK_PREFIX` の設定次第で `tsubomi-edge` や compose の `..._default` まで
     // 掴み、pgbouncer を pg-tenant への網から切って**全 DB を落とす**。codex 深審 2026-07-26)。
     let managed = match managed_network_names(state).await {
         Ok(names) => names,
         Err(e) => {
-            tracing::warn!(error = ?e, "網一覧を取れません(網別名の移行を飛ばす)");
+            tracing::warn!(error = ?e, "網一覧を取れません(ネットワーク別名の移行を飛ばす)");
             return;
         }
     };
     let Ok(info) = state.docker.inspect_container(&container, None).await else {
-        tracing::warn!(container, "pgbouncer を inspect できません(網別名の移行を飛ばす)");
+        tracing::warn!(container, "pgbouncer を inspect できません(ネットワーク別名の移行を飛ばす)");
         return;
     };
-    // pgbouncer が今居る網のうち、平台管理の私網で **want を持っていない**ものだけを直す。
+    // pgbouncer が今居る網のうち、プラットフォーム管理のプライベートネットワークで **want を持っていない**ものだけを直す。
     let stale: Vec<String> = info
         .network_settings
         .and_then(|s| s.networks)
@@ -363,7 +363,7 @@ pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
     tracing::info!(
         count = stale.len(),
         alias = %want,
-        "既存の per-service 私網に pgbouncer の網別名を後付けします(一瞬 DB が切れます)"
+        "既存の per-service プライベートネットワークに pgbouncer のネットワーク別名を後付けします(一瞬 DB が切れます)"
     );
     for net in stale {
         disconnect(state, &net, &container).await;
@@ -373,16 +373,16 @@ pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
         let connected = connect(state, &net, &container, &aliases).await;
         match connected {
             Ok(()) if endpoint_has_alias(state, &container, &net, &want).await => {
-                tracing::info!(network = %net, alias = %want, "網別名を付け直しました");
+                tracing::info!(network = %net, alias = %want, "ネットワーク別名を付け直しました");
             }
             Ok(()) => tracing::error!(
                 network = %net, alias = %want,
-                "網別名が付きませんでした(disconnect が効かず既接続のまま = この service の DB 注入は\
+                "ネットワーク別名が付きませんでした(disconnect が効かず既接続のまま = この service の DB 注入は\
                  旧ホスト名でしか引けません)。手で `docker network disconnect` してから再起動してください"
             ),
             Err(e) => tracing::error!(
                 network = %net, error = ?e,
-                "網別名の付け直しに失敗(この service の DB 注入は繋がりません。再デプロイで復旧)"
+                "ネットワーク別名の付け直しに失敗(この service の DB 注入は繋がりません。再デプロイで復旧)"
             ),
         }
     }
@@ -406,10 +406,10 @@ async fn endpoint_has_alias(
         .is_some_and(|a| a.iter().any(|x| x == alias))
 }
 
-/// コンテナを私網へ接続(既接続=403 は冪等に握り潰す)。`aliases` 非空なら docker 網別名を付ける
+/// コンテナをプライベートネットワークへ接続(既接続=403 は冪等に握り潰す)。`aliases` 非空なら docker ネットワーク別名を付ける
 /// (callee を caller の subdomain で引けるようにする。infra は別名なし `&[]` で呼ぶ)。
 /// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できない。callee は両 attach 経路とも
-/// 最初から別名付きで繋ぐので問題にならないが、pgbouncer は別名導入前から接続済みの私網が在り得るので
+/// 最初から別名付きで繋ぐので問題にならないが、pgbouncer は別名導入前から接続済みのプライベートネットワークが在り得るので
 /// 起動時に `migrate_pgbouncer_aliases` が後付けする。
 async fn connect(state: &AppState, network: &str, container: &str, aliases: &[String]) -> AppResult<()> {
     let endpoint_config = (!aliases.is_empty()).then(|| EndpointSettings {
@@ -429,7 +429,7 @@ async fn connect(state: &AppState, network: &str, container: &str, aliases: &[St
     }
 }
 
-/// service の私網を撤去する:**網上の全 endpoint を disconnect(force)→ 網削除**。**順序厳守** —
+/// service のプライベートネットワークを撤去する:**網上の全 endpoint を disconnect(force)→ 網削除**。**順序厳守** —
 /// endpoint が残ると remove は "active endpoints" で失敗する。infra に加え、客人として attach された
 /// callee コンテナ(service↔service リンク)も剥がす必要があるので、固定 infra 名ではなく inspect で
 /// 現接続コンテナを列挙して全部外す。app コンテナは呼び出し側が先に stop_remove 済みである前提
@@ -455,7 +455,7 @@ pub(crate) async fn remove_service_network(state: &AppState, service_id: Uuid) -
     }
 }
 
-/// infra コンテナを私網から切断(best-effort:未接続 / 網無し / コンテナ無しは無視 = remove 前掃除)。
+/// infra コンテナをプライベートネットワークから切断(best-effort:未接続 / 網無し / コンテナ無しは無視 = remove 前掃除)。
 async fn disconnect(state: &AppState, network: &str, container: &str) {
     let req = NetworkDisconnectRequest {
         container: container.to_string(),
@@ -467,12 +467,12 @@ async fn disconnect(state: &AppState, network: &str, container: &str) {
 }
 
 /// 網の期望状態への収束(valkey::reconcile_acls と同型:毎 tick fresh SELECT・best-effort・
-/// per-item・panic しない)。(1)生存 service には私網 + infra + 現リンクの callee attach を保証、
-/// (2)生存 service を持たない孤児私網(`tsubomi.managed=true` ラベル)を撤去、(3)生存 caller の私網に
-/// 居残る「現リンクに無い別 service の app 容器」(eject 即時 detach の取りこぼし等)を剥がす。
+/// per-item・panic しない)。(1)生存 service にはプライベートネットワーク + infra + 現リンクの callee attach を保証、
+/// (2)生存 service を持たない孤児プライベートネットワーク(`tsubomi.managed=true` ラベル)を撤去、(3)生存 caller のプライベートネットワークに
+/// 居残る「現リンクに無い別 service の app コンテナ」(eject 即時 detach の取りこぼし等)を剥がす。
 /// infra 単独再起動や手動削除からの自己回復をここで担保する(起動時収束だけでは塞げない穴)。
 pub(crate) async fn reconcile_networks(state: &AppState) {
-    // (1) 生存 service に私網を保証。
+    // (1) 生存 service にプライベートネットワークを保証。
     let live: Vec<(Uuid,)> = match sqlx::query_as(
         "SELECT id FROM resources WHERE kind = 'service' AND deleted_at IS NULL",
     )
@@ -489,11 +489,11 @@ pub(crate) async fn reconcile_networks(state: &AppState) {
     for (id,) in &live {
         live_ids.insert(*id);
         if let Err(e) = ensure_service_network(state, *id).await {
-            tracing::warn!(error = ?e, %id, "network reconcile: 私網の収束に失敗");
+            tracing::warn!(error = ?e, %id, "network reconcile: プライベートネットワークの収束に失敗");
         }
     }
 
-    // (2) 孤児私網 GC:tsubomi 管理網のうち生存 service を持たないものを撤去。
+    // (2) 孤児プライベートネットワーク GC:tsubomi 管理網のうち生存 service を持たないものを撤去。
     let mut filters: HashMap<String, Vec<String>> = HashMap::new();
     filters.insert("label".into(), vec![format!("{LABEL_MANAGED}=true")]);
     let opts = ListNetworksOptionsBuilder::default().filters(&filters).build();
@@ -518,8 +518,8 @@ pub(crate) async fn reconcile_networks(state: &AppState) {
             continue;
         }
         // スナップショット(上の SELECT)取得後に作られ deploy 中の service を孤児と誤判して
-        // 私網を奪わないよう、撤去の直前に最新の生存を fresh 再確認する(背骨「現実は fresh に
-        // 読む」。RACE 回避 — これが無いと新規 service の私網を同パスで消し infra を剥がし得る)。
+        // プライベートネットワークを奪わないよう、撤去の直前に最新の生存を fresh 再確認する(背骨「現実は fresh に
+        // 読む」。RACE 回避 — これが無いと新規 service のプライベートネットワークを同パスで消し infra を剥がし得る)。
         match super::reconcile::service_alive(state, sid).await {
             Ok(true) => continue, // スナップショット後に作成 = 生存 → 触らない
             Ok(false) => {}
@@ -530,14 +530,14 @@ pub(crate) async fn reconcile_networks(state: &AppState) {
         }
         match remove_service_network(state, sid).await {
             Ok(()) => removed += 1,
-            Err(e) => tracing::warn!(error = ?e, %sid, "network reconcile: 孤児私網の撤去に失敗"),
+            Err(e) => tracing::warn!(error = ?e, %sid, "network reconcile: 孤児プライベートネットワークの撤去に失敗"),
         }
     }
 
-    // (3) 陳腐な客人 GC:生存 caller の私網に居残る「現リンクに無い別 service の app 容器」を剥がす。
+    // (3) 陳腐な客人 GC:生存 caller のプライベートネットワークに居残る「現リンクに無い別 service の app コンテナ」を剥がす。
     //     eject の即時 detach(`detach_callee`)が失敗した等で残った客人を、ここで収束させる(背骨どおり
     //     「DB の期望状態へ現実を寄せる」)。infra は `tsubomi.managed=true` を持たず list_managed に
-    //     出ないので対象外 = 安全。caller 自身の容器と現リンク先(desired)は温存。
+    //     出ないので対象外 = 安全。caller 自身のコンテナと現リンク先(desired)は温存。
     let cid_to_svc: HashMap<String, Uuid> = super::docker::list_managed(state)
         .await
         .unwrap_or_default()
@@ -564,7 +564,7 @@ pub(crate) async fn reconcile_networks(state: &AppState) {
             continue;
         };
         for cid in containers.keys() {
-            // app 容器(managed)で、caller 自身でも現リンク先でもない = 陳腐な客人 → 剥がす。
+            // app コンテナ(managed)で、caller 自身でも現リンク先でもない = 陳腐な客人 → 剥がす。
             if let Some(svc) = cid_to_svc.get(cid)
                 && *svc != *caller_id
                 && !desired.contains(svc)

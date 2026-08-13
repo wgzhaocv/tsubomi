@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 // owner 管理のサーバ状態(owner 専用)。ipblock.ts と同じ作法:生 fetch + TanStack Query。
 // 一覧が単一の真実源。add / remove はサーバが最新一覧を返すので、再 GET せずキャッシュへ直書き。
-// 真相は users.role(後端)。ここは UX — 後端が require_owner_web で守る。
+// 真相は users.role(バックエンド)。ここは UX — バックエンドが require_owner_web で守る。
 
 export type AdminOwner = {
   email: string;

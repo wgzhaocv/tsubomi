@@ -23,7 +23,7 @@ import { useMeQuery } from "@/lib/auth";
 // 使用量ランキング(owner 専用)。匿名行(真名 + 匿名番号 + 使用量)を降順で。
 // 種別フィルタはセグメント(全て / サービス / DB / ボリューム)= 画面側で絞る
 // (全件を 1 回取得し、タブ切替で再取得しない)。owner ゲートは <RequireOwner>(router)。
-// 「最後の砦」:owner は他人の資源を停止 / 削除できる(後端が owner + session + メール検証コードを
+// 「最後の砦」:owner は他人のリソースを停止 / 削除できる(バックエンドが owner + session + メール検証コードを
 // 毎回検証)。押下 → owner 自身にコードがメールされ、コード入力モーダルで確定する二段確認。
 
 const FILTERS: { key: string; label: string }[] = [
@@ -68,7 +68,7 @@ export default function AdminRanking() {
   const { data: allRows, error } = useAdminRanking();
   const action = useAdminAction();
   // 危険操作(停止 / 削除)は owner のみ。viewer は表を見られるが操作列は出さない
-  // (表示制御は UX — 後端の actions は owner + session + メール検証を毎回確認)。
+  // (表示制御は UX — バックエンドの actions は owner + session + メール検証を毎回確認)。
   const { data: me } = useMeQuery();
   const isOwner = me?.role === "owner";
 
@@ -129,7 +129,7 @@ export default function AdminRanking() {
         <Divider type="line-brown" />
 
         <p className="text-xs font-medium text-muted-foreground">
-          使用量は 60 秒ごとに自動更新されます(資源ごとに採取するため間隔は長めです)。
+          使用量は 60 秒ごとに自動更新されます(リソースごとに採取するため間隔は長めです)。
         </p>
 
         {/* 種別フィルタ(セグメント)。 */}
@@ -161,7 +161,7 @@ export default function AdminRanking() {
                 <thead>
                   <tr className="border-b-2 border-[rgba(61,52,40,0.08)] text-left text-xs font-bold text-muted-foreground">
                     <th className="px-4 py-3">利用者</th>
-                    <th className="px-4 py-3">資源</th>
+                    <th className="px-4 py-3">リソース</th>
                     <th className="px-4 py-3 text-right">使用量</th>
                     <th className="px-4 py-3 text-right">CPU</th>
                     <th className="px-4 py-3 text-right">状態</th>
@@ -234,7 +234,7 @@ export default function AdminRanking() {
           <Card type="dashed">
             <CardContent className="px-6 py-12 text-center">
               <p className="text-sm font-medium text-muted-foreground">
-                該当する資源がありません。
+                該当するリソースがありません。
               </p>
             </CardContent>
           </Card>

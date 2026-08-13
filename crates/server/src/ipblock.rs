@@ -3,7 +3,7 @@
 //!
 //! 背骨:管制面 Postgres(ip_allow_entries)が「期望状態」を持ち、現実(traefik の
 //! ipAllowList middleware)をそこへ収束させる。owner が CIDR を足す / 消すたびに、
-//! 平台が traefik の動的設定ファイルを書き直し、file provider がホットリロードする。
+//! プラットフォームが traefik の動的設定ファイルを書き直し、file provider がホットリロードする。
 //!
 //! 意味は「許可リスト」:
 //!   * 空        = 制限なし(全 IP 許可、fail-open)。
@@ -215,7 +215,7 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     tokio::fs::create_dir_all(dir).await?;
     let db_tcp = dir.join("db-tcp.yml");
     // 公開 DB を開くべきか。公開 DB は **fail-closed**:許可リストが空なら入口を書かない
-    // (空=全開で DB を公網に晒す事故を防ぐ。HTTP service は公網 app が本意なので空=fail-open のままだが、
+    // (空=全開で DB をインターネットに晒す事故を防ぐ。HTTP service は公開 app が本意なので空=fail-open のままだが、
     // DB は別ポリシー)。off / 空 = 閉じる。
     let open_db = state.config.db_public_enabled && !cidrs.is_empty();
 
@@ -225,7 +225,7 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     if !open_db {
         if state.config.db_public_enabled {
             tracing::warn!(
-                "公開 DB が有効だが IP 許可リストが空 — fail-closed で TCP 入口を書きません(DB を公網に晒さない)。会社 CIDR を 1 件以上登録してください"
+                "公開 DB が有効だが IP 許可リストが空 — fail-closed で TCP 入口を書きません(DB をインターネットに晒さない)。会社 CIDR を 1 件以上登録してください"
             );
         }
         match tokio::fs::remove_file(&db_tcp).await {
@@ -248,11 +248,11 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
     // 許可リストを流用。HTTP は pgbouncer 直結を通らないので別途 tcp: で被せる)。HTTP 書き込みが失敗して
     // 早期 return しても、その時は DB 入口を書かない = fail-closed 側に倒れる(安全)。
     if open_db {
-        // 後端は **容器名**で引く(`db_internal_host` ではない)。両者は別の関心事:
+        // バックエンドは **コンテナ名**で引く(`db_internal_host` ではない)。両者は別の関心事:
         // db_internal_host は「注入する接続文字列の host = 証書の名前」= **TLS の身元**、
-        // ここで要るのは「traefik から pgbouncer への配管先」= **経路**。証書の公開名を後端に
-        // 書くと、その名前が traefik 視点で引けない瞬間(pgbouncer 再作成の窓など)に公網 DNS へ
-        // 落ちて **traefik が自分自身へ転送する自環**になる。容器名は共有網が在れば常に解ける。
+        // ここで要るのは「traefik から pgbouncer への配管先」= **経路**。証書の公開名をバックエンドに
+        // 書くと、その名前が traefik 視点で引けない瞬間(pgbouncer 再作成の窓など)に公開 DNS へ
+        // 落ちて **traefik が自分自身へ転送する自環**になる。コンテナ名は共有網が在れば常に解ける。
         let backend = format!(
             "{}:{}",
             state.config.pgbouncer_container, state.config.db_internal_port
@@ -282,7 +282,7 @@ fn fail_open_ranges(cidrs: &[String]) -> Vec<&str> {
 /// ipAllowList が実 client IP を `X-Forwarded-For` から選ぶ際に**飛ばす**内部/プロキシ網
 /// (cloudflared・docker・loopback 等)。これらを除いた残りが実 client。CF Tunnel 配下では
 /// CF の Transform Rule が XFF を `ip.src` で**上書き**(偽装不可)するので、ここに残るのは
-/// 実 client(公網)1 個になる。internal app は XFF を持たないが、ipStrategy を付けるのは
+/// 実 client(外部)1 個になる。internal app は XFF を持たないが、ipStrategy を付けるのは
 /// 許可リスト非空時のみ(下記)なので影響しない。
 const TRUSTED_PROXY_NETS: &[&str] = &[
     "127.0.0.0/8",
@@ -300,7 +300,7 @@ fn render_yaml(cidrs: &[String]) -> String {
     let ranges = fail_open_ranges(cidrs);
 
     let mut s = String::new();
-    s.push_str("# 平台(tsubomi-server)が自動生成。手で編集しない —\n");
+    s.push_str("# プラットフォーム(tsubomi-server)が自動生成。手で編集しない —\n");
     s.push_str("# owner の IP 許可リスト変更で毎回上書きされる。\n");
     s.push_str("# 空リスト = 全 IP 許可(fail-open)。1 件以上 = その CIDR だけ許可。\n");
     s.push_str("http:\n");
@@ -312,7 +312,7 @@ fn render_yaml(cidrs: &[String]) -> String {
         s.push_str(&format!("          - \"{c}\"\n"));
     }
     // 許可リストが**非空のときだけ** ipStrategy を付ける。CF Tunnel 配下では cloudflared が直接の
-    // peer(loopback/docker)なので、既定(remote addr 判定)だと全員その内部 IP に見えて白名単が効かない。
+    // peer(loopback/docker)なので、既定(remote addr 判定)だと全員その内部 IP に見えて許可リストが効かない。
     // XFF(CF が ip.src で上書き)から内部ホップを除いて実 client を選ぶ。**空(fail-open)では付けない**
     // — XFF が内部 IP だけ/不在のとき excludedIPs が空を返し 403 になる罠(traefik#10561)を避け、
     // fail-open(全許可・無条件マッチ)の不変条件を守るため。
@@ -331,13 +331,13 @@ fn render_yaml(cidrs: &[String]) -> String {
 /// = 公開 DB は fail-closed(DB を空リストで 0.0.0.0/0 に晒さない。HTTP service の空=fail-open とは別)。
 /// pgbouncer が client TLS を終端するので Traefik は **素の TCP passthrough**(`HostSNI(*)`・TLS 無し)=
 /// client の `sslmode=require` は pgbouncer と端到端で TLS を張る。`backend` = 内部 pgbouncer の
-/// `host:port`(**容器名**:db_internal_port。注入用の証書名ではない — 呼び出し側のコメント参照。
-/// 値は平台生成なのでそのまま埋めて安全)。
+/// `host:port`(**コンテナ名**:db_internal_port。注入用の証書名ではない — 呼び出し側のコメント参照。
+/// 値はプラットフォーム生成なのでそのまま埋めて安全)。
 fn render_db_tcp_yaml(cidrs: &[String], backend: &str) -> String {
     let ranges = fail_open_ranges(cidrs);
 
     let mut s = String::new();
-    s.push_str("# 平台(tsubomi-server)が自動生成。手で編集しない —\n");
+    s.push_str("# プラットフォーム(tsubomi-server)が自動生成。手で編集しない —\n");
     s.push_str(
         "# 公開 DB(TSUBOMI_DB_PUBLIC_ENABLED)有効時のみ書かれ、IP 許可リスト変更で上書きされる。\n",
     );

@@ -10,9 +10,9 @@ import { useViewerLogin } from "@/lib/admin";
 import { useMeQuery } from "@/lib/auth";
 
 // 閲覧ルート(管制面 / 使用量ランキング)の守衛。設計 v2 §7「見るは共有密码」:
-// owner はそのまま、それ以外のログインユーザは共有パスワードを入れると只读で見られる。
+// owner はそのまま、それ以外のログインユーザは共有パスワードを入れると読み取り専用で見られる。
 // owner || is_viewer なら子を描画、さもなくば**この場で**解錠フォームを出す。
-// 表示制御はただの UX — 後端の require_viewer_web が本丸(危険操作は別途 owner のみ)。
+// 表示制御はただの UX — バックエンドの require_viewer_web が本丸(危険操作は別途 owner のみ)。
 export function RequireViewer() {
   const { data: me } = useMeQuery();
   const login = useViewerLogin();
@@ -39,7 +39,7 @@ export function RequireViewer() {
         <Divider type="line-brown" />
         <p className="text-sm font-medium text-foreground">
           共有パスワードを入力すると、管理画面を <strong>閲覧専用</strong> で見られます (8
-          時間有効)。資源の停止 / 削除など操作は管理者のみです。
+          時間有効)。リソースの停止 / 削除など操作は管理者のみです。
         </p>
         <form
           onSubmit={(ev) => {

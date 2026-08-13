@@ -5,7 +5,7 @@
 //! service create のたびに同じ creds を返すので、同じユーザの複数 service が同じ
 //! GitHub Secret を共有できる(冪等)。
 //!
-//! 平台は password の **原文**を GitHub Secret 用に返す必要があるので、復元可能に
+//! プラットフォームは password の **原文**を GitHub Secret 用に返す必要があるので、復元可能に
 //! 暗号化して持つ(crypto.rs。ハッシュにできる session / cli_token とは別)。
 //!
 //! registry の htpasswd ファイルへの同期(bcrypt 行の追記 + registry への SIGHUP
@@ -74,13 +74,13 @@ pub async fn ensure_account(state: &AppState, user_id: Uuid) -> AppResult<Regist
 
 // ===== 本番 registry の push 入口(traefik basicAuth)=====
 
-/// 本番(tls)で registry の公網 push 入口を traefik に出す:`registry.<domain>` → registry:5000、
+/// 本番(tls)で registry のインターネット push 入口を traefik に出す:`registry.<domain>` → registry:5000、
 /// basicAuth(全 registry_accounts を bcrypt した inline users)、LE。registry コンテナ自体は
-/// **無認証**(ループバック :5000 のまま — 平台の pull はそのまま通る)。認証は traefik 層だけに付ける。
+/// **無認証**(ループバック :5000 のまま — プラットフォームの pull はそのまま通る)。認証は traefik 層だけに付ける。
 /// IP 許可リスト middleware は付けない(決定 #4:registry は免除)。dev(tls=false)は何もしない。
 /// 起動時 + `ensure_account` の新規時に呼ぶ(traefik file provider がホットリロード、SIGHUP 不要)。
 pub async fn sync_traefik(state: &AppState) {
-    // prod(push 先が公網の別ホスト)でのみ入口を書く。dev / 単機無認証では何もしない。
+    // prod(push 先がインターネットの別ホスト)でのみ入口を書く。dev / 単一ホスト無認証では何もしない。
     // TLS の有無(traefik 終端 / 上流終端)とは独立 — tunnel(tls=false)でも入口は要る。
     if !state.config.registry_ingress() {
         // tls=true なのに push==pull は本番の設定漏れ(REGISTRY_PUSH 未設定)。push 入口が
@@ -88,7 +88,7 @@ pub async fn sync_traefik(state: &AppState) {
         if state.config.tls {
             tracing::warn!(
                 "TSUBOMI_TLS=true だが REGISTRY_PUSH==PULL — registry push 入口を書きません。\
-                 TSUBOMI_REGISTRY_PUSH=registry.<域名> を設定してください"
+                 TSUBOMI_REGISTRY_PUSH=registry.<ドメイン> を設定してください"
             );
         }
         return;
@@ -114,8 +114,8 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
         let hash = bcrypt::hash(&pass, bcrypt::DEFAULT_COST)
             .map_err(|e| AppError::Other(anyhow::anyhow!("bcrypt に失敗: {e}")))?;
         let line = format!("{user}:{hash}");
-        // 書き込み点の縦深防御(AI 審査 R3):username は平台生成・bcrypt は `$ . /` と英数字のみ
-        // だが、素で YAML に埋めるため白名単で最終確認する(route.rs と同じ門)。
+        // 書き込み点の縦深防御(AI 審査 R3):username はプラットフォーム生成・bcrypt は `$ . /` と英数字のみ
+        // だが、素で YAML に埋めるため許可リストで最終確認する(route.rs と同じ門)。
         crate::services::route::ensure_yaml_embeddable("registry account", &line)?;
         users.push(line);
     }
@@ -137,9 +137,9 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
 }
 
 /// traefik 動的設定(registry router + basicAuth middleware + service)を組み立てる。
-/// `push_host` = 公網の push ホスト(`registry_push`、例 registry.<域名>)。`tls`=true なら traefik 終端
+/// `push_host` = インターネットの push ホスト(`registry_push`、例 registry.<ドメイン>)。`tls`=true なら traefik 終端
 /// (websecure + LE)、false なら上流終端(web、HTTP。CF Tunnel / 逆代理の後ろ)。
-/// `direct_host` = CF を経由しない直連入口(任意。VPS sni-gate + frp 経由で届く。entrypoint
+/// `direct_host` = CF を経由しない直接接続入口(任意。VPS sni-gate + frp 経由で届く。entrypoint
 /// `registrydirect` + LE **DNS-01**(`ledns`)で traefik が TLS 終端 — CF の 100MB 上限を回避する
 /// push 専用経路。compose.prod.registry-direct.yml とセット。doc/paas-registry-direct-design.md)。
 /// bcrypt ハッシュは `$`/`.`/`/` のみ(引用符・バックスラッシュ無し)なので二重引用符で安全に包める。
@@ -149,7 +149,7 @@ async fn sync_traefik_inner(state: &AppState) -> AppResult<()> {
 fn render(push_host: &str, direct_host: Option<&str>, users: &[String], tls: bool) -> String {
     use crate::services::route::{entrypoint, push_tls_block};
     let mut s = String::new();
-    s.push_str("# 平台が自動生成(services/registry.rs)。手で編集しない。\n");
+    s.push_str("# プラットフォームが自動生成(services/registry.rs)。手で編集しない。\n");
     if users.is_empty() {
         s.push_str("# (registry アカウント未作成 — push 入口は未公開 = fail-closed)\n");
         return s;
@@ -163,7 +163,7 @@ fn render(push_host: &str, direct_host: Option<&str>, users: &[String], tls: boo
     s.push_str("      middlewares: [\"tsubomi-registry-auth@file\"]\n");
     push_tls_block(&mut s, tls);
     if let Some(direct) = direct_host {
-        // 直連入口(CF 不経由)。traefik がここで TLS 終端(証明書は DNS-01 = 公網 :80 不要)。
+        // 直接接続入口(CF 不経由)。traefik がここで TLS 終端(証明書は DNS-01 = インターネット :80 不要)。
         // basicAuth は CF 入口と同じ middleware を共有(資格情報は 1 系統)。
         s.push_str("    tsubomi-registry-direct:\n");
         s.push_str(&format!("      rule: \"Host(`{direct}`)\"\n"));
@@ -318,7 +318,7 @@ async fn delete_manifest(state: &AppState, base: &str, digest: &str) -> AppResul
     Ok(())
 }
 
-/// GC の前段:**窓の外の旧版 manifest(index + その子)を平台が明示削除する**(stateful 設計
+/// GC の前段:**窓の外の旧版 manifest(index + その子)をプラットフォームが明示削除する**(stateful 設計
 /// §10-E の修正)。keep 集合 = 現役 `image_digest` ∪ 直近 [`KEEP_SUCCEEDED_DEPLOYS`] 成功版。
 ///
 /// 背景のバグ:従来の `garbage_collect --delete-untagged` は「tag に参照されない manifest = ゴミ」
@@ -328,7 +328,7 @@ async fn delete_manifest(state: &AppState, base: &str, digest: &str) -> AppResul
 /// 食う**(distribution の既知欠陥 — 本番の既存 index で子欠損を実証。multi-arch の別アーキ・
 /// attestation が静かに欠けていた)。
 ///
-/// 対策の形(**`--delete-untagged` は廃止** — 何が消えるかは平台だけが決める):
+/// 対策の形(**`--delete-untagged` は廃止** — 何が消えるかはプラットフォームだけが決める):
 /// 1. **期限切れ**:deploys 由来の **terminal な**(succeeded/failed のみ = in-flight を触らない)
 ///    distinct digest のうち keep 外を、**index → その子 manifests** の順に DELETE。子は
 ///    keep / in-flight の index が参照している分を除外する(buildx キャッシュで別 index が同一の
@@ -361,14 +361,14 @@ pub async fn protect_and_expire_manifests(state: &AppState) -> AppResult<()> {
 /// **クエリの順序が命**(codex review 2026-07-03 #1):期限切れ候補(expendable)を**先に**、
 /// keep 集合を**後に**読む。並行 deploy の commit_success が両クエリの間に割り込んでも、
 /// 「候補 = 古い現実の部分集合、保護 = 新しい現実の超集合」なので、新しく成功した現役 digest は
-/// 候補に居らず(古い快照)、逆に候補にいる旧 digest が current 化した場合は keep(新しい快照)が
+/// 候補に居らず(古いスナップショット)、逆に候補にいる旧 digest が current 化した場合は keep(新しいスナップショット)が
 /// 拾って除外する。逆順だと「keep に無いが候補にある新現役」を消し得る。
 async fn protect_and_expire_one(
     state: &AppState,
     service_id: Uuid,
     current: Option<&str>,
 ) -> AppResult<()> {
-    // 1) 期限切れ候補(古い快照):terminal な deploys の distinct digest。
+    // 1) 期限切れ候補(古いスナップショット):terminal な deploys の distinct digest。
     //    非 terminal 行(received/pulling/starting)を 1 つでも持つ digest は in-flight = 触らない。
     //    **48h の年齢下限**(HAVING):直近に push された digest は消さない — (a)失敗 deploy の
     //    イメージは即時の再試行 / 診断にまだ要る、(b)温かい buildx キャッシュが同一 digest を
@@ -388,7 +388,7 @@ async fn protect_and_expire_one(
     .fetch_all(&state.db)
     .await?;
 
-    // 2) keep 集合(新しい快照):現役 ∪ distinct 直近 N 成功版。distinct は SQL 側で取る
+    // 2) keep 集合(新しいスナップショット):現役 ∪ distinct 直近 N 成功版。distinct は SQL 側で取る
     //    (同一 digest の連続 deploy が多いと LIMIT 先取りで distinct が痩せる — codex #3)。
     let succeeded: Vec<(String,)> = sqlx::query_as(
         "SELECT image_digest FROM deploys
@@ -472,14 +472,14 @@ pub struct HostImagePlan {
     /// ゴミ箱の service は空集合になる(= 参照は全部消える。restore しても `pull` で戻る)。
     ///
     /// **この表に無い id は「物理削除済み(purge 済み)」と断定できる**のが要点。単一
-    /// トランザクションの快照なので「並行して作られた新 service を取り逃した」ケースと
+    /// トランザクションのスナップショットなので「並行して作られた新 service を取り逃した」ケースと
     /// 区別が付く(取り逃しを "已削除" と誤断すると現役イメージを消す)。
     pub keeps: std::collections::HashMap<Uuid, std::collections::HashSet<String>>,
-    /// 触ってはいけない service(`phase='deploying'`)。keeps と同一快照で読む。
+    /// 触ってはいけない service(`phase='deploying'`)。keeps と同一スナップショットで読む。
     pub skip: std::collections::HashSet<Uuid>,
 }
 
-/// 宿主イメージ掃除のための計画を **単一トランザクションの快照**で組む。
+/// 宿主イメージ掃除のための計画を **単一トランザクションのスナップショット**で組む。
 ///
 /// 宿主イメージは registry の manifest とは別実体で、こちらは「rollback のための保管」を担わない
 /// (`deploy::run_digest` は**毎回必ず** `docker::pull` するので、rollback は registry から引き直す
@@ -494,7 +494,7 @@ pub struct HostImagePlan {
 /// `recent_secs` は「最近の deploy の digest は消さない」窓。registry 側の 48h 年齢下限
 /// (失敗イメージを再試行 / 診断のために残す — 2026-07-08 事故由来)と**同じ時間源**
 /// (`deploys.created_at`)で揃える。docker の `ImageSummary.created` は**イメージ自身の
-/// ビルド時刻**で本機が取得した時刻ではないため、外部イメージ(数ヶ月前ビルド)では年齢下限が
+/// ビルド時刻**でこのホストが取得した時刻ではないため、外部イメージ(数ヶ月前ビルド)では年齢下限が
 /// 即座に無効になる = 時間源として使えない(codex 監査 #8)。
 pub async fn host_image_plan(state: &AppState, recent_secs: i64) -> AppResult<HostImagePlan> {
     let mut tx = state.db.begin().await?;
@@ -552,7 +552,7 @@ pub async fn host_image_plan(state: &AppState, recent_secs: i64) -> AppResult<Ho
 /// 無い manifest が永久に残る**(codex 監査 2026-07-25 #7)。ここが最終回収。
 ///
 /// 対象は「catalog にあるが DB に service 行(ゴミ箱含む)が無い」repo だけ。判定は
-/// `host_image_plan` と同じ「存在する id の表」に基づく(単一快照)。
+/// `host_image_plan` と同じ「存在する id の表」に基づく(単一スナップショット)。
 pub async fn delete_orphan_repos(state: &AppState, known: &[Uuid]) -> AppResult<usize> {
     let url = format!("http://{}/v2/_catalog?n=1000", state.config.registry_pull);
     let resp = state
@@ -664,7 +664,7 @@ fn keep_window(
 /// **`--delete-untagged` は使わない**:あれは「tag 失参照 = ゴミ」と見なすが、(a)同 tag 再 push で
 /// 失参照になった**現役** digest も食い、(b)**tag 付き index の子 manifest まで食う**(distribution
 /// の既知欠陥 — 本番の既存 index で子欠損を実証)。manifest を消す判断は
-/// [`protect_and_expire_manifests`](平台の keep 窓)だけが行い、ここは blob 掃除に徹する。
+/// [`protect_and_expire_manifests`](プラットフォームの keep 窓)だけが行い、ここは blob 掃除に徹する。
 ///
 /// **並行 push と競合し得る**(GC 実行中に upload 中の blob が消され得る)。read-only に切らない
 /// 簡易運用なので、衝突確率を下げるため 1h tick ではなく**日次**に置く(まれな失敗は push 側の
@@ -762,7 +762,7 @@ async fn load(state: &AppState, user_id: Uuid) -> AppResult<Option<RegistryCreds
         Some((user, password_enc)) => {
             let pass = state.crypto.decrypt(&password_enc)?;
             Ok(Some(RegistryCreds {
-                // CI へ配る push 先:直連入口(CF 100MB 上限を回避)があればそれを優先。
+                // CI へ配る push 先:直接接続入口(CF 100MB 上限を回避)があればそれを優先。
                 // 既存 service は gh variable `TSUBOMI_REGISTRY` を差し替えるだけで切替可能。
                 host: state.config.registry_ci_host().to_string(),
                 user,
@@ -835,8 +835,8 @@ mod tests {
 
     #[test]
     fn render_direct_adds_second_router_with_dns01() {
-        // 直連入口:registrydirect entrypoint + DNS-01(ledns)終端の第 2 router。CF 入口と共存し、
-        // basicAuth middleware は共有。tunnel 部署(tls=false)でも直連側は常に TLS 終端。
+        // 直接接続入口:registrydirect entrypoint + DNS-01(ledns)終端の第 2 router。CF 入口と共存し、
+        // basicAuth middleware は共有。tunnel 部署(tls=false)でも直接接続側は常に TLS 終端。
         let doc = render(
             "registry.example.com",
             Some("registry-direct.example.com"),

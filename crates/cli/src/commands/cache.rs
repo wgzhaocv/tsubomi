@@ -186,7 +186,7 @@ async fn resolve_id(
 fn cache_url_notes(url: &str) {
     match redis_namespace(url) {
         Some(ns) if url.starts_with("rediss://") => {
-            eprintln!("  あなたの PC から直接繋がります(TLS)。キー前缀 \"{ns}:\" を必ず付けてください");
+            eprintln!("  あなたの PC から直接繋がります(TLS)。キーの接頭辞 \"{ns}:\" を必ず付けてください");
             eprintln!("  (付けないと NOPERM。例:new Redis(URL, {{ keyPrefix: \"{ns}:\" }}))");
         }
         _ => eprintln!("  (内部入口のため、注入された service のコンテナからのみ接続できます)"),
@@ -218,11 +218,11 @@ fn connect_redis_cli(url: &str) -> Result<()> {
     let user = parsed.username().to_owned(); // = acl_user = namespace
     let password = parsed.password().unwrap_or_default().to_owned();
     if !user.is_empty() {
-        eprintln!("💡 キー前缀 \"{user}:\" を付けて操作してください(例:GET {user}:foo)。前缀なしは NOPERM。");
+        eprintln!("💡 キーの接頭辞 \"{user}:\" を付けて操作してください(例:GET {user}:foo)。接頭辞なしは NOPERM。");
     }
 
     // redis-cli / valkey-cli を **明示フラグ**で起動する(`-u rediss://…` だと (1) SNI を送らず
-    // 辺縁の sni-gate に握手段で切られ (2) AUTH env も URL モードでは拾われない、の 2 つで繋がらない。
+    // エッジの sni-gate に握手段で切られ (2) AUTH env も URL モードでは拾われない、の 2 つで繋がらない。
     // 実機検証済み)。--sni で gate を通し、--user で ACL ユーザ、パスワードは AUTH env で渡し argv に
     // 載せない(`ps` 対策)。redis-cli/valkey-cli の両系 env を立てる。NotFound なら次の候補へ。
     for bin in ["redis-cli", "valkey-cli"] {

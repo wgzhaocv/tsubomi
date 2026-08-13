@@ -2,7 +2,7 @@
 //!
 //! docker provider は使わない:Docker Engine 29 は最小 API を 1.40 に上げ、traefik の
 //! docker クライアントは 1.24 に落ちて弾かれる(provider が全コンテナを見失い 404)。file
-//! provider は docker API を一切触らないのでこれを回避する。後端へは安定コンテナ名
+//! provider は docker API を一切触らないのでこれを回避する。バックエンドへは安定コンテナ名
 //! `tsubomi-<id>` を edge 網の docker DNS で解決して到達する(名前解決は provider とは別)。
 //!
 //! 役割分担:ipblock が会社 IP 許可リストの middleware(ipallow.yml)を書き、ここは各
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 /// traefik の entrypoint / certResolver 名。**compose.prod.yml の traefik command で定義する名前と
-/// 一致させること**(static = compose が定義、dynamic = 平台が参照、の契約点)。ここを変えたら compose も。
+/// 一致させること**(static = compose が定義、dynamic = プラットフォームが参照、の契約点)。ここを変えたら compose も。
 pub(crate) const ENTRYPOINT_HTTP: &str = "web";
 pub(crate) const ENTRYPOINT_TLS: &str = "websecure";
 pub(crate) const CERT_RESOLVER: &str = "le";
@@ -48,7 +48,7 @@ fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
 /// YAML(二重引用符文字列 / Host(`…`) ルール)へ**素で埋めても安全**な文字だけ許す縦深防御
 /// (AI 審査 R3)。route / registry の動的設定は文字列拼接で組むため、値の安全性は従来
 /// 「上游の subdomain 校験が厳格だから」にだけ寄りかかっていた — 上游が緩んだ瞬間に traefik
-/// 設定への YAML 注入(任意 router 定義)になる。書き込み点でも白名単で最終確認する。
+/// 設定への YAML 注入(任意 router 定義)になる。書き込み点でも許可リストで最終確認する。
 /// 許可集合は現用の全値(subdomain.domain / コンテナ名:port / http:// URL / user:bcrypt)を
 /// 覆う最小限:英数字 + `. - _ : / $ @`。引用符・バックスラッシュ・バッククォート・改行・
 /// 空白を含む値はここで確実に落ちる。
@@ -67,12 +67,12 @@ pub(crate) fn ensure_yaml_embeddable(field: &str, value: &str) -> AppResult<()> 
 }
 
 /// router + service を 1 ファイル原子的に書く(traefik が watch してホットリロード)。
-/// router/service 名 = `svc-<id>`(安定、ファイルは service ごと 1 枚)、**後端 = 渡された
+/// router/service 名 = `svc-<id>`(安定、ファイルは service ごと 1 枚)、**バックエンド = 渡された
 /// コンテナ名**。start-first swap では deploy ごとにコンテナ名が変わる(新旧が一瞬共存
-/// するため一意名)ので、後端 URL も deploy のたびに書き換わる。`ipallow` = 会社 IP 許可
+/// するため一意名)ので、バックエンド URL も deploy のたびに書き換わる。`ipallow` = 会社 IP 許可
 /// リスト middleware(ipblock、`@file`)を挂けるか — visibility の company(true)/
 /// public(false)。private はそもそもこの関数を呼ばない(ファイル自体を書かない)。
-/// 値は全て平台生成なので YAML へそのまま埋めて安全。
+/// 値は全てプラットフォーム生成なので YAML へそのまま埋めて安全。
 pub fn write(
     state: &AppState,
     service_id: Uuid,
@@ -84,7 +84,7 @@ pub fn write(
     let name = format!("svc-{service_id}");
     let host = format!("{}.{}", subdomain, state.config.domain);
     let backend = format!("http://{container_name}:{container_port}");
-    // 値は平台生成(subdomain は作成時校験・コンテナ名は命名規約)だが、書き込み点でも白名単で
+    // 値はプラットフォーム生成(subdomain は作成時校験・コンテナ名は命名規約)だが、書き込み点でも許可リストで
     // 最終確認する(縦深防御 — 上游が緩んでも YAML 注入にしない)。
     ensure_yaml_embeddable("host", &host)?;
     ensure_yaml_embeddable("backend", &backend)?;
@@ -98,7 +98,7 @@ pub fn write(
 /// 挂けない = 全網公開はこの行の有無で決まる)。
 fn build_service_doc(name: &str, host: &str, backend: &str, ipallow: bool, tls: bool) -> String {
     let mut doc = String::new();
-    doc.push_str("# 平台が自動生成(services/route.rs)。手で編集しない(deploy ごとに上書き)。\n");
+    doc.push_str("# プラットフォームが自動生成(services/route.rs)。手で編集しない(deploy ごとに上書き)。\n");
     doc.push_str("http:\n");
     doc.push_str("  routers:\n");
     doc.push_str(&format!("    {name}:\n"));
@@ -129,7 +129,7 @@ pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> AppResult<(
     Ok(())
 }
 
-/// 本番(tls)で apex(`<domain>` → 平台 server)を traefik に出す。server は host ネットなので
+/// 本番(tls)で apex(`<domain>` → プラットフォーム server)を traefik に出す。server は host ネットなので
 /// host-gateway 経由で届く(compose の traefik に `extra_hosts: host.docker.internal:host-gateway`)。
 /// IP 許可リスト middleware は付けない(ログイン / owner 操作が届く必要があるため。registry と同じ免除)。
 /// dev(tls=false)は何もしない(apex は vite / 直アクセス)。起動時に 1 回呼ぶ。
@@ -140,7 +140,7 @@ pub fn write_apex(state: &AppState) -> AppResult<()> {
     let domain = &state.config.domain;
     let port = state.config.bind_addr.port();
     let mut doc = String::new();
-    doc.push_str("# 平台が自動生成(services/route.rs::write_apex)。手で編集しない。\n");
+    doc.push_str("# プラットフォームが自動生成(services/route.rs::write_apex)。手で編集しない。\n");
     doc.push_str("http:\n");
     doc.push_str("  routers:\n");
     doc.push_str("    tsubomi-apex:\n");
@@ -158,23 +158,23 @@ pub fn write_apex(state: &AppState) -> AppResult<()> {
     write_atomic(&state.config.traefik_dynamic_dir.join("apex.yml"), &doc)
 }
 
-/// 本番で「service の無い子域」を `/noservice` ページへ寄せる catch-all router を traefik に書く。
+/// 本番で「service の無いサブドメイン」を `/noservice` ページへ寄せる catch-all router を traefik に書く。
 ///
 /// 仕組み:**最低優先度**(`priority: 1`)の `HostRegexp` で `<sub>.<domain>` 全体を受ける。
 /// service の `Host(...)` router は優先度=ルール長で常にこれより上なので、**service があれば
 /// 必ず service が勝ち全部 service に渡る**(service 自身の 404 もそのまま)。どの service router
-/// にも当たらない子域(未デプロイ / 停止 / 削除済み = `remove` で `svc-<id>.yml` が消えた状態)
-/// だけがここへ落ち、redirectRegex で `/noservice` へ **302**(後で同じ子域に service が来たら
-/// 復活するので 301 にしない)。apex(`Host(<domain>)`)は正規表現が要求する「子域のドット」が
+/// にも当たらないサブドメイン(未デプロイ / 停止 / 削除済み = `remove` で `svc-<id>.yml` が消えた状態)
+/// だけがここへ落ち、redirectRegex で `/noservice` へ **302**(後で同じサブドメインに service が来たら
+/// 復活するので 301 にしない)。apex(`Host(<domain>)`)は正規表現が要求する「サブドメインのドット」が
 /// 無いので当たらない = リダイレクトループしない。registry 等の専用 router も優先度で上にいる。
 ///
 /// dev(domain=localhost)は書かない(`*.localhost` 直アクセス。apex と同じ扱い)。起動時に 1 回。
 ///
 /// TLS の扱い(両モード対応):CF tunnel(tls=false)= web entrypoint(HTTP)。直 VPS(tls=true)=
 /// websecure + 空 `tls: {}`。**certResolver は付けない**:HostRegexp からは具体ドメインを導けず
-/// LE は走らせられないし、ランダム子域の総当たりで LE レート制限を踏むのも防ぐ。直 VPS で死んだ
-/// 子域も正しい証明書で出したいなら `*.<domain>` の DNS-01 ワイルドカード証明書を別途張る(無ければ
-/// traefik 既定証明書 = ブラウザ警告。これは catch-all 以前から未ルート子域で同じ挙動)。
+/// LE は走らせられないし、ランダムサブドメインの総当たりで LE レート制限を踏むのも防ぐ。直 VPS で死んだ
+/// サブドメインも正しい証明書で出したいなら `*.<domain>` の DNS-01 ワイルドカード証明書を別途張る(無ければ
+/// traefik 既定証明書 = ブラウザ警告。これは catch-all 以前から未ルートサブドメインで同じ挙動)。
 pub fn write_catchall(state: &AppState) -> AppResult<()> {
     let domain = &state.config.domain;
     if domain == "localhost" {
@@ -187,18 +187,18 @@ pub fn write_catchall(state: &AppState) -> AppResult<()> {
 /// catchall.yml の中身を組み立てる純粋関数(`write_catchall` の本体。テスト可能なように分離)。
 fn build_catchall_doc(domain: &str, tls: bool, port: u16) -> String {
     // HostRegexp(Go 正規表現)用に domain のドットをエスケープ。`^.+\.<domain>$` =
-    // 「1 ラベル以上 + ドット + ルートドメイン」⇒ 子域だけにマッチ(apex の裸ドメインは外れる)。
+    // 「1 ラベル以上 + ドット + ルートドメイン」⇒ サブドメインだけにマッチ(apex の裸ドメインは外れる)。
     // YAML 二重引用符の中なので backslash は `\\` で 1 個。最終的に traefik は `\.` を受け取る。
     let escaped = domain.replace('.', "\\\\.");
 
     let mut doc = String::new();
-    doc.push_str("# 平台が自動生成(services/route.rs::write_catchall)。手で編集しない。\n");
+    doc.push_str("# プラットフォームが自動生成(services/route.rs::write_catchall)。手で編集しない。\n");
     doc.push_str("http:\n");
     doc.push_str("  routers:\n");
     doc.push_str("    tsubomi-catchall:\n");
     doc.push_str(&format!("      rule: \"HostRegexp(`^.+\\\\.{escaped}$`)\"\n"));
     doc.push_str(&format!("      entryPoints: [\"{}\"]\n", entrypoint(tls)));
-    // ★ 最低優先度。service の Host router(優先度=ルール長)に必ず負け、未ルート子域だけ拾う。
+    // ★ 最低優先度。service の Host router(優先度=ルール長)に必ず負け、未ルートサブドメインだけ拾う。
     doc.push_str("      priority: 1\n");
     doc.push_str("      service: \"tsubomi-catchall\"\n");
     // no-cache を **先(外側)** に置く:redirect が内側で生む 302 にも応答ヘッダが乗る
@@ -252,7 +252,7 @@ fn ipallow_ref() -> String {
     format!("{}@file", crate::ipblock::TRAEFIK_MIDDLEWARE)
 }
 
-/// `svc-<id>.yml` の現実状態を読む:`(backend 容器名, ipallow 有無)`。ファイル無し / 解析不可は None。
+/// `svc-<id>.yml` の現実状態を読む:`(backend コンテナ名, ipallow 有無)`。ファイル無し / 解析不可は None。
 /// reconcile の drift 判定は組で使うので **1 回の読みで両方**返す(二重読みは同一ファイルの別版を
 /// 見得る + 無駄 I/O)。ipallow の不一致検出は public↔company の切替書込が失敗した fail-open
 /// ドリフトを塞ぐ(公開範囲設計 §0-F)。
@@ -301,7 +301,7 @@ pub(crate) fn list_service_ids(state: &AppState) -> Vec<Uuid> {
 }
 
 /// `svc-<uuid>.yml` から uuid を取り出す純粋関数(write の `svc-{id}.yml` の逆)。
-/// 平台が書く route ファイルだけを拾い、ipallow.yml や .tmp などは弾く。
+/// プラットフォームが書く route ファイルだけを拾い、ipallow.yml や .tmp などは弾く。
 fn parse_route_filename(name: &str) -> Option<Uuid> {
     let stem = name.strip_prefix("svc-")?.strip_suffix(".yml")?;
     Uuid::parse_str(stem).ok()
@@ -349,7 +349,7 @@ mod tests {
         let doc = build_catchall_doc("tsubomi-app.com", false, 9090);
         // ★ 最低優先度:service の Host router(優先度=ルール長)に必ず負ける = service があれば素通し。
         assert!(doc.contains("priority: 1"));
-        // `^.+\.` プレフィクスが「子域のドット」を必須にする → apex(裸ドメイン)は当たらない。
+        // `^.+\.` プレフィクスが「サブドメインのドット」を必須にする → apex(裸ドメイン)は当たらない。
         // YAML 二重引用符内なので backslash は 2 個(traefik が受け取るのは `\.`)。
         assert!(doc.contains("rule: \"HostRegexp(`^.+\\\\.tsubomi-app\\\\.com$`)\""));
         // 302(permanent: false)で apex の /noservice へ。
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn extracts_backend_container_name() {
-        // `write` が出力する形(loadBalancer の server URL 行)から容器名を取り出す。
+        // `write` が出力する形(loadBalancer の server URL 行)からコンテナ名を取り出す。
         let doc = "http:\n  services:\n    svc-x:\n      loadBalancer:\n        servers:\n          - url: \"http://tsubomi-abc123-deadbeef:8080\"\n";
         assert_eq!(
             parse_backend_container(doc).as_deref(),

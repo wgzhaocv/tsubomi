@@ -36,7 +36,7 @@ export default function DatabaseOverview() {
   const { id, db } = useCurrentDb();
   const { data: tables } = useTables(id);
   // 外部接続文字列機能が有効か(部署のトポロジ依存)。off の環境では接続文字列カードを隠す
-  // (防御は後端 — ここは UX)。authInfo はアプリ起動時に取得済みでほぼキャッシュ命中。
+  // (防御はバックエンド — ここは UX)。authInfo はアプリ起動時に取得済みでほぼキャッシュ命中。
   const { data: authInfo } = useAuthInfoQuery();
 
   const del = useDeleteDatabase();
@@ -207,7 +207,7 @@ function ForkSection() {
         icon={<GitFork className="size-4" />}
         className="w-fit"
         onClick={() => {
-          // 走行中に再度開いたときは state を作り直さない(reset すると isPending の観察が
+          // 実行中に再度開いたときは state を作り直さない(reset すると isPending の観察が
           // 外れて二重 fork を許してしまう)。開き直して進行中の表示に戻すだけ。
           if (!fork.isPending) {
             setName(db ? `${db.display_name}-dev` : "");
@@ -226,7 +226,7 @@ function ForkSection() {
         typewriter={false}
         width={460}
         onClose={() => {
-          // 走行中は閉じさせない(閉じても fork は止まらず、完了時に突然遷移して見える)。
+          // 実行中は閉じさせない(閉じても fork は止まらず、完了時に突然遷移して見える)。
           if (!fork.isPending) setOpen(false);
         }}
         footer={

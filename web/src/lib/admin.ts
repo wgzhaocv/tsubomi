@@ -12,10 +12,10 @@ export function formatUsageByKind(kind: string, value: number | null): string {
 }
 
 // owner ガバナンスの管制面(M4 S1)。ipblock.ts と同じ作法:生 fetch + TanStack Query。
-// 匿名化済み(設計 v2 §7):真名は出すが資源は匿名番号、内容は出さない。読み取り専用。
-// 後端が owner + session を毎回検証するので、ここは UX(画面でも弾くが本丸は後端)。
+// 匿名化済み(設計 v2 §7):真名は出すがリソースは匿名番号、内容は出さない。読み取り専用。
+// バックエンドが owner + session を毎回検証するので、ここは UX(画面でも弾くが本丸はバックエンド)。
 
-// 指標採集はやや重い(service stats は 1 件 ~1 秒)ので少し長めにキャッシュし、
+// 指標採取はやや重い(service stats は 1 件 ~1 秒)ので少し長めにキャッシュし、
 // 総覧↔ランキングの行き来や種別タブ切替で毎回再取得しないようにする。
 const STALE_MS = 30_000;
 
@@ -24,7 +24,7 @@ export type AdminResourceRow = {
   owner_name: string;
   kind: string;
   anon_label: string;
-  /** 使用量(bytes)。database=存储 / volume=占用 / service=稼働中内存。取得不能は null。 */
+  /** 使用量(bytes)。database=ストレージ / volume=使用量 / service=稼働中メモリ。取得不能は null。 */
   usage_bytes: number | null;
   /** service のみ:CPU 使用率(%)。 */
   cpu_pct: number | null;
@@ -60,7 +60,7 @@ async function fetchOverview(): Promise<AdminOverview> {
   return (await res.json()) as AdminOverview;
 }
 
-// 全件を 1 回取り、種別フィルタは画面側で行う(タブ切替ごとの再取得 = 重い再採集を避ける)。
+// 全件を 1 回取り、種別フィルタは画面側で行う(タブ切替ごとの再取得 = 重い再採取を避ける)。
 async function fetchRanking(): Promise<AdminResourceRow[]> {
   const res = await fetch("/api/admin/ranking");
   if (!res.ok) return failBody(res);
@@ -71,7 +71,7 @@ export function useAdminOverview() {
   return useQuery({ queryKey: adminKeys.overview, queryFn: fetchOverview, staleTime: STALE_MS });
 }
 
-// 使用量は緩やかに変わる(ディスク/DB 容量はほぼ動かない)+ 採集が重い(資源ごとに docker
+// 使用量は緩やかに変わる(ディスク/DB 容量はほぼ動かない)+ 採取が重い(リソースごとに docker
 // stats / pg_database_size / du)ので、WS ではなく 60s の定期 refetch で「ゆっくり活きる」程度に
 // 留める。開いている間だけ更新(TanStack はタブ非表示で自動停止する)。
 const RANKING_REFETCH_MS = 60_000;
@@ -91,7 +91,7 @@ export const KIND_LABEL: Record<string, string> = Object.fromEntries(
   RESOURCES.filter((r) => r.kind).map((r) => [r.kind as string, r.label]),
 );
 
-// 最後の砦(S3):owner が他人の資源を停止 / 削除。二段確認 —
+// 最後の砦(S3):owner が他人のリソースを停止 / 削除。二段確認 —
 //   1 回目(code なし)→ サーバが owner にメールでコードを送り { code_required: true }。
 //   2 回目(code あり)→ 検証して実行し { code_required: false }(実行済みなので一覧を無効化)。
 export type AdminAction = "stop" | "delete";
@@ -123,7 +123,7 @@ export function useAdminAction() {
   });
 }
 
-// 監査ログ閲覧(S4)。キーセット分頁(id DESC)を useInfiniteQuery で「もっと読む」。
+// 監査ログ閲覧(S4)。キーセットページング(id DESC)を useInfiniteQuery で「もっと読む」。
 // action は前方一致フィルタ(例 "owner." で代理操作だけ)。
 export type AuditEntry = {
   id: number;
@@ -160,8 +160,8 @@ export function useAuditLog(action: string) {
 }
 
 // 共有パスワード viewer(S5、web 専用)。設計 v2 §7「見るは共有密码」。
-// login = 任意のログインユーザが共有パスワードを入れて只读 grant(8h)を得る。
-// status / set = owner のみ(後端が require_owner_web)。
+// login = 任意のログインユーザが共有パスワードを入れて読み取り専用 grant(8h)を得る。
+// status / set = owner のみ(バックエンドが require_owner_web)。
 export type ViewerStatus = {
   set: boolean;
   updated_at: string | null;
@@ -199,7 +199,7 @@ export function useViewerStatus() {
   return useQuery({ queryKey: viewerKeys.status, queryFn: fetchViewerStatus, staleTime: STALE_MS });
 }
 
-// 共有パスワードを設定 / リセット(owner)。旧 grant は後端で全失効する。
+// 共有パスワードを設定 / リセット(owner)。旧 grant はバックエンドで全失効する。
 export function useSetViewerPassword() {
   const qc = useQueryClient();
   return useMutation({

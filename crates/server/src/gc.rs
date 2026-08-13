@@ -195,7 +195,7 @@ async fn sweep_auth(state: &AppState) {
         ),
         // deploy hook のリプレイ防御 nonce。窓(MAX_SKEW=±300s)を十分越えた古い行は
         // もう照合されないので掃除する(m3-design §8。reconcile の職務だが DB ハウスキーピング
-        // なのでここに同居 — reconcile は容器/route 収束に純化する)。
+        // なのでここに同居 — reconcile はコンテナ/route 収束に純化する)。
         (
             "deploy_nonces",
             "DELETE FROM deploy_nonces WHERE seen_at < now() - interval '1 hour'",
@@ -340,7 +340,7 @@ fn spawn_registry_gc(state: AppState) {
         loop {
             tokio::time::sleep(until_next_utc(REGISTRY_GC_UTC.0, REGISTRY_GC_UTC.1)).await;
             // 旧版 manifest(index + 子)の期限切れを**先に**、blob 回収を後に —
-            // manifest を消す判断は平台の keep 窓だけが行う(--delete-untagged は廃止。§10-E)。
+            // manifest を消す判断はプラットフォームの keep 窓だけが行う(--delete-untagged は廃止。§10-E)。
             if let Err(e) = crate::services::registry::protect_and_expire_manifests(&state).await {
                 tracing::warn!(error = ?e, "gc: registry manifest 期限切れ failed");
             }
@@ -365,22 +365,22 @@ fn spawn_registry_gc(state: AppState) {
 /// `docker image prune -f` は dangling しか消さないので `<repo>:<tag>` の残骸には当たらない)。
 ///
 /// **問い合わせの順序が命**(`protect_and_expire_manifests` と同じ規律):
-/// 1. **先に**イメージを列挙する(= 古い快照)
-/// 2. **後で** keep 窓 / `deploying` を DB から読む(= 新しい快照。単一トランザクション)
+/// 1. **先に**イメージを列挙する(= 古いスナップショット)
+/// 2. **後で** keep 窓 / `deploying` を DB から読む(= 新しいスナップショット。単一トランザクション)
 ///
 /// 逆順にすると、その間に成功して現役化した digest が「keep に無いが列挙にある」状態になり、
 /// **現役イメージを消してしまう**。この向きなら、列挙より後に作られた service / 現役化した
-/// digest は必ず新しい快照の keep に載る(あるいはそもそも列挙に居ない)ので安全側に倒れる
+/// digest は必ず新しいスナップショットの keep に載る(あるいはそもそも列挙に居ない)ので安全側に倒れる
 /// — 取り逃した古い残骸は翌日回収される。
 ///
 /// 「最近の deploy のイメージを消さない」年齢窓は `host_image_plan` が `deploys.created_at` で
 /// 判断する(registry 側の 48h 下限と同じ時間源。docker の `ImageSummary.created` は
 /// イメージ自身のビルド時刻なので使えない)。best-effort:失敗は log のみで blob 回収は続行する。
 async fn prune_host_images(state: &AppState) {
-    // ① 列挙(古い快照)。ここで撮った参照だけが候補。**空でも先に進む** — ④の孤児 repo 掃除は
+    // ① 列挙(古いスナップショット)。ここで撮った参照だけが候補。**空でも先に進む** — ④の孤児 repo 掃除は
     //    宿主イメージの有無とは無関係(宿主が綺麗でも registry に孤児が残り得る)。
     let refs = crate::services::docker::list_service_image_refs(state).await;
-    // ② 計画を読む(新しい快照・単一トランザクション)。読めないなら**何もしない**
+    // ② 計画を読む(新しいスナップショット・単一トランザクション)。読めないなら**何もしない**
     //    (現役を守れないまま消すより残す方が安全 = fail-closed)。
     let plan =
         match crate::services::registry::host_image_plan(state, HOST_IMAGE_RECENT_SECS).await {
@@ -400,7 +400,7 @@ async fn prune_host_images(state: &AppState) {
         }
     }
     // ④ DB に service 行が無い registry repo(deploy-source の取得が purge を追い越した残骸など)。
-    //    `plan.keeps` のキーが「存在する service」の単一快照なので、それを既知集合として使う。
+    //    `plan.keeps` のキーが「存在する service」の単一スナップショットなので、それを既知集合として使う。
     let known: Vec<uuid::Uuid> = plan.keeps.keys().copied().collect();
     match crate::services::registry::delete_orphan_repos(state, &known).await {
         Ok(n) if n > 0 => tracing::info!(removed = n, "gc: 孤児 registry repo を掃除した"),

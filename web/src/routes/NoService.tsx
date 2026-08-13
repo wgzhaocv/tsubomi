@@ -5,9 +5,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Footer } from "@/components/ui/footer";
 
-// 存在しない / 停止・削除済みの子域(`<sub>.<domain>` に service が無い)に来たときの着地点。
+// 存在しない / 停止・削除済みのサブドメイン(`<sub>.<domain>` に service が無い)に来たときの着地点。
 // traefik の catch-all router(route.rs::write_catchall)が apex の `/noservice` へ 302 する。
-// 来訪者は平台ユーザとは限らない(=守衛の外・ログイン不要)。NotFound と同じ「中央カード +
+// 来訪者はプラットフォームユーザとは限らない(=守衛の外・ログイン不要)。NotFound と同じ「中央カード +
 // 島の樹冠」構図でブランドを保ちつつ、「ここにはアプリが無い → つぼみで自分の web app を作れる」
 // と前向きに案内する。
 export default function NoService() {

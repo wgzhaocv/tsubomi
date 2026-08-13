@@ -1,6 +1,6 @@
-//! `.github/workflows/tsubomi-deploy.yml` のテンプレート(平台が単一真源として配る)。
+//! `.github/workflows/tsubomi-deploy.yml` のテンプレート(プラットフォームが単一真源として配る)。
 //!
-//! 平台は GitHub に一切触れない:このテンプレを service create のレスポンスで返し、
+//! プラットフォームは GitHub に一切触れない:このテンプレを service create のレスポンスで返し、
 //! CLI(ユーザの gh)/ web(コピペ)がユーザの repo に置く。テンプレは gh の
 //! `vars` / `secrets` を参照するので、service ごとの展開は不要な**静的テキスト**
 //! (service_id / registry / hook_url / platforms はすべて gh variable で渡る)。
@@ -18,7 +18,7 @@ on:
   workflow_dispatch: {}
 jobs:
   deploy:
-    # ランナーは gh variable TSUBOMI_RUNNER で決まる(service create 時に平台が platforms から
+    # ランナーは gh variable TSUBOMI_RUNNER で決まる(service create 時にプラットフォームが platforms から
     # 導出して設定。arm64 のみ → ubuntu-24.04-arm 原生 = Rust 等のビルドが QEMU 比で桁違いに速い)。
     # 変数が無い古い repo は ubuntu-latest(amd64 + QEMU)へフォールバック。手動切替も
     # `gh variable set TSUBOMI_RUNNER --body ubuntu-24.04-arm` だけ(yml は不変)。
@@ -32,7 +32,7 @@ jobs:
           registry: ${{ vars.TSUBOMI_REGISTRY }}
           username: ${{ secrets.TSUBOMI_REGISTRY_USER }}
           password: ${{ secrets.TSUBOMI_REGISTRY_PASS }}
-      # build:Dockerfile があればそれ、無ければ nixpacks。--platform は平台が公布する
+      # build:Dockerfile があればそれ、無ければ nixpacks。--platform はプラットフォームが公布する
       # arch(既定 linux/arm64)。Dockerfile 経路は GHA 層キャッシュで再 build 数十秒
       # (nixpacks 経路はキャッシュ無しで毎回フル build)。
       - id: build
@@ -97,10 +97,10 @@ pub fn runner_for(platforms: &str) -> &'static str {
 }
 
 /// GitHub 連携の手順コマンド列(ユーザがリポジトリ直下で実行 / AI が実行 / web が表示)。
-/// 平台が **単一真源**として組み立て、CreateServiceResp.setup_commands に載せる
+/// プラットフォームが **単一真源**として組み立て、CreateServiceResp.setup_commands に載せる
 /// (CLI / web はこの文字列をそのまま使い、各々で gh コマンドを再構築しない)。
 ///
-/// 安全のための 2 点(CLI の自動実行路径 commands/service.rs と揃える):
+/// 安全のための 2 点(CLI の自動実行パス commands/service.rs と揃える):
 /// - **`-R "$TSUBOMI_REPO"` を全 gh コマンドに付ける**:カレントが別の GitHub repo でも、
 ///   secret/variable が必ず新しい tsubomi repo に書かれる(既存 repo への誤書込み防止)。
 /// - **secret は `printf | gh secret set` の stdin 渡し**(argv に値を載せない = `gh`
@@ -172,7 +172,7 @@ mod tests {
             "vars.TSUBOMI_SERVICE_ID",
             "vars.TSUBOMI_HOOK_URL",
             "vars.TSUBOMI_PLATFORMS",
-            // ランナーは gh variable で切替(平台が platforms から導出。yml は不変のまま)。
+            // ランナーは gh variable で切替(プラットフォームが platforms から導出。yml は不変のまま)。
             "vars.TSUBOMI_RUNNER",
             "secrets.TSUBOMI_DEPLOY_KEY",
             "secrets.TSUBOMI_REGISTRY_USER",

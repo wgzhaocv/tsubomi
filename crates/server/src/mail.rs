@@ -1,4 +1,4 @@
-//! メール送信(Resend SDK)。M4 ガバナンスの通知路:owner 解除 / 磁盘水位告警 / owner
+//! メール送信(Resend SDK)。M4 ガバナンスの通知路:owner 解除 / ディスク水位告警 / owner
 //! 危険操作の検証コード。**resend-rs(rustls-tls)** で送る(以前は手書き reqwest POST)。
 //! 本文は React Email から焼いた静的 HTML(`mail/templates/*.html`)を {{var}} 置換して
 //! html に、現行の素文面を text fallback に。

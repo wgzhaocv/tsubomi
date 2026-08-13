@@ -6,7 +6,7 @@ import { Title } from "@/components/ui/title";
 import { useMeQuery } from "@/lib/auth";
 
 // owner 専用ルートの守衛。owner 以外には「owner だけ」の代替画面を出す。
-// 表示制御はただの UX — 後端が 403 で守る(設計 v2 §7)。サイドメニューも
+// 表示制御はただの UX — バックエンドが 403 で守る(設計 v2 §7)。サイドメニューも
 // owner 限定で出すので、ここに来るのは URL 直打ち / 降格時くらい。
 // me 取得中(undefined)は子を描画(各ページが自分で読み込み表示する)。
 export function RequireOwner() {

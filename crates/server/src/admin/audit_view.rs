@@ -1,5 +1,5 @@
 //! 監査ログ閲覧(M4 S4、owner 専用・web)。書く一方だった audit_log を読む口を足す
-//! (「監査 = ガバナンス可視性のもう半分」第 4 層 §7)。キーセット分頁(id DESC、OFFSET 不使用)+
+//! (「監査 = ガバナンス可視性のもう半分」第 4 層 §7)。キーセットページング(id DESC、OFFSET 不使用)+
 //! action の前方一致フィルタ。actor / target_user は真名で join、target_resource は UUID のまま。
 
 use crate::admin::require_owner_web;
@@ -18,7 +18,7 @@ const MAX_LIMIT: i64 = 200;
 
 #[derive(Deserialize)]
 pub struct AuditQuery {
-    /// この id より小さい行を返す(キーセット分頁。未指定 = 最新から)。
+    /// この id より小さい行を返す(キーセットページング。未指定 = 最新から)。
     pub cursor: Option<i64>,
     /// 1 頁の件数(既定 50、上限 200)。
     pub limit: Option<i64>,

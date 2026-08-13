@@ -55,18 +55,18 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(config).await?;
     // ディスク指標(admin のリソース概要)と水位警告は `df <volumes_dir>` を見る
-    // (metrics::disk_metrics — gc の警告と共有)。目録が無いと df が失敗して None になり、
+    // (metrics::disk_metrics — gc の警告と共有)。ディレクトリが無いと df が失敗して None になり、
     // 概要が「—」になるだけでなく **警告メールも一切飛ばない**(gc は None で早期 return)。
     // volumes_dir / trash_dir は「最初の volume 作成 / 最初の削除」まで作られないので、
-    // 全新初期化の直後は必ず不在 = その窓の間だけ監視が黙る。起動時に作って窓を閉じる。
+    // 新規初期化の直後は必ず不在 = その窓の間だけ監視が黙る。起動時に作って窓を閉じる。
     for dir in [&state.config.volumes_dir, &state.config.trash_dir] {
         if let Err(e) = std::fs::create_dir_all(dir) {
-            tracing::warn!(dir = ?dir, error = ?e, "目録を作成できませんでした(best-effort)");
+            tracing::warn!(dir = ?dir, error = ?e, "ディレクトリを作成できませんでした(best-effort)");
         }
     }
     gc::spawn(state.clone());
-    // 注入ホスト名(= pgbouncer 証書の公開名)を per-service 私網で引けるようにする網別名の後付け。
-    // reconcile / deploy より **先**に済ませる(別名が無いまま app が起きると注入ホストが公網 DNS に
+    // 注入ホスト名(= pgbouncer 証書の公開名)を per-service プライベートネットワークで引けるようにするネットワーク別名の後付け。
+    // reconcile / deploy より **先**に済ませる(別名が無いまま app が起きると注入ホストが公開 DNS に
     // 落ちる)。別名が要らない部署では no-op。m3 設計 §11 決定 A'。
     services::network::migrate_pgbouncer_aliases(&state).await;
     // 現実(コンテナ/route)を期望状態へ収束させる第二の保険(restart=unless-stopped が第一)。
@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         let state = state.clone();
         tokio::spawn(async move { databases::log_orphan_tenant_dbs(&state).await });
     }
-    // M6 egress:テナント容器の出站を iptables で縛る(宿主 + 私網遮断・公網全 TCP 放行)。
+    // M6 egress:テナントコンテナのアウトバウンドを iptables で縛る(宿主 + プライベートネットワーク遮断・インターネット全 TCP 許可)。
     // prod Linux+root のみ実効、dev / 非 root は no-op。best-effort(失敗は次 tick で収束)。
     services::egress::reconcile(&state).await;
     // 本番 TLS:registry の push 入口(basicAuth)と apex router を traefik へ書く
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = services::route::write_apex(&state) {
         tracing::error!(error = ?e, "apex route の書き出しに失敗(本番のみ)");
     }
-    // service の無い子域(未デプロイ / 停止 / 削除済み)を /noservice へ寄せる catch-all
+    // service の無いサブドメイン(未デプロイ / 停止 / 削除済み)を /noservice へ寄せる catch-all
     // (dev=localhost では no-op。最低優先度なので service があれば必ず service が勝つ。best-effort)。
     if let Err(e) = services::route::write_catchall(&state) {
         tracing::error!(error = ?e, "catchall route の書き出しに失敗(本番のみ)");

@@ -26,7 +26,7 @@ function resourceHref(inj: Injection): string {
   return `/volumes/${inj.resource_id}`;
 }
 
-// 環境変数:この service の容器が受け取る変数を 1 画面に集約する。容器にとって注入も静的変数も
+// 環境変数:この service のコンテナが受け取る変数を 1 画面に集約する。コンテナにとって注入も静的変数も
 // 結局は同じ「環境」なので分けない(かつて注入は別タブだった)。
 //   - 注入(database / volume 由来)は最上部に「注入」バッジ付きで特別表示し、ここで追加 / 外す。
 //     volume は mount + STORAGE_PATH、database は接続文字列。失効(注入元が削除済み)は valid:false。

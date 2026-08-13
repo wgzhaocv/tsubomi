@@ -686,7 +686,7 @@ pub async fn service_rename(
     resp.json().await.context("failed to parse rename response")
 }
 
-/// JSON 応答を期待する端点の健全性チェック(CLI とサーバは同時に更新される前提 =
+/// JSON 応答を期待するエンドポイントの健全性チェック(CLI とサーバは同時に更新される前提 =
 /// 旧版互換の判定ではない。万一 JSON 以外が返ったら「版ズレの疑い」とだけ言う)。
 fn ensure_json(resp: &reqwest::Response, feature: &str) -> Result<()> {
     let is_json = resp
@@ -706,7 +706,7 @@ fn ensure_json(resp: &reqwest::Response, feature: &str) -> Result<()> {
     Ok(())
 }
 
-/// 内網の単発 TCP 探活(private service の verify 素材)。metrics と同じ旧サーバ判定
+/// 内部ネットワークへの単発 TCP 疎通確認(private service の verify 素材)。metrics と同じ旧サーバ判定
 /// (JSON でない 200 = SPA fallback = 未対応)。
 pub async fn service_probe(
     c: &reqwest::Client,
@@ -893,7 +893,7 @@ fn logs_query(tail: Option<usize>, since: Option<i64>) -> String {
 
 /// ログの follow ストリームを開く(生 Response を返す — 呼び出し側が content-type を確認して
 /// から本文を bytes_stream で消費する)。**404 等は send_ok がエラーに変換**。旧サーバ(v43 未満)は
-/// この端点が無く SPA fallback で 200 + text/html を返すので、呼び出し側は content-type を検査する。
+/// このエンドポイントが無く SPA fallback で 200 + text/html を返すので、呼び出し側は content-type を検査する。
 pub async fn service_logs_stream(
     c: &reqwest::Client,
     server_url: &str,
@@ -909,7 +909,7 @@ pub async fn service_logs_stream(
     send_ok(c.get(url).bearer_auth(token)).await
 }
 
-/// 1 発の稼働指標(`tbm service metrics`)。旧サーバ(v43 未満)は端点が無く SPA fallback の
+/// 1 発の稼働指標(`tbm service metrics`)。旧サーバ(v43 未満)はエンドポイントが無く SPA fallback の
 /// HTML を 200 で返すので、**content-type を見て**未対応を判定する(logs --follow と同じ機構)。
 /// これで「JSON だがパース失敗(schema drift 等)」を「サーバ未対応」と誤診しない。
 pub async fn service_metrics(

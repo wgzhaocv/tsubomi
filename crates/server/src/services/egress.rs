@@ -1,5 +1,5 @@
-//! M6 egress(出站隔離):テナント容器の宛先を iptables で縛る。**宿主機 + 全私網を遮断、公網は
-//! 全 TCP 放行**。同桥東西向(app↔infra)は同 subnet 宛 RETURN で例外放行。脅威モデル・規則の根拠は
+//! M6 egress(アウトバウンド隔離):テナントコンテナの宛先を iptables で縛る。**ホスト + 全プライベートネットワークを遮断、インターネットは
+//! 全 TCP 許可**。同桥東西向(app↔infra)は同 subnet 宛 RETURN で例外許可。脅威モデル・規則の根拠は
 //! `doc/paas-egress-design.md`(§1-3)。
 //!
 //! **prod Linux + root のみ**動く(server は root の host プロセス)。dev macOS / 非 root は no-op。
@@ -7,9 +7,9 @@
 //! 冪等)。起動時 + reconcile tick + コンテナ起動の直前(`docker::run`)に呼ぶ。
 //!
 //! 構成:**外殻チェイン + 内実 A/B 二重バッファ**。
-//!   - 外殻 `TSUBOMI-EGRESS`(FORWARD = 容器 → 他網):DOCKER-USER から jump。中身は
+//!   - 外殻 `TSUBOMI-EGRESS`(FORWARD = コンテナ → 他網):DOCKER-USER から jump。中身は
 //!     「アクティブな内実チェインへの jump 1 本」だけ。
-//!   - 外殻 `TSUBOMI-INGRESS-HOST`(INPUT = 容器 → 宿主機の任意 IP):INPUT 先頭へ jump。同上。
+//!   - 外殻 `TSUBOMI-INGRESS-HOST`(INPUT = コンテナ → ホストの任意 IP):INPUT 先頭へ jump。同上。
 //!   - 内実 `…-A` / `…-B`:実際の規則本体。毎回**非アクティブ側**へ全規則を組み立ててから、
 //!     外殻の jump を 1 コマンド(`-R` = 原子的な単一規則置換)で新しい側へ切り替える。
 //!
@@ -20,7 +20,7 @@
 //! 入口 jump は「無ければ挿す」で冪等。旧レイアウト(外殻に規則がフラットに並ぶ)からの移行は
 //! `swap_refill` が吸収する:jump を先頭に挿してから残骸を**末尾から逆順**に払う(inner の
 //! RETURN は外殻の残骸も評価するため、逆順で「RETURN 類が DROP 類より前」の並びを保ちながら
-//! 消す = 移行中も丢包しない)。
+//! 消す = 移行中もパケットロスしない)。
 
 use crate::services::network;
 use crate::state::AppState;
@@ -29,17 +29,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-/// FORWARD(容器 → 他網)を縛る外殻チェイン(DOCKER-USER から jump される)。
+/// FORWARD(コンテナ → 他網)を縛る外殻チェイン(DOCKER-USER から jump される)。
 const FWD_CHAIN: &str = "TSUBOMI-EGRESS";
-/// INPUT(容器 → 宿主機)を縛る外殻チェイン。
+/// INPUT(コンテナ → ホスト)を縛る外殻チェイン。
 const HOST_CHAIN: &str = "TSUBOMI-INGRESS-HOST";
 /// FWD の内実チェイン(A/B 二重バッファ。iptables のチェイン名上限 28 字に収まる)。
 const FWD_INNER: [&str; 2] = ["TSUBOMI-EGRESS-A", "TSUBOMI-EGRESS-B"];
 /// INPUT の内実チェイン(同上)。
 const HOST_INNER: [&str; 2] = ["TSUBOMI-INGRESS-HOST-A", "TSUBOMI-INGRESS-HOST-B"];
 
-/// 遮断する私網(宿主 LAN / docker / tailscale CGNAT / link-local・クラウドメタデータ)。
-/// 公網(これ以外)はチェイン末尾の RETURN を抜けて放行 = 全 TCP 出站可。
+/// 遮断するプライベートネットワーク(宿主 LAN / docker / tailscale CGNAT / link-local・クラウドメタデータ)。
+/// インターネット(これ以外)はチェイン末尾の RETURN を抜けて許可 = 全 TCP アウトバウンド可。
 const PRIVATE_NETS: [&str; 5] = [
     "10.0.0.0/8",
     "172.16.0.0/12",
@@ -97,8 +97,8 @@ async fn reconcile_inner(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// FORWARD(容器 → 他網)の規則本体:established 放行 → 同桥(同 subnet)RETURN → 私網 DROP →
-/// 末尾 RETURN(公網は素通りして DOCKER-FORWARD で放行)。
+/// FORWARD(コンテナ → 他網)の規則本体:established 許可 → 同桥(同 subnet)RETURN → プライベートネットワーク DROP →
+/// 末尾 RETURN(インターネットは素通りして DOCKER-FORWARD で許可)。
 fn fwd_rules(pool: &str, subnets: &[String]) -> Vec<Vec<String>> {
     let mut rules: Vec<Vec<String>> = Vec::with_capacity(subnets.len() + PRIVATE_NETS.len() + 2);
     rules.push(strs(&[
@@ -114,7 +114,7 @@ fn fwd_rules(pool: &str, subnets: &[String]) -> Vec<Vec<String>> {
     rules
 }
 
-/// INPUT(容器 → 宿主機の任意 IP)の規則本体:established 放行 → pool 源は全 DROP
+/// INPUT(コンテナ → ホストの任意 IP)の規則本体:established 許可 → pool 源は全 DROP
 /// (sshd / 裸PG / redis / panel…)。
 fn host_rules(pool: &str) -> Vec<Vec<String>> {
     vec![
@@ -160,7 +160,7 @@ async fn swap_refill(outer: &str, inner: [&str; 2], rules: &[Vec<String>]) -> an
 
     // 残骸掃除は**末尾から逆順**に消す。inner 末尾の RETURN は外殻へ戻って残骸も評価するため、
     // 先頭(位置 2)から消すと「RETURN 類が先に消え DROP 類だけ残る」中間態ができ、同桥東西向 /
-    // established が残骸 DROP に丢包される(審査指摘)。逆順なら残骸は常に「元の布局の前綴」
+    // established が残骸 DROP にパケットロスされる(審査指摘)。逆順なら残骸は常に「元のレイアウトの接頭辞」
     // (RETURN 類が DROP 類より前)を保ち、inner を RETURN で抜けた包が残骸で落ちることはない。
     // 削除失敗は無視(best-effort — 残っても次 tick の同経路で再収束)。
     for pos in (2..=last).rev() {
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn fwd_rules_shape_is_stable() {
-        // established → 同桥 RETURN(subnet 数)→ 私網 DROP(5)→ 末尾 RETURN の順序。
+        // established → 同桥 RETURN(subnet 数)→ プライベートネットワーク DROP(5)→ 末尾 RETURN の順序。
         let subnets = vec!["172.20.1.0/24".to_string(), "172.20.2.0/24".to_string()];
         let rules = fwd_rules("172.20.0.0/16", &subnets);
         assert_eq!(rules.len(), 1 + 2 + 5 + 1);

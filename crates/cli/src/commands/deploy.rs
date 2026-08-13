@@ -15,7 +15,7 @@ use tsubomi_shared::{
 };
 
 /// `tbm deploy`(GitHub 非依存の退路)。ローカルで build + push して自分で hook を叩く。
-/// 平台は build しない(決定 #3)— build はここ(ユーザ機の docker)。CI が無い / 緊急時に使う。
+/// プラットフォームは build しない(決定 #3)— build はここ(ユーザ機の docker)。CI が無い / 緊急時に使う。
 #[derive(Args)]
 pub struct DeployArgs {
     /// ローカルで build + push して hook を叩く(GitHub 非依存の退路。`--watch` と排他)
@@ -98,7 +98,7 @@ pub async fn run(
         run_preflight(&args.context, port);
     }
 
-    // 2. build + push(平台は build しない。ここはユーザ機の docker buildx)。
+    // 2. build + push(プラットフォームは build しない。ここはユーザ機の docker buildx)。
     let git_sha = tag();
     let image_tag = format!("{}/{}:{}", dc.registry.host, dc.service_id, git_sha);
     docker_login_if_needed(&dc)?;
@@ -181,7 +181,7 @@ async fn run_source(
                 .is_some_and(|a| a.code == "not_found")
             {
                 bail!(
-                    "デプロイ端点が見つかりません。サーバがこの機能(deploy --image / --dockerfile)に未対応の可能性があります。プラットフォーム側のサーバ更新が必要です"
+                    "デプロイエンドポイントが見つかりません。サーバがこの機能(deploy --image / --dockerfile)に未対応の可能性があります。プラットフォーム側のサーバ更新が必要です"
                 );
             }
             return Err(e);
@@ -190,7 +190,7 @@ async fn run_source(
 
     if args.watch {
         // 完走待ち。公開サービスは URL + 子リソース検証まで(GitHub 経路の --watch と同じ着地点。
-        // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は完走待ち + 内網探活
+        // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は完走待ち + 内部ネットワークの疎通確認
         // (wait_deploy_only。run_verify の private 分岐と同じ着地だが、deploy 文脈の
         // status/git_sha 込みの JSON 形を保つためこちらを使う)。
         // 対象は UUID で渡す(取得待ちの間の rename に耐える — resolve が UUID を素通し)。
@@ -240,7 +240,7 @@ async fn run_source(
 
 /// `tbm deploy --watch`:GitHub 経路を一括で回す。手元 repo で HEAD を push(未 push 時)→
 /// その commit の Actions run を探して追跡 → CI 成功後、その sha のデプロイ完走を待って検証まで。
-/// 平台は GitHub に触れない設計なので、ここでも `gh` を叩くのは**ユーザ自身**(create --github と同じ)。
+/// プラットフォームは GitHub に触れない設計なので、ここでも `gh` を叩くのは**ユーザ自身**(create --github と同じ)。
 async fn run_watch(
     args: DeployArgs,
     server: Option<String>,
@@ -260,7 +260,7 @@ async fn run_watch(
         );
     }
 
-    // 対象 service(検証は UUID で持ち回る — CI 待ち中の rename に耐える。表示名は文案用)。
+    // 対象 service(検証は UUID で持ち回る — CI 待ち中の rename に耐える。表示名は文言用)。
     let (id, svc_name) = resolve_service(&c, &server_url, &token, args.service.as_deref()).await?;
 
     // preflight(既定 on):CI が同じ repo をビルドするので push 前に落とし穴を警告する。
@@ -353,7 +353,7 @@ async fn run_watch(
     // run URL は追跡先として常に出す(捕捉側が持てるよう stderr へ)。
     eprintln!("Actions の実行: {}", run.url);
 
-    // 3) run の完了を待つ。text は `gh run watch`(ログを継承、時間管理は gh)、json は静かに輪詢。
+    // 3) run の完了を待つ。text は `gh run watch`(ログを継承、時間管理は gh)、json は静かにポーリング。
     if json {
         wait_for_run_conclusion(&run.id, repo.as_deref(), remaining()).await?;
     } else {
@@ -392,7 +392,7 @@ struct GhRun {
     url: String,
 }
 
-/// commit sha の run が現れるまで輪詢する(push 直後は登録に数秒かかる)。timeout 超過はエラー。
+/// commit sha の run が現れるまでポーリングする(push 直後は登録に数秒かかる)。timeout 超過はエラー。
 async fn wait_for_run(sha: &str, repo: Option<&str>, timeout_secs: u64) -> Result<GhRun> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
@@ -424,7 +424,7 @@ async fn wait_for_run(sha: &str, repo: Option<&str>, timeout_secs: u64) -> Resul
     }
 }
 
-/// json モードで run の結論を輪詢する(text は `gh run watch` に任せる)。CI 失敗は非零で bail。
+/// json モードで run の結論をポーリングする(text は `gh run watch` に任せる)。CI 失敗は非零で bail。
 async fn wait_for_run_conclusion(
     run_id: &str,
     repo: Option<&str>,
@@ -727,7 +727,7 @@ fn infer_service_id_from_repo() -> Option<String> {
 }
 
 /// --service 名で解決、省略時はサービスが 1 つだけならそれ(複数 / 0 はエラー)。
-/// 表示名も返す(成功文案の `tbm service verify <名前> --wait` 指引に使う)。
+/// 表示名も返す(成功文言の `tbm service verify <名前> --wait` 指引に使う)。
 /// 名前指定時は共有の `resolve_service_id` に委譲(not_found の文言・code を 1 箇所に保つ)。
 async fn resolve_service(
     c: &reqwest::Client,

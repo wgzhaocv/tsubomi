@@ -2,9 +2,9 @@
 //! DDL(CREATE DATABASE / ROLE)、パスワード rotate、pg_dump / restore、
 //! web SQL 用の human role 臨時接続。管制面 DB(pg-platform)はここには出てこない。
 //!
-//! 識別子は全て平台が生成し `is_safe_ident` で二重チェックする(DDL は識別子を
+//! 識別子は全てプラットフォームが生成し `is_safe_ident` で二重チェックする(DDL は識別子を
 //! パラメータ化できないので文字列埋め込みになる)。パスワードは base64url
-//! (英数字 + `-_`)で、SQL 字面量にも URL にもそのまま入る(`'` を含まない)。
+//! (英数字 + `-_`)で、SQL リテラルにも URL にもそのまま入る(`'` を含まない)。
 
 use crate::error::{AppError, AppResult};
 use anyhow::anyhow;
@@ -63,7 +63,7 @@ fn check_idents(names: &DbNames) -> AppResult<()> {
     Ok(())
 }
 
-/// パスワードが SQL 字面量に安全か(base64url 由来なので `'` は本来含まれない。念のため)。
+/// パスワードが SQL リテラルに安全か(base64url 由来なので `'` は本来含まれない。念のため)。
 fn check_password(pw: &str) -> AppResult<()> {
     if pw.is_empty()
         || !pw
@@ -95,7 +95,7 @@ pub(crate) fn short_id() -> String {
     s
 }
 
-/// 32 文字の base64url パスワード(SQL 字面量にも URL にもそのまま入る)。
+/// 32 文字の base64url パスワード(SQL リテラルにも URL にもそのまま入る)。
 pub fn gen_password() -> String {
     tsubomi_shared::random_b64(24)
 }
@@ -190,7 +190,7 @@ pub async fn create_database(
 
     exec(pool, format!("CREATE ROLE {owner} NOLOGIN")).await?;
     exec(pool, format!("CREATE DATABASE {dbname} OWNER {owner}")).await?;
-    // 跨库隔离:他のテナント role が PUBLIC 経由で連がれないように。
+    // データベース間の隔離:他のテナント role が PUBLIC 経由で連がれないように。
     exec(
         pool,
         format!("REVOKE CONNECT ON DATABASE {dbname} FROM PUBLIC"),
@@ -335,7 +335,7 @@ pub async fn dump_database(admin_url: &str, dbname: &str, dump_path: &Path) -> A
 }
 
 /// fork 用:`pg_dump 元 | psql 新` をパイプ直結で流す(中間ファイル無し。dump と restore が
-/// 並走するので大 DB の墙鐘時間は落盤中転の約半分)。呼び手(fork)は timeout でこの future を
+/// 並走するので大きな DB でも実時間は中間ファイル経由の約半分)。呼び手(fork)は timeout でこの future を
 /// 途中 drop し得るので `kill_on_drop` を両方に付け、「T 秒で報告する」ではなく「T 秒で止める」
 /// にする(孤児 pg_dump/psql が共有ホストで走り続けない)。pg_dump には `--lock-wait-timeout`
 /// も掛ける(ロック待ちで固まった backend はローカル kill では死なないため、待ち自体を有界に)。
@@ -445,7 +445,7 @@ pub async fn dump_url(conn_url: &str, dump_path: &Path) -> AppResult<()> {
     if let Some(parent) = dump_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // **一時名へ書いて成功後に rename**(同一目録なので原子的)。最終パスへ直書きすると、途中で
+    // **一時名へ書いて成功後に rename**(同一ディレクトリなので原子的)。最終パスへ直書きすると、途中で
     // プロセスが死んだとき(panic="abort" / OOM / ホスト再起動)**正規の名前で切り詰められた dump**が
     // 残り、pg_dump の exit code も見られないので gc の成功判定も素通りする。DR でそれを
     // `ON_ERROR_STOP=1` で流し込むと「旧 DB を退避した後に途中で止まる」= 最悪の姿になる。

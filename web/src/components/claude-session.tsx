@@ -133,7 +133,7 @@ function UrlLine({ typing, onDone }: { typing: boolean; onDone: () => void }) {
     return () => window.clearTimeout(t);
   }, [typing, onDone]);
   // ドメインは実際に開いているデプロイ先から取る(ハードコードしない)。サービスは
-  // 平台ドメインの一級子域(例:<名前>.<このサイトのドメイン>)。
+  // プラットフォームドメインの直下のサブドメイン(例:<名前>.<このサイトのドメイン>)。
   return (
     <div className="flex animate-[animal-fade-in_0.4s_ease_both] items-center gap-2 pl-5">
       <Globe className="size-4 shrink-0 text-[#7cc47c]" />

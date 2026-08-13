@@ -7,7 +7,7 @@ tsubomi(蕾)= 社内 PaaS(基礎版 Vercel + Neon)。ユーザ(多くは非エ�
 **このプラットフォーム(tsubomi)のアーキテクチャは {{HOST_ARCH}} です。** デプロイするイメージは
 このアーキテクチャで動く必要がある(`tbm whoami` / `tbm --help` の出力でも確認できる)。
 
-> このファイルを読んだら、まず `tbm whoami` で疎通・ログイン状態・プラットフォーム/本機のアーキを
+> このファイルを読んだら、まず `tbm whoami` で疎通・ログイン状態・プラットフォーム / 手元のマシンのアーキを
 > 確かめてから始める。
 
 ## 0. 絶対に外さない 3 点
@@ -18,7 +18,7 @@ tsubomi(蕾)= 社内 PaaS(基礎版 Vercel + Neon)。ユーザ(多くは非エ�
    (`tbm service verify` が子リソースまでまとめて見る)。
 2. **注入はデプロイの「前」に行う。** 値はコンテナ起動の瞬間に解決される。注入し忘れたまま
    デプロイすると env が無い。**cache** の rotate も再デプロイして初めて効く(db の rotate は
-   human role だけなので走行中の app は無影響 — §「順序:注入 → デプロイ」)。
+   human role だけなので実行中の app は無影響 — §「順序:注入 → デプロイ」)。
 3. **外向き・破壊的な操作はユーザに一言断ってから。** GitHub repo の作成、リソース削除など。
 
 CLI の出力は捕捉時(非 TTY)に自動で JSON。`jq` で id を拾える。エラーは `{"error","code"}` を
@@ -53,22 +53,22 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 > `tbm service rename <名前> <新名>`(subdomain = 公開 URL / GitHub repo は不変)/
 > `tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`(**次のデプロイから反映**)/
 > `tbm service stateful <名前>`(false→true の一方向のみ)。
-> 作成直後の回显に port / visibility / stateful / memory が出るので、port を間違えたらその場で作り直す。
+> 作成直後の表示に port / visibility / stateful / memory が出るので、port を間違えたらその場で作り直す。
 >
 > **作り直しは delete → 同名 create でそのまま通る**:`tbm service delete` は**ゴミ箱への
 > soft delete** だが、ゴミ箱は名前を占有しない。`tbm trash purge` を挟む必要はない。
-> 注意点は復元側:同名で作り直した後に古い方を `tbm trash restore` すると活体と衝突して 409 になる
-> (先に活体を rename か delete)。同名がゴミ箱に複数堆積したら `tbm trash list` の id で特定する。
+> 注意点は復元側:同名で作り直した後に古い方を `tbm trash restore` すると稼働中の同名リソースと衝突して 409 になる
+> (先に稼働中の方を rename か delete)。同名がゴミ箱に複数堆積したら `tbm trash list` の id で特定する。
 
 - service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 連携は既定**
   (repo/secret/variable と workflow 設定までこの 1 回で済む。secret は stdin 直達で
   出力に出ない。§4 参照)。gh が無ければ `setup_commands` が返る(手動 fallback)。連携せず
   resource だけ作るなら `--no-github`(応答に deploy_key / registry pass の**秘密が平文で載る** —
-  必要なときだけ)。**平台は GitHub に触れない** — gh を使うのはあなた。
+  必要なときだけ)。**プラットフォームは GitHub に触れない** — gh を使うのはあなた。
   - 任意フラグ:`--port <PORT>`(listen ポート。既定 8080。**8080 以外を指定すると公開範囲の既定が
-    `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(自帯 DB 等の
-    有状態コンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータ目録を保護)/
-    `--memory <MiB>`(硬上限。既定 1024)/ `--cpus <N>`。**port 以外は作成後にも変更できる**(上の
+    `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(持ち込み DB 等の
+    ステートフルコンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータディレクトリを保護)/
+    `--memory <MiB>`(上限。既定 1024)/ `--cpus <N>`。**port 以外は作成後にも変更できる**(上の
     一覧。OOM なら `tbm service limits <名前> --memory <MiB>` を上げて再デプロイ — 作り直し不要)。
 - database:`tbm db create <名前>`
   - **dev/検証環境用の DB が欲しい → `tbm db fork <元> <新名> [--schema-only]`**(この瞬間の
@@ -84,10 +84,10 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 | database | `tbm inject <db名> --into <service名>` | `DATABASE_URL` |
 | volume | `tbm inject <vol名> --into <service名> [--mount /data/foo]` | `STORAGE_PATH` |
 | cache | `tbm inject <cache名> --into <service名>` | `REDIS_URL` + `REDIS_KEY_PREFIX` |
-| service | `tbm inject <svc名> --into <service名>` | `<名前>_URL`(内部直連 http)+ `<名前>_HOST` / `<名前>_PORT` |
+| service | `tbm inject <svc名> --into <service名>` | `<名前>_URL`(内部直接接続 http)+ `<名前>_HOST` / `<名前>_PORT` |
 
-service 注入 = 別 app への**内部直連**(公網を通らない。同一 owner 限定)。HTTP app は `_URL` を
-そのまま使い、**非 HTTP(自帯 postgres 等)は `_HOST` / `_PORT` で自分のスキームの接続文字列を組む**
+service 注入 = 別 app への**内部直接接続**(インターネットを通らない。同一 owner 限定)。HTTP app は `_URL` を
+そのまま使い、**非 HTTP(持ち込み postgres 等)は `_HOST` / `_PORT` で自分のスキームの接続文字列を組む**
 (例 `postgres://user:pass@${MYPG_HOST}:${MYPG_PORT}/db` — パスワードは自分が env で設定したもの)。
 
 確認:`tbm service status <service名>` の `injections` がすべて `valid: true`。
@@ -152,15 +152,15 @@ tbm env list <名前> --resolved   # DATABASE_HOST の値を見る
 迷ったら **起動時ではなくリクエスト時に DB へ繋ぐ**と、失敗が「起動直後 exit」ではなく
 レスポンスのエラーに出て切り分けやすい。
 
-### 3.2 自帯コンテナ(managed database で足りない時:拡張入り Postgres・meilisearch 等)
+### 3.2 持ち込みコンテナ(managed database で足りない時:拡張入り Postgres・meilisearch 等)
 
-平台の database(pg-tenant)には**拡張を入れられない**。pgvector 等が要るときは、DB を
+プラットフォームの database(pg-tenant)には**拡張を入れられない**。pgvector 等が要るときは、DB を
 **stateful service として自分で立てて**リンクする:
 
 ```
 tbm service create mypg --port 5432 --stateful        # 非8080 → 自動で private(公開URLなし)
 tbm volume create mypg-data
-tbm inject mypg-data --into mypg --mount /var/lib/postgresql/data   # データ目録の永続化(必須!)
+tbm inject mypg-data --into mypg --mount /var/lib/postgresql/data   # データディレクトリの永続化(必須!)
 tbm env set mypg POSTGRES_PASSWORD=<自分で決める>
 tbm deploy --image pgvector/pgvector:pg17 --service mypg   # サーバ側で pull(docker/GitHub 不要)
 tbm inject mypg --into <app名>                         # app に MYPG_HOST / MYPG_PORT が入る
@@ -170,17 +170,17 @@ tbm inject mypg --into <app名>                         # app に MYPG_HOST / MY
 Dockerfile を書いて `tbm deploy --dockerfile ./Dockerfile --service mypg`(これもサーバ側で
 ビルド — §4 の第 3 経路)。
 
-- **volume 注入を忘れない**:コンテナはデプロイごとに作り直される。データ目録を volume に
+- **volume 注入を忘れない**:コンテナはデプロイごとに作り直される。データディレクトリを volume に
   マウントしないと**再デプロイでデータ全損**。マウント先はそのソフトのデータパスに合わせる
   (postgres = `/var/lib/postgresql/data`)。
-- **`--stateful` を忘れない**:無いと再デプロイ時に新旧コンテナが同じデータ目録を同時に開き
+- **`--stateful` を忘れない**:無いと再デプロイ時に新旧コンテナが同じデータディレクトリを同時に開き
   **データ破壊**になり得る。stateful のデプロイ / 停止は数秒の瞬断がある(仕様)。
 - 接続文字列は app 側で `_HOST` / `_PORT` + 自分の設定したパスワードで組む(§3 の表)。
-  中身(ユーザ・スキーマ・チューニング・升級)は**全部ユーザの責任** — 平台が保証するのは
+  中身(ユーザ・スキーマ・チューニング・アップグレード)は**全部ユーザの責任** — プラットフォームが保証するのは
   「活きている・データが在る・app から届く」まで。
-- 外部(手元の psql 等)からは繋げない(公網入口は HTTP のみ)。操作は
+- 外部(手元の psql 等)からは繋げない(公開入口は HTTP のみ)。操作は
   `tbm service exec mypg -- psql -U postgres -c "..."` で。
-- 検証:private でも `tbm service verify` が**内網 TCP 探活**で使える(port で接続を
+- 検証:private でも `tbm service verify` が**内部ネットワークの TCP 疎通確認**で使える(port で接続を
   受けるかまで。中身の検証は `tbm service exec` で書き込み → 読み戻し)。
 
 ### 3.3 訪問者の実 IP はヘッダで来る(使うかは任意)
@@ -204,11 +204,11 @@ app は HTTP リクエストヘッダで**訪問者の実 client IP** を受け�
 2. **プラットフォームと同じアーキ({{HOST_ARCH}})の Docker が手元で動く** → 退路 `tbm deploy --local`。
 3. **既成イメージ、またはコンテキスト無し Dockerfile(FROM/RUN 等のみ、COPY・ADD 不可)で足りる**
    → `tbm deploy --image <ref>` / `--dockerfile <path>`(**サーバ側**で取得/ビルド —
-   GitHub もローカル docker も不要)。サーバが未対応なら CLI が「デプロイ端点が見つかりません
+   GitHub もローカル docker も不要)。サーバが未対応なら CLI が「デプロイエンドポイントが見つかりません
    …サーバ更新が必要」と明示エラー(code=not_found)を返すので、対応版か迷ったら実行して確かめてよい。
 
 経路 3 は **app のコードをイメージに入れられない**(COPY 不可 = 無 context の契約)。自分の
-コードをデプロイするのは 1 / 2 のみ。逆に自帯 DB・valkey・meilisearch 等の**インフラ容器は
+コードをデプロイするのは 1 / 2 のみ。逆に持ち込み DB・valkey・meilisearch 等の**インフラコンテナは
 経路 3 が最短**(§3.2)。
 
 **1 と 2 が満たせず、経路 3 でも足りない**(= app のコードをビルドする必要がある)ときは、
@@ -219,7 +219,7 @@ app は HTTP リクエストヘッダで**訪問者の実 client IP** を受け�
 ### 既定:GitHub 経路(`gh` を使う。CI が build/push)
 
 service を **§2 で作成済み(gh が使える環境)**なら GitHub 連携は完了している(既定 —
-フラグ不要):平台が `gh` 経由で repo 作成・secret / variable 設定・
+フラグ不要):プラットフォームが `gh` 経由で repo 作成・secret / variable 設定・
 `.github/workflows/tsubomi-deploy.yml` の書き出しまで実施済み(秘密は stdin 渡しで `ps` にも
 出力にも出ない。**Windows / mac / Linux どの shell でも動く**。create 出力 JSON の
 `github.configured` が true なら完了)。あとは `git add/commit/push` → GitHub Actions が自動でビルド &
@@ -227,7 +227,7 @@ service を **§2 で作成済み(gh が使える環境)**なら GitHub 連携�
 
 **一括で回すなら `tbm deploy --watch`(推奨)。** `git add/commit` 後にこれ 1 本で:未 push なら
 push → GitHub Actions の run を追跡(URL を表示)→ CI 成功後、その commit のデプロイ完走を待って
-検証(§5 の子リソース検証まで)を自動でやる。手で `git push → run 確認 → status 輪詢 → verify` を
+検証(§5 の子リソース検証まで)を自動でやる。手で `git push → run 確認 → status ポーリング → verify` を
 繰り返す必要がない。`gh` が要る(無ければ上のインストール案内、または `--local` へ)。全体の待ち上限は
 `--timeout <秒>`(既定 900)。**要点:commit は自分でやる**(--watch は未 push を push するだけで
 `git add`/`commit` はしない)。CI が失敗したら失敗ログを出して非零終了する。
@@ -240,7 +240,7 @@ HEAD 以外の commit を追うなら `--for-sha <sha>`(verify と同型)。
 - **連携がまだの場合**(旧 CLI / `--no-github` で作った、または作成時に gh が無かった):
   create 応答(JSON)の `setup_commands`(`gh repo create` / `gh secret set` / `gh variable set`。
   **POSIX shell 前提**)を service の repo 直下で順に実行すれば同じ状態になる(値は
-  `GET /services/{id}/deploy-config` でも再取得可 = `tbm deploy --local` が使う端点)。
+  `GET /services/{id}/deploy-config` でも再取得可 = `tbm deploy --local` が使うエンドポイント)。
   Windows(PowerShell)では `printf` / `$(…)` が動かないため bash 系で。
 - **`gh` が入っていない** → インストールを案内する:
   - mac:`brew install gh`
@@ -255,7 +255,7 @@ HEAD 以外の commit を追うなら `--for-sha <sha>`(verify と同型)。
   `tbm service create <名前>` を実行する(空ディレクトリ / 既存 repo ならそのままでよい。
   連携自体が不要なら `--no-github`)。
 - **ビルドが遅い(数十分)場合**:CI のランナーは gh variable `TSUBOMI_RUNNER` で決まる。新規 service は
-  平台が自動設定するが、**古い service は未設定 = amd64 + QEMU で極端に遅い**。平台が arm64 なら
+  プラットフォームが自動設定するが、**古い service は未設定 = amd64 + QEMU で極端に遅い**。プラットフォームが arm64 なら
   `gh variable set TSUBOMI_RUNNER --body ubuntu-24.04-arm` で原生 arm になり数分に縮む(yml 変更不要、
   次の push から有効)。
 
@@ -290,12 +290,12 @@ tbm deploy --image traefik/whoami --service <service名> --watch          # --wa
 何も要らない(gh も docker も)。202 即返しで取得〜起動は非同期 — 返ってくる `git_sha` を
 `tbm service verify <名前> --wait --for-sha <git_sha>` に渡すと完走まで待てる。`--watch` は
 これを自動でやる:**公開サービスは URL + 子リソースまで検証**、**private サービスは完走待ち +
-内網 TCP 探活**(port で接続を受けるかまで確認。中身の動作確認は `tbm service exec` / `logs`)。
+内部ネットワークの TCP 疎通確認**(port で接続を受けるかまで確認。中身の動作確認は `tbm service exec` / `logs`)。
 
 - **--dockerfile は COPY / ADD 不可**(コンテキスト無しの契約。multi-stage も不可、上限 8KiB)。
   使えるのは FROM / RUN / ENV / ARG / CMD / ENTRYPOINT / EXPOSE / WORKDIR / USER / LABEL /
   HEALTHCHECK / SHELL / STOPSIGNAL。**app のコードを入れる用途には使えない**(それは経路 1 / 2)。
-- **VOLUME も不可**:匿名 volume はデプロイごとに消える罠。永続は平台の volume 注入(§3.2)で。
+- **VOLUME も不可**:匿名 volume はデプロイごとに消える罠。永続はプラットフォームの volume 注入(§3.2)で。
 - イメージはプラットフォームのアーキ({{HOST_ARCH}})版が必要。無ければ取得段階で明確に失敗し、
   エラーが deploys に載る(`tbm service status` / `deploys` で見える)。
 - 履歴上の表示:`git_sha` は配方のハッシュ(純 hex 12 桁)、見出し(`image: <ref>` 等)は
@@ -308,11 +308,11 @@ registry は(既定で)Cloudflare 経由のため **イメージ 1 層あたり�
 request body 制限。registry 側では変えられない)。超えると `tbm deploy --local` でも GitHub Actions
 でも push が 413 で落ちる。
 
-- **この部署に直連入口が設定済みなら 413 は起きない**:平台が push 先を CF 非経由の直連 registry
-  に振り向けている(`tbm service create` 応答の registry host が `registry-direct.<域名>` 系なら該当)。
-  それでも 413 が出たら直連入口の障害を疑い、ユーザに知らせる(勝手に別経路を作らない)。
-- **直連入口が無い部署**での対処は**層を小さくする**:大きな `RUN`/`COPY` を分割 / slim・alpine 基底 /
-  マルチステージでビルド中間物を最終イメージに持ち込まない。恒久対策(直連入口の追加)は運用側の
+- **この部署に直接接続入口が設定済みなら 413 は起きない**:プラットフォームが push 先を CF 非経由の直接接続 registry
+  に振り向けている(`tbm service create` 応答の registry host が `registry-direct.<ドメイン>` 系なら該当)。
+  それでも 413 が出たら直接接続入口の障害を疑い、ユーザに知らせる(勝手に別経路を作らない)。
+- **直接接続入口が無い部署**での対処は**層を小さくする**:大きな `RUN`/`COPY` を分割 / slim・alpine 基底 /
+  マルチステージでビルド中間物を最終イメージに持ち込まない。恒久対策(直接接続入口の追加)は運用側の
   判断 — `doc/paas-registry-direct-design.md`。
 
 ## 5. 検証(ここを省かない)
@@ -324,13 +324,13 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    **デプロイ直後は `--wait` を付ける**(`tbm service verify <service名> --wait`):進行中の
    デプロイの完走を待ってから検証する(deploy 送信〜切替は非同期で数秒〜数十秒かかる。
    `--wait` 無しで即叩くと旧版や 502 を見る。デプロイが failed ならその error を出して非零終了 =
-   status の手動輪詢は不要)。上限は `--timeout <秒>`(既定 180)。報告には現在 serving 中の
+   status の手動ポーリングは不要)。上限は `--timeout <秒>`(既定 180)。報告には現在 serving 中の
    デプロイ(`serving.git_sha` / `deploy_id`)も載る = 「見ているのが自分の新版か」が分かる。
    **端到端で確実にするなら `--for-sha <sha|HEAD>`**(`tbm service verify <名前> --for-sha HEAD`):
    その commit のデプロイが**到着してから**完走を待つので、GitHub 経路で CI がまだビルド中
    (hook 未達)の窓もカバーする(`--wait` 単体はこの窓を待てず旧版を検証してしまう)。
    `deploy --watch` は内部でこれを使うので、--watch を使うなら verify は自動で済む。
-   **`visibility=private` のサービスは公開 URL の代わりに内網 TCP 探活で検証する**:
+   **`visibility=private` のサービスは公開 URL の代わりに内部ネットワークの TCP 疎通確認で検証する**:
    verify がサーバ側から serving コンテナの `container_port` へ単発 connect し、`ok` を三値で返す —
    `true` = listen 確認(ただし TCP まで。HTTP 応答の中身は見ない)/ `false` = 異常(走っていない、
    または内部リンクの callee なのに listen していない → exit 1)/ `null` = 判定不能(listen しない
@@ -338,7 +338,7 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    三値で読む**)。報告の `serving` でどの版を探ったか照合できる。中身まで確かめるなら
    `tbm service exec <名前> -- wget -qO- localhost:<port>` か、内部リンク先の caller コンテナから
    `tbm service exec <caller> -- wget -qO- http://<subdomain>:<port>`。
-   **`landed_noservice` が付いていたら「その子域に生きた route が無い」**(未デプロイ / 停止中 /
+   **`landed_noservice` が付いていたら「そのサブドメインに生きた route が無い」**(未デプロイ / 停止中 /
    削除済み / route 反映待ち)= 必ず `ok:false`。app の中身の問題ではないので、assets を疑わず
    `tbm service status <名前>` で phase と最新デプロイを見る(停止中なら `tbm service start`)。
    **これが重要な理由**:`status=succeeded` + 根 200 でも、`index.html` が参照する `/assets/*.js` が
@@ -369,13 +369,13 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 値は**コンテナ起動の瞬間**に解決される(注入表はバインディングしか持たない)。つまり:
 
 - **走っている service に後から注入しても、そのコンテナには入らない**。`tbm deploy`(または
-  `tbm service stop <名前> && tbm service start <名前>`)で作り直すまで env は現れない。`tbm inject` は走行中なら
+  `tbm service stop <名前> && tbm service start <名前>`)で作り直すまで env は現れない。`tbm inject` は実行中なら
   「今動いているコンテナには入っていません」と言い、`-o json` では `needs_redeploy: true` を返す。
 - **`tbm cache rotate` の後は再デプロイが要る**:cache は資格情報が 1 本 = **注入値そのもの**が
-  変わるので、走行中の app は古いパスワードを握ったまま即座に認証エラーになる(`status` の
+  変わるので、実行中の app は古いパスワードを握ったまま即座に認証エラーになる(`status` の
   `未反映` にも出る)。
 - **`tbm db rotate` は再デプロイ不要**:回すのは **human role**(外部接続用)だけで、注入されるのは
-  **app role** なので走行中の app は切れない(外部 key の rotate が service を切らないための意図した
+  **app role** なので実行中の app は切れない(外部 key の rotate が service を切らないための意図した
   設計)。影響するのは、公開接続文字列を**静的 env に置いてしまった**場合だけ(§3 冒頭)。
 - **症状が原因を指さない**:app からは「env が無い」「接続できない」としか見えないので、
   **まず `tbm env list <名前> --resolved` と `tbm service status`(注入一覧に `未反映` が付く)を見る**。
@@ -411,11 +411,11 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 
 - 再デプロイ:GitHub 経路は `git push`、ローカルは `tbm deploy --local`。
 - `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く
-  (`tbm db rotate` は human role だけなので走行中の app は無影響)。
+  (`tbm db rotate` は human role だけなので実行中の app は無影響)。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
 - **`tbm service rename <名前> <新名>`** — 表示名だけ変わる(subdomain = 公開 URL / GitHub repo は
-  不変)。**`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — 資源上限の変更
-  (次のデプロイから反映)。**`tbm service stateful <名前>`** — 有状態化(false→true のみ。
+  不変)。**`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — リソース上限の変更
+  (次のデプロイから反映)。**`tbm service stateful <名前>`** — ステートフル化(false→true のみ。
   次のデプロイから stop-first)。
 - **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切り替え(**即時反映・
   再デプロイ不要**)。`private` = 公開 URL 無効(監視・通知系 worker 向け。内部リンク /
@@ -436,21 +436,21 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | deploy failed(`TCP 待受を…確認できませんでした`) | readiness 門:app が `PORT` の値で listen していない(監听錯 port / bind 先が 127.0.0.1 / 起動が 60s 超) | `PORT` env で 0.0.0.0 に listen させる → 再デプロイ。listen しない worker は `tbm service visibility <名前> private` |
 | deploy failed(`manifest unknown`) | push は成功したが registry に実体が無い(GC 競合) | 再デプロイで再 push。直らなければ管理者へ(registry cache の毒 — `docker restart tsubomi-registry`) |
 | URL が `/noservice` へ 302 する | `visibility=private`(または未デプロイ/停止) | `tbm service status` で確認 → 公開するなら `tbm service visibility <名前> company` |
-| push が 413 | 単層 >100MB(CF 経由)。直連入口があれば起きない | §「push が 413」。無ければ層を小さく |
+| push が 413 | 単層 >100MB(CF 経由)。直接接続入口があれば起きない | §「push が 413」。無ければ層を小さく |
 | Node/Next が DB の証明書エラーで落ちる | 注入ホスト名と証明書が一致しない部署(または古いホスト名を握ったコンテナ) | §3.1 の分岐(`DATABASE_HOST` を見る)→ 一致するなら再デプロイ、しないなら検証を切る |
 | Node/Next が起動直後 exit(DB 以外) | ioredis の error イベント未listen | §3.1(`redis.on("error", …)` を付ける) |
 | Rust が起動直後 exit(DB 接続) | `NoTls` で `sslmode=require` に繋げない | §3.1(`postgres-native-tls` で TLS コネクタを渡す) |
 | ORM / ライブラリが URL 形を受け取らない | URL 一本で組めないケース | §3.1 の素材 env(`DATABASE_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`) |
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict`(create) | 同名の**稼働中**リソースがある(ゴミ箱は名前を占有しない) | 別名にするか、稼働中の方を rename / delete |
-| `code: conflict`(trash restore) | 同名で作り直した活体と衝突 | 活体を rename / delete してから restore。同名堆積は `tbm trash list` の id で特定 |
+| `code: conflict`(trash restore) | 同名で作り直した稼働中と衝突 | 稼働中を rename / delete してから restore。同名堆積は `tbm trash list` の id で特定 |
 | OOM で落ちる(exit=137) | メモリ上限不足 | `tbm service limits <名前> --memory <MiB>` → 再デプロイ |
 | `code: validation` | 入力不正 | メッセージに従う |
-| 注入が効かない / env が無い | 走行中に注入した(値は起動の瞬間に解決)/ cache rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
-| 平台 DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 自帯コンテナ(§3.2:`--port` + `--stateful` + volume) |
-| 自帯 DB が再デプロイでデータ全損 | データ目録を volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
+| 注入が効かない / env が無い | 実行中に注入した(値は起動の瞬間に解決)/ cache rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
+| プラットフォーム DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 持ち込みコンテナ(§3.2:`--port` + `--stateful` + volume) |
+| 持ち込み DB が再デプロイでデータ全損 | データディレクトリを volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ(既成イメージ / 無 context Dockerfile なら `--image`・`--dockerfile`) |
-| 既成イメージを起こしたいだけ(自帯 DB 等) | ビルド不要のケース | `tbm deploy --image <ref>`(§4 第 3 経路。docker / GitHub 不要) |
+| 既成イメージを起こしたいだけ(持ち込み DB 等) | ビルド不要のケース | `tbm deploy --image <ref>`(§4 第 3 経路。docker / GitHub 不要) |
 | 基底イメージ + パッケージ追加だけしたい | COPY 不要の軽い定制 | `tbm deploy --dockerfile <path>`(§4 第 3 経路。COPY/ADD 不可) |
 | 経路 1・2 不可 + app のコードをビルドする必要 | この環境にビルド環境が無い(経路 3 では code を入れられない) | 部署できないとユーザに伝える(§4。別経路を発明しない) |
 | `gh` が無い | 未インストール | OS 別に案内 → `! gh auth login --web --git-protocol https --clipboard` |

@@ -11,7 +11,7 @@ use crate::config;
 use tsubomi_shared::VolumeDto;
 
 /// `tbm volume <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
-/// 資源 CRUD に加え、假根の中のファイル操作(ls/put/get/rm/mkdir/mv)も持つ。
+/// リソース CRUD に加え、假根の中のファイル操作(ls/put/get/rm/mkdir/mv)も持つ。
 #[derive(Subcommand)]
 pub enum VolumeCmd {
     /// ボリュームを作成
@@ -187,7 +187,7 @@ pub async fn run(
             local,
         } => {
             let id = resolve_id(&c, &server_url, &token, &volume).await?;
-            // basename は正規化**後**の remote から取る(化けた前綴からファイル名を拾わない)。
+            // basename は正規化**後**の remote から取る(化けた接頭辞からファイル名を拾わない)。
             let remote = normalize_remote_path(&remote, &msys_env())?;
             let local = local.unwrap_or_else(|| basename(&remote));
             // ストリーム下载(api 側で dest へ逐次書き込み)。返り値が書込バイト数。

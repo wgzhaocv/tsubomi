@@ -1,7 +1,7 @@
 import * as React from "react";
 
 // animal-island-ui(guokaigdg)の Typewriter を移植。純ロジックのみ:
-// CSS・className・外層ラッパを一切持たず、布局/字号/色/フォントに零影響。
+// CSS・className・外側のラッパを一切持たず、レイアウト/文字サイズ/色/フォントに影響ゼロ。
 // children を逐字表示し、元の要素構造/改行/様式を保つ。
 
 export interface TypewriterProps {
@@ -105,7 +105,7 @@ const renderTruncated = (
 /**
  * Typewriter 打字機コンポーネント
  * - 字を 1 つずつ表示し、元 children の要素構造/改行/様式を保つ
- * - 外層ラッパを一切導入せず、布局/字号/色/フォントに零影響
+ * - 外側のラッパを一切導入せず、レイアウト/文字サイズ/色/フォントに影響ゼロ
  */
 export const Typewriter: React.FC<TypewriterProps> = ({
   children,

@@ -2,11 +2,11 @@
 //!
 //! `injections` 表は **バインディング**だけを持ち、値はここでコンテナ create の直前に解決する。
 //! 最終 env = `service_env`(復号した静的値)∪ injections を 1 件ずつ解決(database → 内部 app
-//! role の接続文字列 / volume → bind マウント + パス env / cache → ACL ユーザ URL + 前缀 /
-//! service → 別 app の内部直連 URL `http://<subdomain>:<port>`)。PORT は呼び出し側(deploy.rs)が足す。
+//! role の接続文字列 / volume → bind マウント + パス env / cache → ACL ユーザ URL + 接頭辞 /
+//! service → 別 app の内部直接接続 URL `http://<subdomain>:<port>`)。PORT は呼び出し側(deploy.rs)が足す。
 //!
 //! service 注入は **値の解決だけ** — 実際に届くかは `network.rs` の網リンク(注入元 B の稼働
-//! コンテナを A の私網へ別名 attach)が担保する(env 文字列があっても網が無ければ繋がらない =
+//! コンテナを A のプライベートネットワークへ別名 attach)が担保する(env 文字列があっても網が無ければ繋がらない =
 //! 別関心事)。詳細は `doc/paas-service-link-design.md`。
 //!
 //! 失効(注入元がソフト削除済み)→ その 1 件は**空に解決**(env に出さない / bind を張らない)。
@@ -53,7 +53,7 @@ pub async fn resolve(
         }
     };
 
-    // 2. 注入(バインディング)を 1 件ずつ解決。失効(資源が削除済み)は空に解決してスキップ。
+    // 2. 注入(バインディング)を 1 件ずつ解決。失効(リソースが削除済み)は空に解決してスキップ。
     let injections: Vec<(Uuid, String, String, Option<String>)> = sqlx::query_as(
         "SELECT r.id, r.kind, i.env_var, i.mount_path
            FROM injections i JOIN resources r ON r.id = i.resource_id
@@ -108,7 +108,7 @@ pub async fn resolve(
                 }
             }
             "cache" => {
-                // 内部入口の ACL ユーザ接続文字列 + key 前缀。失効(None)はスキップ。
+                // 内部入口の ACL ユーザ接続文字列 + key 接頭辞。失効(None)はスキップ。
                 if let Some((acl_user, namespace, pass_enc)) =
                     fetch_cache_creds(state, resource_id).await?
                 {
@@ -119,7 +119,7 @@ pub async fn resolve(
                         cfg.cache_internal_host, cfg.cache_internal_port
                     );
                     // REDIS_KEY_PREFIX も注入する(§11-C):app はクライアントの keyPrefix にこれを設定。
-                    // ACL が `~<ns>:*` で兜底するので、前缀無しアクセスは NOPERM = fail-safe。
+                    // ACL が `~<ns>:*` で受け止めるので、接頭辞無しアクセスは NOPERM = fail-safe。
                     // 名前は env_var の `_URL` を `_KEY_PREFIX` に置換(無ければ付加)。値は常に `<ns>:`。
                     let prefix_env = key_prefix_env(&env_var);
                     env.push((env_var, url));
@@ -127,10 +127,10 @@ pub async fn resolve(
                 }
             }
             "service" => {
-                // 別 app の内部直連。失効(注入元 service が削除済み)→ None でスキップ。
-                // `_URL` は subdomain を docker 網別名として引く `http://<subdomain>:<port>`
+                // 別 app の内部直接接続。失効(注入元 service が削除済み)→ None でスキップ。
+                // `_URL` は subdomain を docker ネットワーク別名として引く `http://<subdomain>:<port>`
                 // (http 固定 — 内部網なので TLS 無し。§9)。加えて素材の `_HOST` / `_PORT` も
-                // 注入する:非 HTTP ソフト(自帯 postgres 等)には http テンプレが廃紙で、
+                // 注入する:非 HTTP ソフト(持ち込み postgres 等)には http テンプレが廃紙で、
                 // 利用側が `postgres://user:pass@$X_HOST:$X_PORT/db` を自分のスキームで組める
                 // ようにする(stateful 設計 §0-H)。名前は `_URL` を剥いだ基底に付ける(cache の
                 // `key_prefix_env` と同型)。派生名が別注入と衝突したら dedup_env_last の後勝ち
@@ -177,7 +177,7 @@ pub(crate) fn derived_env_keys(kind: &str, env_var: &str) -> Vec<String> {
     suffixes.iter().map(|s| format!("{base}{s}")).collect()
 }
 
-/// 注入 1 件が占用する env 名の全体(env_var 本体 + 派生)。
+/// 注入 1 件が占有する env 名の全体(env_var 本体 + 派生)。
 pub(crate) fn occupied_env_keys(kind: &str, env_var: &str) -> Vec<String> {
     let mut keys = derived_env_keys(kind, env_var);
     keys.push(env_var.to_string());
@@ -239,7 +239,7 @@ async fn fetch_app_role(
 }
 
 /// 注入元 service の (subdomain, container_port) を引く。削除済み(失効)/ service でない → None。
-/// 所有権は注入作成時に検証済みなので resource_id で引く。値 = 内部直連 URL `http://<subdomain>:<port>`。
+/// 所有権は注入作成時に検証済みなので resource_id で引く。値 = 内部直接接続 URL `http://<subdomain>:<port>`。
 async fn fetch_service_endpoint(
     state: &AppState,
     resource_id: Uuid,

@@ -74,7 +74,7 @@ async fn health() -> Json<Health> {
     })
 }
 
-/// `/api` 配下の未マッチ路径。本文は AppError と同じ**素の text**(サーバは JSON エラー体を
+/// `/api` 配下の未マッチパス。本文は AppError と同じ**素の text**(サーバは JSON エラー体を
 /// 出さない契約 — CLI は本文を message にそのまま載せ、code は HTTP 404 から導く。
 /// JSON にすると CLI 出力に JSON-in-string の二重包みが出る)。
 async fn api_not_found() -> (axum::http::StatusCode, &'static str) {

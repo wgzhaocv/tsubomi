@@ -6,7 +6,7 @@
 //! **真相は `users.role`**(毎リクエスト JOIN で読む授権の唯一の源)。本モジュールが持つ
 //! `platform_config['owner_roster']`(≤2 個の email)は role が表せない 2 つの穴だけを埋める:
 //!   ① 未ログイン email の「ログインしたら昇格すべき」意図(`auth::google` の補昇が引く)。
-//!   ② 「全 owner へ」の宛先(`gc` の磁盘告警)。
+//!   ② 「全 owner へ」の宛先(`gc` のディスク告警)。
 //! roster は role を**反推しない**(対账しない)— 授権は常に role を見て、roster は穴を埋めるだけ。
 //!
 //! 増減は **トランザクション + `SELECT … FOR UPDATE`** で roster 行をロックしてから RMW +

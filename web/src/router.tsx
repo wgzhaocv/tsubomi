@@ -48,7 +48,7 @@ export const router = createBrowserRouter([
   // サーバの Google callback がドメイン検証に失敗するとここへリダイレクトする。
   { path: "/forbidden", element: <Forbidden /> },
 
-  // service の無い子域に来たときの着地点(守衛の外・ログイン不要)。
+  // service の無いサブドメインに来たときの着地点(守衛の外・ログイン不要)。
   // traefik の catch-all router(route.rs::write_catchall)が apex の /noservice へ 302 する。
   { path: "/noservice", element: <NoService /> },
 
@@ -110,9 +110,9 @@ export const router = createBrowserRouter([
       // IP 許可リスト(owner 専用のガバナンス画面)。サイドメニューにも owner 限定で出す。
       // バックエンドが 403 で守るので、ここはルート自体は誰でも辿れる(画面側で弾く)。
       { path: "ip-allowlist", element: <IpAllowlist /> },
-      // 管制面の可視化(M4 S1 + S5)。匿名化(真名 + 匿名番号 + 使用量、資源名/内容は
+      // 管制面の可視化(M4 S1 + S5)。匿名化(真名 + 匿名番号 + 使用量、リソース名/内容は
       // 出さない)。総覧 + 使用量ランキングは**閲覧**(owner または共有パスワード viewer):
-      // <RequireViewer> = 未解錠なら解錠フォームを出す。後端は require_viewer_web で守る。
+      // <RequireViewer> = 未解錠なら解錠フォームを出す。バックエンドは require_viewer_web で守る。
       {
         element: <RequireViewer />,
         children: [
@@ -121,7 +121,7 @@ export const router = createBrowserRouter([
         ],
       },
       // 監査ログ(真名 + 操作流水の明文 = §7 匿名化の範囲外)と共有パスワード設定は
-      // owner のみ。<RequireOwner> に集約(後端も require_owner_web)。
+      // owner のみ。<RequireOwner> に集約(バックエンドも require_owner_web)。
       {
         element: <RequireOwner />,
         children: [

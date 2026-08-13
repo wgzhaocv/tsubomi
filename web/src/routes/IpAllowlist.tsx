@@ -15,7 +15,7 @@ import { type IpAllowEntry, useAddIpAllow, useIpAllowlist, useRemoveIpAllow } fr
 // 会社 IP 許可リスト(owner 専用)。traefik の ipAllowList へ流す CIDR の管制面。
 //   * 空        = 制限なし(全 IP 許可)。設定するまで誰でも service に繋がる。
 //   * 1 件以上  = 列挙した CIDR だけが service に到達でき、他は遮断。
-// 反映はライブ(平台が traefik の動的設定を書き直す)。ただし古いコンテナは
+// 反映はライブ(プラットフォームが traefik の動的設定を書き直す)。ただし古いコンテナは
 // 一度 redeploy して初めて許可リストの対象になる(新規 deploy は最初から対象)。
 
 export default function IpAllowlist() {

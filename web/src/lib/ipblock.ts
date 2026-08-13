@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // 意味は「許可リスト」:
 //   * 空        = 制限なし(全 IP 許可)。設定するまで誰でも service に繋がる。
 //   * 1 件以上  = 列挙した CIDR だけが service に到達でき、他は traefik で遮断。
-// 反映はライブ(平台が traefik の動的設定を書き直し、middleware がホットリロード)。
+// 反映はライブ(プラットフォームが traefik の動的設定を書き直し、middleware がホットリロード)。
 
 export type IpAllowEntry = {
   id: string;

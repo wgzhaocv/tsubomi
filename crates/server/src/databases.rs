@@ -1,7 +1,7 @@
 //! database リソースの API ハンドラ(tech-design §6 の database 面)。
 //! web と CLI は同一ハンドラの 2 入口 — 認証 extractor(AuthCtx)だけが分岐点。
 //!
-//! 背骨:平台が「期望状態」を resources / database_details / database_roles に持ち、
+//! 背骨:プラットフォームが「期望状態」を resources / database_details / database_roles に持ち、
 //! 現実(pg-tenant の DB / role)をそこへ収束させる。create は tenant DDL を先に
 //! 流し、成功してから platform 行を入れる(失敗時は tenant 側を掃除)。
 
@@ -138,9 +138,9 @@ pub(crate) async fn audit(
     }
 }
 
-/// owner の代理操作用:`target_user`(誰の資源を触ったか)も埋める audit。
+/// owner の代理操作用:`target_user`(誰のリソースを触ったか)も埋める audit。
 /// 通常の `audit` は target_user を埋めない(本人操作なので actor = 所有者)。owner が他人の
-/// 資源を stop/delete する「最後の砦」(M4 S3)はここを使い、誰の何を動かしたかを残す。
+/// リソースを stop/delete する「最後の砦」(M4 S3)はここを使い、誰の何を動かしたかを残す。
 pub(crate) async fn audit_with_target(
     db: &PgPool,
     actor: Uuid,
@@ -201,11 +201,11 @@ fn build_url(state: &AppState, role: &str, password: &str, dbname: &str) -> Stri
     url
 }
 
-/// 外部接続文字列機能(human role の公開接続)が有効か。無効な部署(CF Tunnel など公網
-/// TCP 入口を持たない)では reveal / rotate を後端で拒否する。web も同フラグでカードを隠すが、
-/// 防御は後端(`破ってはいけない一線`:前端の表示制御は UX)。
+/// 外部接続文字列機能(human role の公開接続)が有効か。無効な部署(CF Tunnel などインターネット
+/// TCP 入口を持たない)では reveal / rotate をバックエンドで拒否する。web も同フラグでカードを隠すが、
+/// 防御はバックエンド(`破ってはいけない一線`:フロントエンドの表示制御は UX)。
 /// 拒否は **403(`ForbiddenMsg`)** = ポリシー拒否:入力を直しても通らないので CLI/AI は再試行しない
-/// (400 だと `validation` 扱いで無駄に再試行する)。文案は次の一手(web SQL)を含める。
+/// (400 だと `validation` 扱いで無駄に再試行する)。文言は次の一手(web SQL)を含める。
 /// 注:漏れた接続文字列を無効化したいなら、機能を off にする**前**に rotate すること。
 fn require_db_public(state: &AppState) -> AppResult<()> {
     if state.config.db_public_enabled {
@@ -233,10 +233,10 @@ pub(crate) fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> App
     }
 }
 
-/// 「活体だけが名前を占有する」の単一真源(部分ユニークインデックス
+/// 「稼働中だけが名前を占有する」の単一真源(部分ユニークインデックス
 /// `resources_live_display_name_key`、20260813000001 と同じ述語)。4 種 create の
-/// 事前チェックと trash restore の衝突検査が共有する — 文案は各呼び出し側が持つ
-/// (create は「別の名前に」、restore は「先に活体をどける」で本来違う)。
+/// 事前チェックと trash restore の衝突検査が共有する — 文言は各呼び出し側が持つ
+/// (create は「別の名前に」、restore は「先に稼働中をどける」で本来違う)。
 /// 競合(同時 create 等)は UNIQUE が最終ガード。
 pub(crate) async fn live_name_exists(
     db: &PgPool,
@@ -265,7 +265,7 @@ async fn ensure_db_name_free(db: &PgPool, user_id: Uuid, display_name: &str) -> 
     Ok(())
 }
 
-/// DB 資源の開通の共通骨格(create / fork が共有):新 wire 名 + role 3 本 + パスワード 2 本を
+/// DB リソースの開通の共通骨格(create / fork が共有):新 wire 名 + role 3 本 + パスワード 2 本を
 /// 生成 → tenant DDL →(fork なら元の内容を流し込み)→ platform 行。**どこで失敗しても
 /// tenant 側を掃除**して「platform 行が在る ⇒ tenant DB が在る」を保つ。
 ///
@@ -436,7 +436,7 @@ async fn insert_rows(
 }
 
 /// `POST /api/databases/:id/fork`:既存 DB をこの瞬間の内容ごと新しい DB に複製する。
-/// 新 DB は完全な新規資源(新 wire 名 + 新 role + 新パスワード — 元と資格情報を共有しない)。
+/// 新 DB は完全な新規リソース(新 wire 名 + 新 role + 新パスワード — 元と資格情報を共有しない)。
 /// fork 後の同期はしない:分岐した瞬間から別々の道を行くのが仕様(dev 環境の意義 = 汚してよい)。
 ///
 /// `CREATE DATABASE … TEMPLATE` は使わない(テンプレート元に接続が 1 本でもあると失敗し、
@@ -541,7 +541,7 @@ pub async fn log_orphan_tenant_dbs(state: &AppState) {
         return;
     }
     // ゴミ箱内も database_details 行は残る(DROP 済みでも行は在る)ので、
-    // 「行が 1 本も無い」= どの経路の資源でもない = 中断の残骸。
+    // 「行が 1 本も無い」= どの経路のリソースでもない = 中断の残骸。
     let known: Vec<String> =
         match sqlx::query_scalar("SELECT pg_dbname FROM database_details WHERE pg_dbname = ANY($1)")
             .bind(&in_tenant)
@@ -799,7 +799,7 @@ pub async fn query(
         tenant::connect_as_human(&state.config.tenant_admin_url, &role, &pw, &dbname).await?;
 
     // 暴走クエリ対策(二重)。statement_timeout はユーザが `SET statement_timeout=0`
-    // で外せるので、サーバ側の tokio タイムアウトを硬い上限として被せる(超過で
+    // で外せるので、サーバ側の tokio タイムアウトを上限として被せる(超過で
     // 接続を落とす = クエリも中断)。
     conn.execute("SET statement_timeout = '10s'").await?;
 

@@ -1,7 +1,7 @@
 //! volume リソースの API ハンドラ(tech-design §6 の volume 面)。
 //! web と CLI は同一ハンドラの 2 入口 — 認証 extractor(AuthCtx)だけが分岐点。
 //!
-//! 背骨:平台が「期望状態」を resources / volume_details に持ち、現実(host_path の
+//! 背骨:プラットフォームが「期望状態」を resources / volume_details に持ち、現実(host_path の
 //! ディレクトリ)をそこへ収束させる。volume は顶层リソースで、各 volume は
 //! `<volumes_dir>/<user_id>/<volume_id>/` の独立した假根サンドボックス。
 //! 注入(service への mount)は M3 — ここではファイル置き場の実体だけを扱う。
@@ -263,7 +263,7 @@ const USAGE_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// symlink は辿らない(read_dir の file_type はエントリ自身の型 — symlink は file/dir
 /// どちらにも該当せず素通り)。スタックで回し、深いツリーでも再帰オーバーフローしない。
 /// 時間予算を超えたら途中で打ち切る(値は下限、truncated=true)。
-/// owner ガバナンスの可視化(M4 admin)も volume の占用にこれを再利用する。
+/// owner ガバナンスの可視化(M4 admin)も volume の使用量にこれを再利用する。
 pub(crate) fn dir_usage(root: &std::path::Path) -> std::io::Result<(u64, u64, u64, bool)> {
     let start = std::time::Instant::now();
     let (mut size, mut files, mut dirs, mut seen) = (0u64, 0u64, 0u64, 0u64);

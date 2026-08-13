@@ -90,7 +90,7 @@ pub fn now_unix() -> i64 {
 }
 
 /// `--for-sha` の値が commit sha の形か(4 桁以上の hex。branch/tag は受けない —
-/// 前綴一致し得ず timeout まで空回りするため早期に弾く)。verify / deploy --watch が共有。
+/// 前方一致し得ず timeout まで空回りするため早期に弾く)。verify / deploy --watch が共有。
 pub fn looks_like_sha(s: &str) -> bool {
     s.len() >= 4 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -163,11 +163,11 @@ pub fn msys_env() -> MsysEnv {
 /// Git Bash は POSIX 風の絶対パス引数(`/data/x`)をネイティブ exe に渡す瞬間に
 /// `<Git ルート>/data/x`(例 `C:/Program Files/Git/data/x`)へ書き換える。遠端パスは
 /// 協定上ドライブレターを持ち得ないため、この化けは**無歧義に**検出・復元できる
-/// (EXEPATH 前綴の完全一致 = 確定的。启发式ではない)。ローカルパス引数は変換の
+/// (EXEPATH 接頭辞の完全一致 = 確定的。ヒューリスティックではない)。ローカルパス引数は変換の
 /// 恩恵を受ける(POSIX 風 `/c/Users/…` → 開ける Windows パス)ので触らないこと。
-/// - MSYS 外:原样(Windows ネイティブ shell のドライブレターも素通し — サーバ側で弾かれる)。
-/// - `//x…` → `/x…`(手動の双斜線エスケープ。MSYS は `//` 開頭を変換しない)。
-/// - ドライブレター + EXEPATH 前綴一致 → 前綴を剥がして `/rest` に復元。
+/// - MSYS 外:そのまま(Windows ネイティブ shell のドライブレターも素通し — サーバ側で弾かれる)。
+/// - `//x…` → `/x…`(手動の双スラッシュエスケープ。MSYS は `//` 開頭を変換しない)。
+/// - ドライブレター + EXEPATH 前方一致 → 接頭辞を剥がして `/rest` に復元。
 /// - ドライブレター + 不一致(純 MSYS2 等で EXEPATH 無し含む)→ 次の一手つきエラー。
 pub fn normalize_remote_path(arg: &str, env: &MsysEnv) -> Result<String> {
     if !env.in_msys {
@@ -182,7 +182,7 @@ pub fn normalize_remote_path(arg: &str, env: &MsysEnv) -> Result<String> {
     if let Some(exepath) = &env.exepath {
         let arg_s = slashify(arg);
         let exe_s = slashify(exepath.trim_end_matches(['/', '\\']));
-        // eq_ignore_ascii_case は長さ保存(NTFS の大小文字ゆれだけ吸収、非 ASCII は厳密比較)。
+        // eq_ignore_ascii_case は長さ保存(NTFS の大文字小文字ゆれだけ吸収、非 ASCII は厳密比較)。
         // get(..) は文字境界も守る(境界を跨ぐなら一致し得ない = None で不一致扱い)。
         if let Some(prefix) = arg_s.get(..exe_s.len())
             && prefix.eq_ignore_ascii_case(&exe_s)
@@ -227,12 +227,12 @@ mod msys_tests {
         };
         let git = msys(Some(r"C:\Program Files\Git"));
 
-        // MSYS 外:原样(ドライブレターも触らない)
+        // MSYS 外:そのまま(ドライブレターも触らない)
         assert_eq!(normalize_remote_path("C:/x", &plain).unwrap(), "C:/x");
         assert_eq!(normalize_remote_path("/a/b", &plain).unwrap(), "/a/b");
-        // 双斜線エスケープの還元
+        // 双スラッシュエスケープの還元
         assert_eq!(normalize_remote_path("//data/x", &git).unwrap(), "/data/x");
-        // EXEPATH 前綴の剥離(斜線向き・大小文字ゆれを吸収、rest の大小文字は保存)
+        // EXEPATH 接頭辞の剥離(スラッシュ向き・大文字小文字ゆれを吸収、rest の大文字小文字は保存)
         assert_eq!(
             normalize_remote_path("C:/Program Files/Git/data/X.txt", &git).unwrap(),
             "/data/X.txt"
@@ -241,11 +241,11 @@ mod msys_tests {
             normalize_remote_path(r"c:\program files\git\Data", &git).unwrap(),
             "/Data"
         );
-        // 前綴が似ているだけの別パスは剥がさない(Git2 ≠ Git)
+        // 接頭辞が似ているだけの別パスは剥がさない(Git2 ≠ Git)
         assert!(normalize_remote_path("C:/Program Files/Git2/data", &git).is_err());
         // EXEPATH 不明(純 MSYS2 等)でドライブレター → 次の一手つきエラー
         assert!(normalize_remote_path("C:/msys64/data/x", &msys(None)).is_err());
-        // 相対・素の絶対・空は原样
+        // 相対・素の絶対・空はそのまま
         assert_eq!(normalize_remote_path("data/x", &git).unwrap(), "data/x");
         assert_eq!(normalize_remote_path("/data/x", &git).unwrap(), "/data/x");
         assert_eq!(normalize_remote_path("", &git).unwrap(), "");

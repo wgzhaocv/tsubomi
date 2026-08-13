@@ -128,15 +128,15 @@ export default function ServiceOverview() {
           <Stat label="CPU 上限">
             {svc?.cpu_limit_millis != null
               ? `${svc.cpu_limit_millis / 1000} CPU`
-              : "なし(相対権重のみ)"}
+              : "なし(相対的な重み付けのみ)"}
           </Stat>
-          <Stat label="有状態">{svc?.stateful ? "はい(stop-first デプロイ)" : "いいえ"}</Stat>
+          <Stat label="ステートフル">{svc?.stateful ? "はい(stop-first デプロイ)" : "いいえ"}</Stat>
         </dl>
       </section>
 
       <Divider type="line-brown" />
 
-      {/* ===== 資源上限(次のデプロイから反映)=====
+      {/* ===== リソース上限(次のデプロイから反映)=====
           svc 確定後に条件レンダー = useState 初期化子で現値を seed できる(render 中 setState 不要)。 */}
       {svc && <LimitsSection svc={svc} id={id} />}
 
@@ -272,7 +272,7 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-// 資源上限の変更(memory / cpus)。値は次のデプロイから反映 — 走行中コンテナには効かない
+// リソース上限の変更(memory / cpus)。値は次のデプロイから反映 — 実行中のコンテナには影響しない
 // (server の run_digest がデプロイのたびに DB から読み直す)。cpus 欄は空 = 上限なし。
 function LimitsSection({
   svc,
@@ -284,7 +284,7 @@ function LimitsSection({
   const setLimits = useSetServiceLimits(id);
   // 親が svc 確定後にだけレンダーするので、初期化子で現値を seed できる(初期化子は
   // 再実行されない = mutation 後の refetch が編集中の値を上書きしない)。
-  // **差分判定はこの seed 快照に対して行う**(最新の svc と比べると、polling が他所の変更を
+  // **差分判定はこの seed スナップショットに対して行う**(最新の svc と比べると、polling が他所の変更を
   // 取り込んだ後に「触っていない欄」まで差分扱いになり、他所の変更を古い値で巻き戻す —
   // codex 審査 2026-08-13 の lost update)。
   const [seed] = useState(() => ({
@@ -327,10 +327,10 @@ function LimitsSection({
 
   return (
     <section className="flex flex-col gap-3">
-      <h2 className="text-lg font-bold text-foreground">資源上限</h2>
+      <h2 className="text-lg font-bold text-foreground">リソース上限</h2>
       <p className="text-sm font-medium text-muted-foreground">
-        変更は<strong>次のデプロイから</strong>反映されます(走行中のコンテナには効きません)。CPU
-        欄を空にすると硬上限なし(相対権重のみ)に戻ります。
+        変更は<strong>次のデプロイから</strong>反映されます(実行中のコンテナには影響しません)。CPU
+        欄を空にすると上限なし(相対的な重み付けのみ)に戻ります。
       </p>
       <div className="flex flex-wrap items-end gap-3">
         <Input

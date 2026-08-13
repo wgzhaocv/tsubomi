@@ -11,7 +11,7 @@ import { useSetViewerPassword, useViewerStatus } from "@/lib/admin";
 
 // 共有パスワード設定(owner 専用)。設計 v2 §7「見るは共有密码」:owner がここで
 // 共有パスワードを設定 / リセットする。リセットすると既存の閲覧 grant は全失効する
-// (扩散しすぎたら作り直せる)。後端は require_owner_web で守る(表示制御は UX)。
+// (扩散しすぎたら作り直せる)。バックエンドは require_owner_web で守る(表示制御は UX)。
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";

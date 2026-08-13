@@ -18,25 +18,25 @@ import { type HostMetrics, type TempSensor, useHostMetrics } from "@/lib/host-me
 import { RESOURCES } from "@/lib/resources";
 import { formatBytes } from "@/lib/format";
 
-// 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + 資源保有ユーザ数。
-// 匿名化(設計 v2 §7):資源の名前・内容は出さない。owner ゲートは <RequireOwner>
-// (router)に集約済み。後端も owner + session を毎回検証。
+// 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + リソース保有ユーザ数。
+// 匿名化(設計 v2 §7):リソースの名前・内容は出さない。owner ゲートは <RequireOwner>
+// (router)に集約済み。バックエンドも owner + session を毎回検証。
 
 // kind → アイコン。RESOURCES(単一の真実源)から導出 — サイドメニューと揃える。
 const KIND_ICON: Record<string, LucideIcon> = Object.fromEntries(
   RESOURCES.filter((r) => r.kind).map((r) => [r.kind as string, r.icon]),
 );
 
-// 使用量の単位(種別で意味が違うことを明示)。service=稼働中内存 / db=存储 / volume=占用 /
+// 使用量の単位(種別で意味が違うことを明示)。service=稼働中メモリ / db=ストレージ / volume=使用量 /
 // cache=キー数(§4.2。正確なメモリは valkey に無いので key 数を代用)。
 const USAGE_LABEL: Record<string, string> = {
-  service: "稼働中の内存合計",
+  service: "稼働中のメモリ合計",
   database: "ストレージ合計",
-  volume: "占用合計",
+  volume: "使用量合計",
   cache: "キー数合計",
 };
 
-// 概要に並べる種別の固定順(後端 KINDS と一致)。骨架も実データも同じ順で描く。
+// 概要に並べる種別の固定順(バックエンド KINDS と一致)。骨架も実データも同じ順で描く。
 const KIND_ORDER = ["service", "database", "volume", "cache"] as const;
 
 // 種別カード。`row` が null(読み込み中)なら数字は「—」を出す — 骨架を最初から描いて
@@ -175,7 +175,7 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
 }
 
 // 高温の色分け閾値。現ホスト(RK3588)の throttle 帯基準 — 別機種へ移すとき見直す
-// (内核の trip_point/temp*_crit を後端が添える案は必要になったら。設計は色だけの用途)。
+// (内核の trip_point/temp*_crit をバックエンドが添える案は必要になったら。設計は色だけの用途)。
 const TEMP_HOT_C = 85; // 赤
 const TEMP_WARN_C = 75; // 暗金
 
@@ -202,8 +202,8 @@ function TempRow({ temps }: { temps: TempSensor[] }) {
 }
 
 // プラットフォーム自身(server + infra コンテナ)の使用量を**各コンテナ別**に出す。
-// 加総せず一覧 — どの基礎設施が重いか分かる。用户 app は含めない。dev は server が
-// 容器でないので並ばない(infra のみ)。データは HostCard と同じ WS から(props で受ける)。
+// 合算せず一覧 — どの基礎設施が重いか分かる。用户 app は含めない。dev は server が
+// コンテナでないので並ばない(infra のみ)。データは HostCard と同じ WS から(props で受ける)。
 function PlatformCard({ items, loading }: { items: HostMetrics["platform"]; loading: boolean }) {
   // 読み込み中(WS 未到着)は Skeleton 行。到着後 0 件のときだけ「情報なし」。
   const skeletonKeys = ["a", "b", "c", "d", "e"];
@@ -285,7 +285,7 @@ export default function AdminOverview() {
         <Divider type="line-brown" />
 
         <p className="max-w-2xl text-sm font-medium text-muted-foreground">
-          全ユーザの資源と使用量の総覧です。資源の名前や中身は表示されません(誰が・何種類・
+          全ユーザのリソースと使用量の総覧です。リソースの名前や中身は表示されません(誰が・何種類・
           どれだけ使っているかだけ)。
         </p>
 
@@ -317,7 +317,7 @@ export default function AdminOverview() {
                     <Skeleton className="h-7 w-16" />
                   )}
                   <span className="text-xs font-medium text-muted-foreground">
-                    資源を持つ利用者
+                    リソースを持つ利用者
                   </span>
                 </div>
               </CardContent>

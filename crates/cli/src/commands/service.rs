@@ -15,7 +15,7 @@ use tsubomi_shared::{
 };
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
-/// create だけは API の後にユーザ自身の `gh` で GitHub 連携を組み立てる(平台は GitHub に
+/// create だけは API の後にユーザ自身の `gh` で GitHub 連携を組み立てる(プラットフォームは GitHub に
 /// 一切触れない)。
 #[derive(Subcommand)]
 pub enum ServiceCmd {
@@ -28,22 +28,22 @@ pub enum ServiceCmd {
         /// (連携は既定で自動 — secret は stdin 渡しで argv / 出力に出ない)
         #[arg(long)]
         no_github: bool,
-        /// app が容器内で listen する port(省略 = 8080)。8080 以外を指定すると公開範囲の
-        /// 既定が private になる(自帯 DB 等の非 HTTP コンテナ想定。`--visibility` で上書き可)
+        /// app がコンテナ内で listen する port(省略 = 8080)。8080 以外を指定すると公開範囲の
+        /// 既定が private になる(持ち込み DB 等の非 HTTP コンテナ想定。`--visibility` で上書き可)
         #[arg(long)]
         port: Option<i32>,
         /// 公開範囲(省略 = port から自動:8080 → company / それ以外 → private)
         #[arg(long, value_enum)]
         visibility: Option<VisibilityArg>,
-        /// 有状態コンテナとして作成する(自帯 DB 等)。デプロイが stop-first(数秒の瞬断)になり、
-        /// 新旧コンテナが同じデータ目録を同時に開く事故を防ぐ。volume 注入をデータ目録に使うこと
+        /// ステートフルコンテナとして作成する(持ち込み DB 等)。デプロイが stop-first(数秒の瞬断)になり、
+        /// 新旧コンテナが同じデータディレクトリを同時に開く事故を防ぐ。volume 注入をデータディレクトリに使うこと
         #[arg(long)]
         stateful: bool,
-        /// メモリ硬上限 MiB(省略 = 1024。範囲 128〜4096)
+        /// メモリ上限 MiB(省略 = 1024。範囲 128〜4096)
         #[arg(long)]
         memory: Option<i32>,
-        /// CPU 硬上限(コア数。例 0.5 / 2。省略 = 上限なし = 相対権重のみ。範囲 0.1〜16)。
-        /// 単機共有ホストで CPU を食い尽くして隣人を拖らせない保険
+        /// CPU 上限(コア数。例 0.5 / 2。省略 = 上限なし = 相対的な重み付けのみ。範囲 0.1〜16)。
+        /// 共有ホストで CPU を食い尽くして隣人を巻き添えにしない保険
         #[arg(long)]
         cpus: Option<f64>,
     },
@@ -61,19 +61,19 @@ pub enum ServiceCmd {
         /// 新しい表示名
         new_name: String,
     },
-    /// メモリ / CPU 上限を変更する(次のデプロイから反映 — 走行中コンテナには効かない)
+    /// メモリ / CPU 上限を変更する(次のデプロイから反映 — 実行中のコンテナには影響しない)
     Limits {
         /// 対象サービスの表示名
         name: String,
-        /// メモリ硬上限 MiB(範囲 128〜4096)
+        /// メモリ上限 MiB(範囲 128〜4096)
         #[arg(long)]
         memory: Option<i32>,
-        /// CPU 硬上限(コア数。例 0.5 / 2。範囲 0.1〜16)。`none` で上限を解除
+        /// CPU 上限(コア数。例 0.5 / 2。範囲 0.1〜16)。`none` で上限を解除
         #[arg(long)]
         cpus: Option<String>,
     },
-    /// stateful(有状態コンテナ)を有効化する(false→true の一方向のみ。次のデプロイから
-    /// stop-first になる。データ目録は volume 注入に置くこと)
+    /// stateful(ステートフルコンテナ)を有効化する(false→true の一方向のみ。次のデプロイから
+    /// stop-first になる。データディレクトリは volume 注入に置くこと)
     Stateful {
         /// 対象サービスの表示名
         name: String,
@@ -141,14 +141,14 @@ pub enum ServiceCmd {
     Verify {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
-        /// 進行中のデプロイの完走を待ってから検証する(2 秒間隔で輪詢。failed なら
+        /// 進行中のデプロイの完走を待ってから検証する(2 秒間隔でポーリング。failed なら
         /// その error を出して非零終了)。待てるのは受理済み(最新)のデプロイだけ —
         /// CI がビルド中(hook 未達)の間もカバーしたいときは `--for-sha` を使う
         #[arg(long)]
         wait: bool,
         /// 指定 commit のデプロイが**到着して**完走するまで待ってから検証する(--wait を含意。
         /// CI ビルド中=hook 未達の窓もカバーする端到端の待機)。値は full/短 sha どちらでも
-        /// 前綴一致、`HEAD` は手元 repo から解決。例:`--for-sha $(git rev-parse HEAD)`
+        /// 前方一致、`HEAD` は手元 repo から解決。例:`--for-sha $(git rev-parse HEAD)`
         #[arg(long)]
         for_sha: Option<String>,
         /// `--wait` / `--for-sha` の最大待機秒数
@@ -261,7 +261,7 @@ pub async fn run(
             }
         }
         ServiceCmd::Limits { name, memory, cpus } => {
-            // `--cpus none` = 硬上限の解除。数値はコア数 → millicores(create と同じ変換)。
+            // `--cpus none` = 上限の解除。数値はコア数 → millicores(create と同じ変換)。
             let (cpu_limit_millis, clear_cpu_limit) = match cpus.as_deref() {
                 None => (None, false),
                 Some("none") => (None, true),
@@ -313,7 +313,7 @@ pub async fn run(
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
             api::service_set_stateful(&c, &server_url, &token, &id).await?;
             let hint =
-                "次のデプロイから stop-first(数秒の瞬断でデータ目録を単独占有)になります。データは volume 注入に置くこと";
+                "次のデプロイから stop-first(数秒の瞬断でデータディレクトリを単独占有)になります。データは volume 注入に置くこと";
             if json {
                 print_json(&json!({ "status": "stateful", "hint": hint }))?;
             } else {
@@ -345,7 +345,7 @@ pub async fn run(
             since,
         } => {
             let id = resolve_service_id(&c, &server_url, &token, &name).await?;
-            // `--since` は相対(5m/2h/1d)or unix 秒を受けて unix 秒へ。快照 / follow 共通。
+            // `--since` は相対(5m/2h/1d)or unix 秒を受けて unix 秒へ。スナップショット / follow 共通。
             let since = since.as_deref().map(parse_since).transpose()?;
             if follow {
                 // 実時 tail。CF Tunnel の無音切断は since を進めて自動再接続(C3 の責務)。
@@ -547,9 +547,9 @@ pub async fn run(
                     }
                 })?;
             // 旧サーバは未知フィールドを serde 既定で黙って無視する — 「--port 5432 のつもりが
-            // 8080/company の service が出来る」静默降级を、作成結果の回显と突き合わせて確実に
+            // 8080/company の service が出来る」サイレントな降格を、作成結果の表示と突き合わせて確実に
             // エラー化する。作成自体は完了しているので、次の一手(削除 → サーバ更新 → 再作成)を
-            // 文案に含める(AI フレンドリ規約)。
+            // 文言に含める(AI フレンドリ規約)。
             let svc = &resp.service;
             let ignored = port.is_some_and(|p| svc.container_port != p)
                 || visibility.is_some_and(|v| svc.visibility != v.as_str())
@@ -575,11 +575,11 @@ pub async fn run(
                     // secret は stdin 渡しで argv にも stdout にも出ない = 転録に秘密が残らない
                     // (機制で保証 — CLI 試用フィードバック S6)。gh 不在は fallback JSON に
                     // setup_commands(秘密込み)が載る — 従来の既定と同じ露出ティアに退化。
-                    // 旧既定(摊平 DTO)が要る場合は `--no-github`。
+                    // 旧既定(フラット DTO)が要る場合は `--no-github`。
                     print_json(&orchestrate_json(&resp)?)?;
                 }
             } else if no_github {
-                // text でも --no-github は連携せず、成功の形だけ回显して手順を stdout へ。
+                // text でも --no-github は連携せず、成功の形だけ表示して手順を stdout へ。
                 eprintln!(
                     "サービスを作成しました:{} (service{}, subdomain={})",
                     resp.service.display_name, resp.service.anon_seq, resp.service.subdomain
@@ -666,7 +666,7 @@ fn print_status(
         println!("  注入:");
         for i in injections {
             let stale = if i.valid { "" } else { "  [失効]" };
-            // 走行中コンテナより後に作られた注入 = まだ効いていない。「env が無い」症状の真因が
+            // 実行中コンテナより後に作られた注入 = まだ効いていない。「env が無い」症状の真因が
             // これなので、status で目に付くようにする(§「順序:注入 → デプロイ」)。
             let pending = if i.needs_redeploy {
                 "  [未反映:要デプロイ]"
@@ -748,7 +748,7 @@ fn orchestrate(resp: &CreateServiceResp, visibility_derived: bool) -> Result<()>
     if !gh_ok() {
         eprintln!("⚠ gh が見つからない / 未ログインです。リポジトリ直下で以下を実行してください");
         eprintln!("  (deploy_key / registry pass は秘密です。共有・commit しないこと):");
-        // 手順は平台が組み立てた setup_commands をそのまま出す(CLI で再構築しない)。
+        // 手順はプラットフォームが組み立てた setup_commands をそのまま出す(CLI で再構築しない)。
         for line in &resp.setup_commands {
             println!("{line}");
         }
@@ -765,7 +765,7 @@ fn orchestrate(resp: &CreateServiceResp, visibility_derived: bool) -> Result<()>
 }
 
 /// service の**形**の 1 行(port / visibility / stateful / memory / cpus)。
-/// create の回显と `status` が共有する — 作成後に変えられない値ほど後で確認したくなる。
+/// create の表示と `status` が共有する — 作成後に変えられない値ほど後で確認したくなる。
 fn shape_line(svc: &ServiceDto) -> String {
     format!(
         "port={} / visibility={} / stateful={} / memory={}MB{}",
@@ -780,9 +780,9 @@ fn shape_line(svc: &ServiceDto) -> String {
     )
 }
 
-/// 作成された service の**形**を回显する(text)。`--port` を指定すると `visibility` の既定が
+/// 作成された service の**形**を表示する(text)。`--port` を指定すると `visibility` の既定が
 /// 連動して変わる(8080 以外 → private)ので、**推導された事実をその場で見せる** — 引数 1 つが
-/// 一見無関係な項目を動かす「隔空作用」を、黙って起こさないための回显(AI フィードバック 2026-07-26)。
+/// 一見無関係な項目を動かす「遠隔作用」を、黙って起こさないための表示(AI フィードバック 2026-07-26)。
 /// `visibility_derived` = ユーザが `--visibility` を渡さなかった(= サーバが推導した)。**推導規則を
 /// CLI で再実装しない** — 真源はサーバの `default_visibility` で、CLI は「指定したか」だけを知る。
 fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
@@ -796,7 +796,7 @@ fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
     }
     if svc.stateful {
         eprintln!(
-            "  ※ stateful = デプロイは stop-first(数秒の瞬断と引き換えにデータ目録を単独占有)。\
+            "  ※ stateful = デプロイは stop-first(数秒の瞬断と引き換えにデータディレクトリを単独占有)。\
              データは volume 注入に置くこと"
         );
     }
@@ -810,7 +810,7 @@ fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
 
 /// gh で repo(冪等)→ secrets(値は argv に載せず stdin で渡す = `ps` で見えない)→ variables を
 /// 設定し、ローカルの `tsubomi` remote も確実にする。設定した repo (`owner/sub`) を返す。
-/// text / json 両経路の単一実装(秘密名は workflow テンプレが参照する固定の契約 = 平台が単一真源)。
+/// text / json 両経路の単一実装(秘密名は workflow テンプレが参照する固定の契約 = プラットフォームが単一真源)。
 fn configure_github(resp: &CreateServiceResp) -> Result<String> {
     let svc = &resp.service;
     // owner はログインユーザ、repo 名は subdomain(GitHub/DNS 安全な ascii)。
@@ -838,7 +838,7 @@ fn configure_github(resp: &CreateServiceResp) -> Result<String> {
     gh_variable(&repo, "TSUBOMI_REGISTRY", &resp.registry.host)?;
     gh_variable(&repo, "TSUBOMI_HOOK_URL", &resp.hook_url)?;
     gh_variable(&repo, "TSUBOMI_PLATFORMS", &resp.platforms)?;
-    // ランナーは平台が platforms から導出した値をそのまま使う(CLI で再導出しない =
+    // ランナーはプラットフォームが platforms から導出した値をそのまま使う(CLI で再導出しない =
     // 単一真源)。旧サーバは runner を返さない(空)ので、その場合は設定しない
     // (workflow テンプレの || 'ubuntu-latest' フォールバックが効く)。
     if !resp.runner.is_empty() {
@@ -975,7 +975,7 @@ fn orchestrate_json(resp: &CreateServiceResp) -> Result<serde_json::Value> {
 
 /// workflow ファイルを書く(既存は基本上書きしない — ユーザの編集を尊重)。
 /// 例外:旧版の壊れた配方(存在しない npm パッケージ `@railway/nixpacks` を呼び CI が必ず失敗する)が
-/// 残っている場合だけは修正版で上書きする。これは平台の生成物でユーザ編集ではなく、放置すると
+/// 残っている場合だけは修正版で上書きする。これはプラットフォームの生成物でユーザ編集ではなく、放置すると
 /// GitHub 連携が成功しても CI が同じ原因で失敗し続ける(= 今回の修正が届かない)。
 fn write_workflow_file(yaml: &str) -> Result<()> {
     let path = std::path::Path::new(WORKFLOW_PATH);
@@ -1142,7 +1142,7 @@ const FOLLOW_RECONNECT_SLACK: i64 = 3;
 /// `--follow`:ログを実時に tail する。CF Tunnel は無音 ~100s で接続を切るので、予期せぬ EOF は
 /// 自動再接続する(Ctrl-C / パイプ切断まで戻らない = `tail -f` 相当)。再接続カーソルは受信の
 /// 壁時計を `FOLLOW_RECONNECT_SLACK` 秒戻した値(時計ズレでの取りこぼしを避け重複側へ倒す)。
-/// 旧サーバ(v43 未満)は端点が無く SPA fallback の text/html を返すので、**本文を流す前に
+/// 旧サーバ(v43 未満)はエンドポイントが無く SPA fallback の text/html を返すので、**本文を流す前に
 /// content-type を検査**して明確に断る(HTML をログとして垂れ流さない)。初回は tail 分の遡り、
 /// 再接続後は since のみ(backlog を二重に出さない)。
 async fn follow_logs(
@@ -1260,7 +1260,7 @@ fn short_deploy_id(s: &str) -> String {
 /// 報告出力 + 検証結果を終了コードに映す(NG は exit 1)。`for_sha` の `HEAD` は手元 repo で解決、
 /// 非 sha は早期に弾く(満了空回り + 誤診を防ぐ)。
 /// 対象は **id(解決済み UUID)で受ける** — 長時間処理(--watch の CI 待ち)の後に名前を
-/// 再解決すると途中の rename で迷子になるため。`name` は文案用の表示名(陳腐でも無害)。
+/// 再解決すると途中の rename で迷子になるため。`name` は文言用の表示名(陳腐でも無害)。
 #[allow(clippy::too_many_arguments)] // API triple(c/server/token)+ 対象 + 検証オプション。束ねる価値は薄い。
 pub(crate) async fn run_verify(
     c: &reqwest::Client,
@@ -1278,7 +1278,7 @@ pub(crate) async fn run_verify(
         Some("HEAD") => Some(crate::commands::git_head_sha()?),
         other => other.map(str::to_owned),
     };
-    // sha として不正な値(例:`--for-sha main` のようなブランチ名)は前綴一致し得ず、
+    // sha として不正な値(例:`--for-sha main` のようなブランチ名)は前方一致し得ず、
     // そのまま待つと満了まで空回りして「タイムアウト」と誤診する。早期に弾いて次の一手を出す
     // (branch/tag は受けない — HEAD かコミット sha を明示。設計どおり scope を絞る)。
     if let Some(s) = &for_sha
@@ -1290,9 +1290,9 @@ pub(crate) async fn run_verify(
     }
     let svc = api::service_get(c, server_url, token, id).await?;
     // private は公開 URL 自体が無効(route 無し)なので URL 検証はできない。代わりに
-    // **内網 TCP 探活**(server 側から serving コンテナの container_port へ単発 connect)で
+    // **内部ネットワークの TCP 疎通確認**(server 側から serving コンテナの container_port へ単発 connect)で
     // 「今この瞬間 listen しているか」を検証する。--wait / --for-sha はデプロイ完走を
-    // 待ってから探活(公開サービスの URL 検証と同じ順序)。
+    // 待ってから疎通確認(公開サービスの URL 検証と同じ順序)。
     // 旧サーバ(visibility 空)は company 扱いで従来どおり URL を探測する。
     if svc.visibility == VISIBILITY_PRIVATE {
         if wait || for_sha.is_some() {
@@ -1334,7 +1334,7 @@ pub(crate) async fn run_verify(
         }
     } else {
         let mark = |s: u16| if (200..300).contains(&s) { "✓" } else { "✗" };
-        // catch-all 落地時の root_status は「平台の落地ページ」の 200 なので、そのまま mark すると
+        // catch-all 着地時の root_status は「プラットフォームの着地ページ」の 200 なので、そのまま mark すると
         // 「✓ 根 HTML」の直後に「NG」が出て自己矛盾する。着地している間は根も ✗ 扱いにする。
         let root_mark = if report.landed_noservice.is_some() {
             "✗"
@@ -1351,9 +1351,9 @@ pub(crate) async fn run_verify(
         if report.ok {
             println!("OK:根 + 子リソース {} 件すべて 2xx。", report.resources.len());
         } else if report.landed_noservice.is_some() {
-            // catch-all 落地 = そもそも公開されていない。assets の話をしても混乱するだけ。
+            // catch-all 着地 = そもそも公開されていない。assets の話をしても混乱するだけ。
             println!(
-                "NG:この子域に生きた route がありません(平台の /noservice に着地)。未デプロイ / 停止中 / 削除済み、または route 反映待ちです(`tbm service status {name}` で phase と最新デプロイを確認。停止中なら `tbm service start {name}`)。"
+                "NG:このサブドメインに生きた route がありません(プラットフォームの /noservice に着地)。未デプロイ / 停止中 / 削除済み、または route 反映待ちです(`tbm service status {name}` で phase と最新デプロイを確認。停止中なら `tbm service start {name}`)。"
             );
             std::io::stdout().flush().ok();
             std::process::exit(1);
@@ -1390,7 +1390,7 @@ pub(crate) async fn wait_deploy_only(
         quiet: json,
     };
     wait_for_deploy(c, server_url, token, id, name, spec).await?;
-    // 完走後に内網探活を一発(private の「URL 検証の代替」)。エラーは握り潰さず伝播 —
+    // 完走後に内部ネットワークの疎通確認を一発(private の「URL 検証の代替」)。エラーは握り潰さず伝播 —
     // 飲むと probe 無し + exit 0 が「検証済み」に見える(codex 審査)。
     let probe = build_probe_report(c, server_url, token, id, name).await?;
     if json {
@@ -1424,7 +1424,7 @@ struct ProbeReport {
     listening: Option<bool>,
     is_callee: bool,
     container_port: i32,
-    /// いま serving 中のデプロイ(「探ったのがどの版か」の照合材料。探活は対象 deploy に
+    /// いま serving 中のデプロイ(「探ったのがどの版か」の照合材料。疎通確認は対象 deploy に
     /// ピン留めされない — 待った sha の直後に別 deploy が完走すると新しい方を見る — ので、
     /// 消費側はこれで突き合わせる)。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1487,12 +1487,12 @@ fn probe_verdict(p: &ServiceProbeDto, name: &str) -> (Option<bool>, String) {
     match p.listening {
         None => (
             None,
-            "コンテナは走行中(この環境では内網探活ができないため listen 確認は省略)".into(),
+            "コンテナは実行中(この環境では内部ネットワークの疎通確認ができないため listen 確認は省略)".into(),
         ),
         Some(true) => (
             Some(true),
             format!(
-                "内網 TCP 探活 OK:port {} で接続を受けました(公開 URL 検証ではない — HTTP 応答の中身までは見ていない)",
+                "内部ネットワークの TCP 疎通確認 OK:port {} で接続を受けました(公開 URL 検証ではない — HTTP 応答の中身までは見ていない)",
                 p.container_port
             ),
         ),
@@ -1506,14 +1506,14 @@ fn probe_verdict(p: &ServiceProbeDto, name: &str) -> (Option<bool>, String) {
         Some(false) => (
             None,
             format!(
-                "コンテナは走行中ですが port {} で listen していません(listen しない worker 型なら正常。HTTP を待ち受けるはずなら listen ポートを確認)",
+                "コンテナは実行中ですが port {} で listen していません(listen しない worker 型なら正常。HTTP を待ち受けるはずなら listen ポートを確認)",
                 p.container_port
             ),
         ),
     }
 }
 
-/// private service の verify 本体:内網探活 1 発 + 判定を出力し、NG は exit 1。
+/// private service の verify 本体:内部ネットワークの疎通確認 1 発 + 判定を出力し、NG は exit 1。
 async fn report_probe(
     c: &reqwest::Client,
     server_url: &str,
@@ -1535,7 +1535,7 @@ async fn report_probe(
     Ok(())
 }
 
-/// `--wait` の輪詢間隔。デプロイ状態も検証再試行も同じ歩調で見る。
+/// `--wait` のポーリング間隔。デプロイ状態も検証再試行も同じ歩調で見る。
 const WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 /// succeeded 後の検証再試行の窓(traefik file-watch の反映遅延を吸収する長さ)。
 const VERIFY_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
@@ -1551,14 +1551,14 @@ struct WaitSpec<'a> {
 }
 
 /// `--for-sha` の照合:格納側(GitHub 経路=全 40 桁 / `--local`=短 sha)と入力側
-/// (full / 短どちらも来る)のどちらが短くても前綴一致で当てる。空文字は不一致。
+/// (full / 短どちらも来る)のどちらが短くても前方一致で当てる。空文字は不一致。
 fn sha_matches(stored: &str, wanted: &str) -> bool {
     !stored.is_empty()
         && !wanted.is_empty()
         && (stored.starts_with(wanted) || wanted.starts_with(stored))
 }
 
-/// `--wait` / `--for-sha`:対象デプロイが終態(succeeded / failed)になるまで輪詢する。
+/// `--wait` / `--for-sha`:対象デプロイが終態(succeeded / failed)になるまでポーリングする。
 /// succeeded で戻り、failed / タイムアウトはエラー(検証 NG と同じく exit 1 に落ちる)。
 /// text モードのみ stderr に状態遷移を流す(json は最終出力だけ = 契約を汚さない)。
 /// for_sha 無しは「受理済みの最新デプロイ」を待つ(CI がまだ hook を叩いていない間は
@@ -1618,7 +1618,7 @@ async fn wait_for_deploy(
                     ),
                 }
             }
-            // 一過性の API エラー(網の瞬断等)は期限内なら次の輪詢で拾い直す
+            // 一過性の API エラー(網の瞬断等)は期限内なら次のポーリングで拾い直す
             // (verify_with_retry と同じ寛容さ。数分待ちの途中 1 回の瞬断で
             // 「デプロイ失敗」と誤読させない)。期限切れならそのまま伝播。
             Err(e) => {
@@ -1662,7 +1662,7 @@ struct VerifyReport {
     root_status: u16,
     /// 根 HTML が参照する js / css 子リソースの検証結果。
     resources: Vec<VerifyResource>,
-    /// 平台の catch-all(`<server_url>/noservice`)に着地した = その子域に生きた route が
+    /// プラットフォームの catch-all(`<server_url>/noservice`)に着地した = そのサブドメインに生きた route が
     /// 無い(未デプロイ / 停止 / 削除済み / route 反映待ち)。出ているときは必ず ok=false。
     #[serde(skip_serializing_if = "Option::is_none")]
     landed_noservice: Option<String>,
@@ -1724,10 +1724,10 @@ async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
     let root_status = resp.status().as_u16();
     // リダイレクト後の最終 URL を基準に相対パスを解決する(`/assets/x.js` の解決先を实体に揃える)。
     let base = url::Url::parse(resp.url().as_str())?;
-    // **平台の catch-all に落ちたら NG**。生きた route の無い子域(未デプロイ / 停止 / 削除済み /
+    // **プラットフォームの catch-all に落ちたら NG**。生きた route の無いサブドメイン(未デプロイ / 停止 / 削除済み /
     // route 反映待ち)は `<server_url>/noservice` へ 302 する(server の route::write_catchall)。
-    // reqwest は既定でリダイレクトを追うので、素直に書くと root_status は落地ページの 200・
-    // base も平台ドメインになり、**平台自身の assets を「app の子リソース」として全部 2xx 判定 =
+    // reqwest は既定でリダイレクトを追うので、素直に書くと root_status は着地ページの 200・
+    // base もプラットフォームドメインになり、**プラットフォーム自身の assets を「app の子リソース」として全部 2xx 判定 =
     // 假成功**になる(停止中の service が curl では 502 なのに verify は ok:true を返す実害を確認)。
     // 判定は「別ホストの /noservice に着地」= app 自身の正当な外部リダイレクト(path が違う)を
     // 誤検出しない形にする。
@@ -1739,7 +1739,7 @@ async fn verify_url(c: &reqwest::Client, root: &str) -> Result<VerifyReport> {
     .then(|| base.to_string());
     let body = resp.text().await.unwrap_or_default();
 
-    // catch-all 落地は即 NG で返す。body は平台のページなので、そこから抜いた参照を
+    // catch-all 着地は即 NG で返す。body はプラットフォームのページなので、そこから抜いた参照を
     // 「app の子リソース」として報告すると誤導になる(全部 2xx で出る)= 空で返す。
     if let Some(landed) = landed_noservice {
         return Ok(VerifyReport {

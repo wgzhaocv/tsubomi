@@ -5,7 +5,7 @@
 //! CPU も守る)。一般 API 全体には掛けない — CLI は AI 駆動で正当なバーストが日常であり、
 //! そこを絞ると実害(誤 429 → AI の無駄リトライ)の方が大きい。
 //!
-//! 実装は**固定窓カウンタ**(単機・インメモリ。ipblock / deploy_lock と同じ「単機だから
+//! 実装は**固定窓カウンタ**(単一ホスト・インメモリ。ipblock / deploy_lock と同じ「単一ホストだから
 //! プロセス内で足りる」型)。鍵は client IP:`require_auth` と同じ **CF-Connecting-IP**
 //! (server は loopback listen 前提で偽装不能 — auth/middleware.rs の信頼前提を共有)。
 //! ヘッダ無し(dev / LAN 直アクセス)は単一バケツに収束するが、上限は正当利用に十分緩い。
@@ -70,7 +70,7 @@ fn client_key(headers: &HeaderMap) -> String {
 }
 
 /// バケツ(= 追跡する client IP)数の上限。満杯時の新規鍵は掃除後も空きが無ければ拒否
-/// (fail-closed)— 洪水でメモリ・CPU を無限に食わせない。
+/// (fail-closed)— フラッドでメモリ・CPU を無限に食わせない。
 const MAX_BUCKETS: usize = 10_000;
 
 /// 固定窓カウンタ(鍵ごとに「窓の開始時刻 + 回数」)。lock は認証入口のみ通る低頻度なので争わない。
@@ -97,8 +97,8 @@ impl RateLimiter {
     fn check_at(&self, key: &str, now: Instant) -> bool {
         let mut buckets = self.buckets.lock().expect("ratelimit lock poisoned");
         // 満杯なら:既知の鍵はそのまま数え、**新規の鍵は掃除して空きが出た時だけ**受け入れる
-        // (掃除しても満杯 = 洪水中 → 新規は fail-closed で拒否)。IPv6 /64 轮换のような
-        // 「全部新鮮な鍵」の洪水でも、メモリは 10k 桶で頭打ち・毎リクエスト O(n) retain にも
+        // (掃除しても満杯 = フラッド中 → 新規は fail-closed で拒否)。IPv6 /64 ローテーションのような
+        // 「全部新鮮な鍵」のフラッドでも、メモリは 10k 桶で頭打ち・毎リクエスト O(n) retain にも
         // ならない(掃除が走るのは新規鍵かつ満杯の時だけ — 審査指摘)。
         if buckets.len() >= MAX_BUCKETS && !buckets.contains_key(key) {
             buckets.retain(|_, (start, _)| now.duration_since(*start) < self.window);
@@ -140,7 +140,7 @@ mod tests {
         for i in 0..MAX_BUCKETS + 100 {
             rl.check_at(&format!("ip{i}"), t0);
         }
-        // 窓内の洪水:バケツは上限で頭打ち、あふれた新規鍵は拒否(fail-closed)。
+        // 窓内のフラッド:バケツは上限で頭打ち、あふれた新規鍵は拒否(fail-closed)。
         assert_eq!(rl.buckets.lock().unwrap().len(), MAX_BUCKETS);
         assert!(!rl.check_at("attacker-fresh", t0));
         // 既知の鍵は満杯でも数えられる(正当ユーザの巻き添え最小化)。

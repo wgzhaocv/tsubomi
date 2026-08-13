@@ -19,8 +19,8 @@ use axum::http::HeaderMap;
 use axum::routing::{delete, get, post};
 use uuid::Uuid;
 
-/// WebSocket 升级の `Origin` が管制面オリジンか検証する(CSWSH 対策)。不一致 / 欠落は
-/// Forbidden。terminal / metrics の両 WS ハンドラが升级前に呼ぶ(SameSite=Lax は same-site の
+/// WebSocket アップグレードの `Origin` が管制面オリジンか検証する(CSWSH 対策)。不一致 / 欠落は
+/// Forbidden。terminal / metrics の両 WS ハンドラがアップグレード前に呼ぶ(SameSite=Lax は same-site の
 /// テナント app からの WS 乗っ取りを防げないため、Origin で明示的に弾く)。
 pub fn require_ws_origin(headers: &HeaderMap, config: &Config) -> AppResult<()> {
     let origin = headers
@@ -66,7 +66,7 @@ impl AuthCtx {
     }
 
     /// web セッション由来か(Bearer cli_token ではない)。owner ガバナンスは web 専用なので
-    /// admin ハンドラがこれを要求する(CLI は AI 駆動のユーザ資源操作専用)。
+    /// admin ハンドラがこれを要求する(CLI は AI 駆動のユーザリソース操作専用)。
     pub fn is_session(&self) -> bool {
         matches!(self.source, AuthSource::Session)
     }

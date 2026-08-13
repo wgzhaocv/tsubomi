@@ -10,7 +10,7 @@ export type Cache = {
   anon_seq: number;
   created_at: string;
   rotated_at: string | null;
-  // key 前缀のもと(REDIS_KEY_PREFIX = `<namespace>:`)。旧サーバは欠落 = 非表示。
+  // key 接頭辞のもと(REDIS_KEY_PREFIX = `<namespace>:`)。旧サーバは欠落 = 非表示。
   namespace?: string;
 };
 

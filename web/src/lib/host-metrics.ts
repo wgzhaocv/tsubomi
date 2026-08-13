@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
 // ホスト(サーバ本体)の CPU/メモリ/ディスク使用量を WebSocket で受ける。
-// 後端の共有サンプラ(metrics.rs)が 5s 毎にスナップショットを送る。**ページを開いている間
-// だけ接続**し、unmount で close する(= 誰も見ていなければ後端のサンプラも止まる)。
+// バックエンドの共有サンプラ(metrics.rs)が 5s 毎にスナップショットを送る。**ページを開いている間
+// だけ接続**し、unmount で close する(= 誰も見ていなければバックエンドのサンプラも止まる)。
 // 各値は best-effort:取得不能(dev macOS は /proc 無しで CPU/メモリ)は null → UI は「—」。
 
-// 平台自身の 1 コンテナ(server / pg-platform / valkey …)の使用量。加総せず個別表示。
+// プラットフォーム自身の 1 コンテナ(server / pg-platform / valkey …)の使用量。合算せず個別表示。
 export type ContainerStat = {
   name: string;
   cpu_pct: number | null;
@@ -26,7 +26,7 @@ export type HostMetrics = {
   disk_used: number | null;
   disk_total: number | null;
   disk_pct: number | null;
-  // 平台自身(server + infra)の各コンテナ。dev は server が容器でないので出ない。
+  // プラットフォーム自身(server + infra)の各コンテナ。dev は server がコンテナでないので出ない。
   platform: ContainerStat[];
   // ホスト温度。取得不能(dev macOS / VM)は空 = 行ごと非表示。
   temps: TempSensor[];
@@ -58,7 +58,7 @@ export function useHostMetrics(): HostMetricsState {
     };
     ws.onclose = () => setState((s) => ({ ...s, connected: false }));
 
-    // unmount(ページ離脱)で必ず閉じる。最後の閲覧者なら後端のサンプラも停止する。
+    // unmount(ページ離脱)で必ず閉じる。最後の閲覧者ならバックエンドのサンプラも停止する。
     return () => ws.close();
   }, []);
 

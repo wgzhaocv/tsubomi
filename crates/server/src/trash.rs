@@ -46,7 +46,7 @@ async fn fetch_trashed(
     row.ok_or(AppError::NotFound)
 }
 
-/// restore が活体同名と衝突したときの 409 文案。事前チェックと UPDATE の
+/// restore が稼働中の同名と衝突したときの 409 文言。事前チェックと UPDATE の
 /// map_unique(TOCTOU の最終ガード)が同じ一文を使う — 二重管理しない。
 /// 具体的なコマンド名は書かない(kind→コマンドの対応は CLI の領分。
 /// 実在しないコマンドを案内する事故をサーバ側に作らない)。
@@ -57,8 +57,8 @@ fn restore_conflict_msg(kind: &str, display_name: &str) -> String {
     )
 }
 
-/// restore 前の活体同名チェック。ゴミ箱は名前を占有しない(20260813000001)ので、
-/// 削除後に同名で作り直された活体と復元が衝突し得る。**物理復元(DB 再作成 /
+/// restore 前の稼働中の同名チェック。ゴミ箱は名前を占有しない(20260813000001)ので、
+/// 削除後に同名で作り直された稼働中と復元が衝突し得る。**物理復元(DB 再作成 /
 /// volume 移動 / ACL 再作成)より前に**弾く — 後段の 23505 では実体側の作業が
 /// 済んだ後になり、副作用だけ残して 500 になる。
 async fn ensure_restore_name_free(
@@ -73,7 +73,7 @@ async fn ensure_restore_name_free(
     Ok(())
 }
 
-/// kind の日本語名(エラー文案用)。
+/// kind の日本語名(エラー文言用)。
 fn kind_ja(kind: &str) -> &'static str {
     match kind {
         "service" => "サービス",
@@ -158,11 +158,11 @@ pub async fn restore(
     let _guard = lock.lock().await;
 
     let (kind, display_name, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
-    // 活体同名との衝突は物理復元の前に弾く(副作用を残して 23505 で落ちない)。
+    // 稼働中の同名との衝突は物理復元の前に弾く(副作用を残して 23505 で落ちない)。
     ensure_restore_name_free(&state.db, auth.user_id, &kind, &display_name).await?;
 
     let mut detail = json!({});
-    // 物理復元と同時に「取り消し方」を覚える:active 化 UPDATE が同名活体と衝突(TOCTOU)
+    // 物理復元と同時に「取り消し方」を覚える:active 化 UPDATE が同名稼働中と衝突(TOCTOU)
     // したとき、実体だけ復活した状態(旧資格情報で繋がる DB / 復活した ACL / host に戻った
     // volume)を残さないための補償材料。
     let mut undo = RestoreUndo::None;
@@ -196,7 +196,7 @@ pub async fn restore(
 
     // 物理復元が成功してから resource を active に戻す。**これを実体の片付けより先に**:
     // ここで失敗しても実体が残り、gc に消されず再 restore できる(データを失わない)。
-    // 部分ユニーク(活体同名)との TOCTOU 衝突(事前チェックの後に同名 create が滑り込んだ
+    // 部分ユニーク(稼働中の同名)との TOCTOU 衝突(事前チェックの後に同名 create が滑り込んだ
     // 縫間 — create はこのロックの外)は 409 にした上で、**物理復元を巻き戻す**:
     // 巻き戻さないと「復元失敗」なのに旧 DB が繋がる / volume の実体が trash に無く
     // 後の purge が host 側データを永久孤児化する。行はゴミ箱のまま = 再 restore 可能。
@@ -396,7 +396,7 @@ pub async fn purge(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    // 所有権 + 存在チェック(他人 / 活体は 404)。実際の対象確定は purge_resource が
+    // 所有権 + 存在チェック(他人 / 稼働中は 404)。実際の対象確定は purge_resource が
     // ロック内でやり直す(この読みと実行の間に restore が挟まれ得るため)。
     let (kind, _display_name, _trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
 
@@ -475,10 +475,10 @@ pub(crate) async fn purge_resource(state: &AppState, id: Uuid) -> AppResult<Opti
         // db/volume と同じ規律。管理対象外の活きたコンテナを取り残さない)。
         crate::services::docker::stop_remove(state, id).await?;
         crate::services::route::remove(state, id)?;
-        // 私網は通常 soft_delete で撤去済み。残っていても DELETE 後は生存行を持たない孤児 = reconcile の
+        // プライベートネットワークは通常 soft_delete で撤去済み。残っていても DELETE 後は生存行を持たない孤児 = reconcile の
         // 網 GC が回収するので、ここは best-effort(空 bridge の撤去失敗で永久削除を止めない)。
         if let Err(e) = crate::services::network::remove_service_network(state, id).await {
-            tracing::warn!(error = ?e, %id, "purge: 私網の撤去に失敗(reconcile の網 GC が回収)");
+            tracing::warn!(error = ?e, %id, "purge: プライベートネットワークの撤去に失敗(reconcile の網 GC が回収)");
         }
         // 永久削除なので rollback 対象も消える → registry の repo(全 manifest)も掃除する。
         // manifest を消すと layer blob は無参照になり、日次の garbage_collect が実体を回収する

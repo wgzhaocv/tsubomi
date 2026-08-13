@@ -11,8 +11,8 @@ use crate::config;
 
 /// `tbm inject <resource> --into <service> [--as ENV] [--mount /path]`。
 /// database / volume / cache / 別 service を service に注入(バインディングを保存。値は起動の瞬間に解決)。
-/// service 注入は内部直連 URL `http://<subdomain>:<port>` に加え `_HOST` / `_PORT`(素材)を渡す
-/// (公網を通らない。同一 owner 限定。非 HTTP ソフトは HOST/PORT で自分のスキームの接続文字列を組む)。
+/// service 注入は内部直接接続 URL `http://<subdomain>:<port>` に加え `_HOST` / `_PORT`(素材)を渡す
+/// (インターネットを通らない。同一 owner 限定。非 HTTP ソフトは HOST/PORT で自分のスキームの接続文字列を組む)。
 /// database も同様に URL + 素材(`_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`)を渡す:
 /// `sslmode` の解釈が駆動系で違う(libpq は証書を検証しない / node-postgres は厳格)ため、
 /// URL が使えない側は素材から自分の作法で接続する。
@@ -69,7 +69,7 @@ pub async fn run_inject(
     if json {
         print_json(&inj)?;
     } else {
-        // 走行中に注入した場合が事故の本番:env は**起動の瞬間**に解決されるので、今動いている
+        // 実行中に注入した場合が事故の本番:env は**起動の瞬間**に解決されるので、今動いている
         // コンテナには入らない。症状(env が無い)が原因(順序)を指さないので、ここで強く言う。
         if inj.needs_redeploy {
             // 素の `tbm deploy` は mode 必須で必ずエラーになるので案内しない。

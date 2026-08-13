@@ -12,18 +12,18 @@ export type Me = {
   avatar_url: string | null;
   role: "user" | "owner";
   // このセッションが共有パスワード viewer grant を持つか(web 専用・8h で失効)。
-  // 閲覧ルート守衛が role==="owner" || is_viewer で管制面の只读を許す。
+  // 閲覧ルート守衛が role==="owner" || is_viewer で管制面の読み取り専用を許す。
   is_viewer: boolean;
 };
 
 // ログイン画面が表示する公開情報(許可された会社ドメイン)。
 export type AuthInfo = {
   allowed_domains: string[];
-  // 外部(human)接続文字列機能が有効か。off の部署(CF Tunnel 等、公網 TCP 入口なし)では
+  // 外部(human)接続文字列機能が有効か。off の部署(CF Tunnel 等、公開 TCP 入口なし)では
   // DB 詳細の接続文字列カードを隠す。秘密ではない(機能の有無のみ)。
   db_public_enabled: boolean;
   // キャッシュの外部(rediss://)接続文字列機能が有効か。on では cache 詳細で「手元から繋がる
-  // 外部串」カードを出す(off は内部串の控えのまま)。秘密ではない。
+  // 外部接続文字列」カードを出す(off は内部接続文字列の控えのまま)。秘密ではない。
   cache_public_enabled: boolean;
 };
 

@@ -15,7 +15,7 @@ import { useCaches, useCreateCache } from "@/lib/caches";
 import { formatDate, formatRelative } from "@/lib/format";
 
 // キャッシュ一覧。RESOURCES(サイドメニュー)の「キャッシュ」項目に対応する実画面。
-// 作成は名前を 1 つ入れるだけ(平台が ACL ユーザ名・namespace・パスワードを生成する)。
+// 作成は名前を 1 つ入れるだけ(プラットフォームが ACL ユーザ名・namespace・パスワードを生成する)。
 // 詳細ページ(接続文字列の表示 / rotate / 削除)は S3 で足す — S1 は一覧 + 作成まで。
 
 export default function Caches() {

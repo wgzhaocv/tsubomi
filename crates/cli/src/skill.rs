@@ -1,7 +1,7 @@
 //! 内嵌 skill 資産 + 多 agent への投影 + self-heal。
 //!
 //! skill 正本(`crates/cli/skill/tsubomi-deploy.md`)は二進制に `include_str!` で
-//! 埋め込み、その本文の sha256 先頭を版本戳にする。各 agent ターゲットへ書き出し、
+//! 埋め込み、その本文の sha256 先頭をバージョン印にする。各 agent ターゲットへ書き出し、
 //! 二進制が `tbm update` で新しくなれば次回実行で戳の不一致を検出して自動で書き直す
 //! (ネットワーク不要 = 「二進制だけ手動 update、skill はその投影」。自動更新の方針と整合)。
 //!
@@ -30,7 +30,7 @@ use crate::platform;
 /// 本文中の `{{HOST_ARCH}}` は書き出し時に [`body_rendered`] が実プラットフォームのアーキへ置換する。
 const BODY: &str = include_str!("../skill/tsubomi-deploy.md");
 
-/// skill のフォルダ名(共有技能庫の目録名 + 各 agent skills 下の symlink 名)。
+/// skill のフォルダ名(共有技能庫のディレクトリ名 + 各 agent skills 下の symlink 名)。
 const SKILL_NAME: &str = "tsubomi-deploy";
 
 /// `{{HOST_ARCH}}` をこのプラットフォームのアーキ(リリース時に焼き込んだ値)へ置換した本文。
@@ -48,8 +48,8 @@ const SKILL_FRONTMATTER: &str = "---\nname: tsubomi-deploy\ndescription: tsubomi
 const MARKER_BEGIN: &str = "<!-- >>> tbm skill: tsubomi-deploy (managed; do not edit) >>> -->";
 const MARKER_END: &str = "<!-- <<< tbm skill: tsubomi-deploy <<< -->";
 
-/// このマシンで tsubomi skill を投影する非 Claude agent の `skills/` 目録(home 相対)。
-/// **各 agent が実際にインストール済みのときだけ**(= `skills/` の親目録が存在するとき)投影する。
+/// このマシンで tsubomi skill を投影する非 Claude agent の `skills/` ディレクトリ(home 相対)。
+/// **各 agent が実際にインストール済みのときだけ**(= `skills/` の親ディレクトリが存在するとき)投影する。
 /// 全部この共有技能庫 `~/.agents/skills/tsubomi-deploy` への symlink になる。
 const AGENT_SKILL_DIRS: &[&str] = &[
     ".codex/skills",
@@ -61,7 +61,7 @@ const AGENT_SKILL_DIRS: &[&str] = &[
     ".config/opencode/skills",
 ];
 
-/// 版本戳 = 本文 + アーキ + frontmatter + 名前の sha256 先頭 12 hex。これら **書き出す
+/// バージョン印 = 本文 + アーキ + frontmatter + 名前の sha256 先頭 12 hex。これら **書き出す
 /// 素材すべて** を含めるのが要点:どれか 1 つでも変われば戳が動き、self-heal が投影を書き直す。
 /// 特に frontmatter(description = skill 発火のトリガ)を含めないと、本文 BODY が同一のまま
 /// description だけ変えたときに戳が動かず、毎コマンドの self-heal が変更を取りこぼす(投影が
@@ -108,7 +108,7 @@ fn legacy_codex_agents_md() -> Option<PathBuf> {
 }
 
 /// インストール済み agent の symlink パス一覧(`<agent>/skills/tsubomi-deploy`)。
-/// `skills/` の親(= agent 本体の目録)が存在するものだけ = ユーザが実際に使う agent だけに投影。
+/// `skills/` の親(= agent 本体のディレクトリ)が存在するものだけ = ユーザが実際に使う agent だけに投影。
 fn present_agent_links() -> Vec<PathBuf> {
     let Some(home) = home() else {
         return Vec::new();
@@ -128,8 +128,8 @@ pub fn body() -> String {
 
 /// `tbm skill where` 用 + self-heal の鮮度判定用:管理下の **SKILL.md ファイル** の一覧。
 /// Claude 実ファイル + 共有技能庫の正本 + 各 agent の symlink 越しの `SKILL.md`。agent 側は
-/// symlink が指すのは *目録* なので、鮮度判定(戳の read)には中の `SKILL.md` を指す必要がある
-/// (symlink 目録そのものを read_to_string すると必ず失敗し、毎回「陳腐」= 毎コマンド再投影になる)。
+/// symlink が指すのは *ディレクトリ* なので、鮮度判定(戳の read)には中の `SKILL.md` を指す必要がある
+/// (symlink ディレクトリそのものを read_to_string すると必ず失敗し、毎回「陳腐」= 毎コマンド再投影になる)。
 pub fn target_paths() -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = [claude_path(), store_path()].into_iter().flatten().collect();
     v.extend(present_agent_links().into_iter().map(|l| l.join("SKILL.md")));
@@ -186,7 +186,7 @@ fn is_fresh(path: &Path, stamp: &str) -> bool {
         .is_some_and(|c| c.contains(stamp))
 }
 
-/// SKILL.md を実ファイルとして書く(親目録が無ければ作る)。既に最新なら書かない
+/// SKILL.md を実ファイルとして書く(親ディレクトリが無ければ作る)。既に最新なら書かない
 /// (install() が毎回呼ばれても Claude / 正本を無駄に上書きしないため)。
 fn write_skill_md(path: &Path) -> Result<()> {
     if is_fresh(path, &stamp_line()) {
@@ -200,9 +200,9 @@ fn write_skill_md(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// `<agent>/skills/tsubomi-deploy` → 共有技能庫の正本目録へ symlink を張る。既存の実体
-/// (古い symlink / 実目録)があれば剥がしてから張り直す。symlink 不可の環境(Windows で
-/// 権限無し等)では正本を実目録として複写して代替する。
+/// `<agent>/skills/tsubomi-deploy` → 共有技能庫の正本ディレクトリへ symlink を張る。既存の実体
+/// (古い symlink / 実ディレクトリ)があれば剥がしてから張り直す。symlink 不可の環境(Windows で
+/// 権限無し等)では正本を実ディレクトリとして複写して代替する。
 fn link_to_store(link: &Path, home: &Path) -> Result<()> {
     // 既に正本の最新 SKILL.md を指しているなら張り直さない(毎回の remove+symlink を避ける)。
     if is_fresh(&link.join("SKILL.md"), &stamp_line()) {
@@ -217,7 +217,7 @@ fn link_to_store(link: &Path, home: &Path) -> Result<()> {
     if make_symlink(&target, link).is_ok() {
         return Ok(());
     }
-    // 代替:実目録に SKILL.md を複写(symlink 非対応環境)。
+    // 代替:実ディレクトリに SKILL.md を複写(symlink 非対応環境)。
     fs::create_dir_all(link).with_context(|| format!("failed to create {}", link.display()))?;
     fs::write(link.join("SKILL.md"), skill_md_contents())
         .with_context(|| format!("failed to write {}", link.join("SKILL.md").display()))
@@ -255,8 +255,8 @@ fn make_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("symlink unsupported on this platform"))
 }
 
-/// パスにある何か(symlink / 実ファイル / 実目録)を best-effort で消す。symlink は
-/// 指す先が目録でも `remove_file` で外れる(リンク自体だけ消える)。
+/// パスにある何か(symlink / 実ファイル / 実ディレクトリ)を best-effort で消す。symlink は
+/// 指す先がディレクトリでも `remove_file` で外れる(リンク自体だけ消える)。
 fn remove_any(path: &Path) {
     let Ok(meta) = fs::symlink_metadata(path) else {
         return; // 無ければ何もしない。
@@ -312,8 +312,8 @@ pub fn stale_targets() -> Vec<PathBuf> {
         .collect()
 }
 
-/// uninstall:全ターゲットを残留物ゼロで消す。Claude / 共有技能庫 = 目録ごと、
-/// agent 側 = symlink(or 代替の実目録)を剥がす。旧 Codex AGENTS.md ブロックも掃除。best-effort。
+/// uninstall:全ターゲットを残留物ゼロで消す。Claude / 共有技能庫 = ディレクトリごと、
+/// agent 側 = symlink(or 代替の実ディレクトリ)を剥がす。旧 Codex AGENTS.md ブロックも掃除。best-effort。
 pub fn remove() {
     if let Some(p) = claude_path()
         && let Some(dir) = p.parent()

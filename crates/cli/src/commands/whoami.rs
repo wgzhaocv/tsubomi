@@ -48,7 +48,7 @@ pub async fn run(
         })?;
     } else {
         println!(
-            "{} ({}) · プラットフォーム {} / 本機 {}",
+            "{} ({}) · プラットフォーム {} / 手元 {}",
             me.email, me.role, platform_arch, machine_arch
         );
     }

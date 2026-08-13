@@ -23,7 +23,7 @@ pub struct Config {
     pub db_min_conn: u32,
     /// pg-tenant への admin(DDL)プールの最大接続数。`TSUBOMI_TENANT_ADMIN_MAX_CONN`、既定 10。
     /// DDL は低頻度だが web SQL タブもここを通る。**注意:子網 CIDR の `TSUBOMI_TENANT_POOL`
-    /// とは無関係**(あちらは私網 subnet プール、こちらは DB コネクションプール)。
+    /// とは無関係**(あちらはプライベートネットワーク subnet プール、こちらは DB コネクションプール)。
     pub tenant_admin_max_conn: u32,
     pub google_client_id: String,
     pub google_client_secret: String,
@@ -32,8 +32,8 @@ pub struct Config {
     /// redirect_uri 許可リストの組み立てに使う — ブラウザから到達する
     /// オリジンと一致させること(dev では vite の :5173)。
     pub server_url: String,
-    /// WebSocket 升级で許可する管制面オリジン(CSWSH 対策)。テナント app は `<sub>.<domain>` =
-    /// 管制面と same-site なので `SameSite=Lax` cookie だけでは WS 乗っ取りを防げない。升级時に
+    /// WebSocket アップグレードで許可する管制面オリジン(CSWSH 対策)。テナント app は `<sub>.<domain>` =
+    /// 管制面と same-site なので `SameSite=Lax` cookie だけでは WS 乗っ取りを防げない。アップグレード時に
     /// `Origin` をこの allowlist と照合して弾く。既定は `server_url`(= ブラウザが到達するオリジン)、
     /// `TSUBOMI_CONTROL_ORIGIN`(カンマ区切り)で追加できる(管制面が複数オリジンを持つ場合)。
     pub control_origins: Vec<String>,
@@ -55,31 +55,31 @@ pub struct Config {
     /// pg-tenant の admin 接続(DDL 実行用)。
     /// 例:postgres://tsubomi_admin:..@127.0.0.1:5435/postgres
     pub tenant_admin_url: String,
-    /// human が手にする外部接続文字列のホスト。dev=127.0.0.1 / prod=db.<域名>。
+    /// human が手にする外部接続文字列のホスト。dev=127.0.0.1 / prod=db.<ドメイン>。
     pub db_public_host: String,
     pub db_public_port: u16,
     /// **内部**(service へ注入する app role)接続文字列の sslmode。dev=disable、prod=require。
     /// `require` 据え置きなのは意図的:**駆動系で意味が違う**(libpq = 暗号化するが証書を検証
     /// しない / node-postgres = 厳格に検証)ので、`require` のまま**両方が通る状態**を作る方に
-    /// 倒す。そのために `db_internal_host` を pgbouncer 証書の名前(`db.<域名>`)に揃え、その名前を
-    /// **per-service 私網の** docker 網別名として生やす(`services/network.rs::pgbouncer_aliases`。
-    /// テナント容器は私網にしか居ないので compose の edge に付けても見えない)。verify-full へ
+    /// 倒す。そのために `db_internal_host` を pgbouncer 証書の名前(`db.<ドメイン>`)に揃え、その名前を
+    /// **per-service プライベートネットワークの** docker ネットワーク別名として生やす(`services/network.rs::pgbouncer_aliases`。
+    /// テナントコンテナはプライベートネットワークにしか居ないので compose の edge に付けても見えない)。verify-full へ
     /// 上げないのは、libpq 側に `sslrootcert=system` が必要になり**それが今度は node で壊れる**
     /// (接続文字列のパスとして読まれる)= 非互換を別の駆動系へ移すだけだから。
     pub db_internal_sslmode: String,
     /// **外部**(human が手にする公開)接続文字列の sslmode。既定は内部に追従(未設定時)、
-    /// 公網 VPS 中継 + 公開 LE 証明書の部署では `verify-full` にする(`TSUBOMI_DB_SSLMODE_EXTERNAL`)。
-    /// 外部は `db_public_host`(=`db.<域名>`)経由なので証明書 SAN と一致し verify-full が成立する。
+    /// グローバル IP の VPS 中継 + 公開 LE 証明書の部署では `verify-full` にする(`TSUBOMI_DB_SSLMODE_EXTERNAL`)。
+    /// 外部は `db_public_host`(=`db.<ドメイン>`)経由なので証明書 SAN と一致し verify-full が成立する。
     /// verify-ca/verify-full のときは `build_url` が `sslrootcert=system` を付与する(下記参照)。
     pub db_public_sslmode: String,
     /// 外部(human)接続文字列を提供するか(`TSUBOMI_DB_PUBLIC_ENABLED`、既定 false)。
-    /// **off**(CF Tunnel など公網 TCP 入口を持たない部署):web は接続文字列カードを出さず、
-    /// `/url`・`/rotate` も後端で拒否する(届かない LAN IP を見せて誤誘導するのを断つ)。
-    /// **on**(公網 IP の VPS):提供する。web SQL タブと human role 自体は本フラグと無関係で
+    /// **off**(CF Tunnel など公開 TCP 入口を持たない部署):web は接続文字列カードを出さず、
+    /// `/url`・`/rotate` もバックエンドで拒否する(届かない LAN IP を見せて誤誘導するのを断つ)。
+    /// **on**(グローバル IP の VPS):提供する。web SQL タブと human role 自体は本フラグと無関係で
     /// 常に動く(web SQL は tenant_admin_url 経由・公開ホストを使わないため)。
     pub db_public_enabled: bool,
     /// service へ注入する **内部**接続文字列のホスト / ポート(コンテナが docker DNS で引く
-    /// pgbouncer)。外部入口 db_public_host とは別 — コンテナは社外に出ず内部路径で繋ぐ(§7.2)。
+    /// pgbouncer)。外部入口 db_public_host とは別 — コンテナは社外に出ず内部パスで繋ぐ(§7.2)。
     pub db_internal_host: String,
     pub db_internal_port: u16,
     /// at-rest 暗号化の master key(32 bytes)。DB パスワードの暗号化に使う。
@@ -94,7 +94,7 @@ pub struct Config {
     /// `<volumes_dir>/<user_id>/<volume_id>/` の假根サンドボックス。
     pub volumes_dir: PathBuf,
     /// ファイルアップロードの 1 リクエスト上限(バイト)。無制限だと
-    /// メモリ/ディスクを一撃で食えるので硬上限を被せる(磁盘 quota は M4)。
+    /// メモリ/ディスクを一撃で食えるので上限を被せる(ディスク quota は M4)。
     pub max_upload_bytes: usize,
 
     // ===== M5 cache(valkey)=====
@@ -106,9 +106,9 @@ pub struct Config {
     pub cache_internal_host: String,
     pub cache_internal_port: u16,
     /// 公開 cache(人が手にする外部 `rediss://`)のホスト / ポート / 提供可否。`db_public_*` の cache 版。
-    /// **off**(既定):build_url は内部 `redis://`、web は内部串カードのまま。**on**(公網 VPS + sni-gate +
-    /// valkey TLS):build_url が `rediss://cache_public_host:port` を出す。公網ポートは会社防火墙の都合で
-    /// 443 一択(`incident-frp-pg-public-2026-06-22`)。値は url/rotate 表示時に解決(人が手に持つ外部串)。
+    /// **off**(既定):build_url は内部 `redis://`、web は内部接続文字列カードのまま。**on**(グローバル IP の VPS + sni-gate +
+    /// valkey TLS):build_url が `rediss://cache_public_host:port` を出す。公開ポートは会社ファイアウォールの都合で
+    /// 443 一択(`incident-frp-pg-public-2026-06-22`)。値は url/rotate 表示時に解決(人が手に持つ外部接続文字列)。
     pub cache_public_host: String,
     pub cache_public_port: u16,
     pub cache_public_enabled: bool,
@@ -117,7 +117,7 @@ pub struct Config {
     /// service の subdomain のルートドメイン。ルーティングは `<subdomain>.<domain>`。
     /// dev=localhost(ブラウザが `*.localhost` を 127.0.0.1 に解決)、prod=会社ドメイン。
     pub domain: String,
-    /// 平台が digest pull する registry の host:port。dev=127.0.0.1:5000
+    /// プラットフォームが digest pull する registry の host:port。dev=127.0.0.1:5000
     /// (localhost は docker が insecure registry として許すので証明書不要)。
     pub registry_pull: String,
     /// GitHub Actions が docker login + push する registry の host。dev=registry_pull
@@ -125,9 +125,9 @@ pub struct Config {
     /// 返す DTO の `registry.host` に載る(digest 内容アドレスなので push/pull の host が
     /// 違っても問題ない — 決定 #3)。
     pub registry_push: String,
-    /// **CF を経由しない**registry 直連 push ホスト(`TSUBOMI_REGISTRY_DIRECT`、任意)。
+    /// **CF を経由しない**registry 直接接続 push ホスト(`TSUBOMI_REGISTRY_DIRECT`、任意)。
     /// CF proxy は request body ≈100MB 上限があり、イメージの大きな層の push が 413 で割れる
-    /// (単層 >100MB は経路として不成立)。設定すると:①traefik に直連入口 router
+    /// (単層 >100MB は経路として不成立)。設定すると:①traefik に直接接続入口 router
     /// (entrypoint `registrydirect`、LE DNS-01 終端)を追記 ②CI へ配る push 先
     /// (`RegistryCreds.host` = GitHub Variable `TSUBOMI_REGISTRY`)がこの host になる。
     /// CF 経由の `registry_push` 入口も**共存**(pull / 小さい層はそのまま)。
@@ -136,20 +136,20 @@ pub struct Config {
     /// build 対象の arch(GitHub Variable `TSUBOMI_PLATFORMS`)。§6.6 のデータ駆動:
     /// 将来 x86_64 host を足したら `linux/arm64,linux/amd64` に変えるだけ。
     pub platforms: String,
-    /// per-service 私網の名前接頭辞(`TSUBOMI_SVC_NETWORK_PREFIX`、既定 `tsubomi-svc-`)。
+    /// per-service プライベートネットワークの名前接頭辞(`TSUBOMI_SVC_NETWORK_PREFIX`、既定 `tsubomi-svc-`)。
     /// 各 service は `<prefix><service_id>` の専用 bridge に隔離され、二度と他テナントと
     /// 同じ網を共有しない(東西向=横移動の遮断。背骨「隔離は仕組みで守る」)。infra(traefik/
-    /// pgbouncer/valkey)はこの私網へ on-demand で attach される。**旧 `tsubomi-edge` 共有網は
+    /// pgbouncer/valkey)はこのプライベートネットワークへ on-demand で attach される。**旧 `tsubomi-edge` 共有網は
     /// テナントにとって無用化** — compose では infra が居つくだけで Rust からは参照しない。
     pub svc_network_prefix: String,
-    /// テナント私網に明示割当する subnet の親プール(`TSUBOMI_TENANT_POOL`、既定 `10.231.0.0/16`)。
+    /// テナントプライベートネットワークに明示割当する subnet の親プール(`TSUBOMI_TENANT_POOL`、既定 `10.231.0.0/16`)。
     /// 各 service 桥は ここから `/24` を取り、租户トラフィックを**源 CIDR で一意識別**できるようにする
-    /// (egress 防火墙の `-s <pool>` マッチの前提。`doc/paas-egress-design.md` §3.1)。**10/8 を選ぶ理由**:
+    /// (egress ファイアウォールの `-s <pool>` マッチの前提。`doc/paas-egress-design.md` §3.1)。**10/8 を選ぶ理由**:
     /// このホストで LAN(192.168)/ docker 自動(172.17・192.168.16)/ tailnet(100.x)と重ならない。
     /// docker 任せの自動割当は範囲が読めず LAN に近づくので、明示割当でプールを固定する。
     /// 起動時に CIDR として parse + `/24` 以上を検証する(domain / master_key と同じく fail-fast)。
     pub tenant_pool: Ipv4Net,
-    /// per-service 私網へ attach する infra コンテナ**名**(`connect_network` の対象)。
+    /// per-service プライベートネットワークへ attach する infra コンテナ**名**(`connect_network` の対象)。
     /// 既定は compose の `container_name`。注入文字列の DNS 名(`db_internal_host` 等)とは
     /// 別フィールド — 別名設定で乖離させないため(片方は connect 対象、片方は DNS 解決名)。
     pub traefik_container: String,
@@ -163,7 +163,7 @@ pub struct Config {
     pub tls: bool,
 
     // ===== ガバナンス:IP 許可リスト =====
-    /// 平台が traefik の動的設定(ipAllowList middleware)を書き出すディレクトリ。
+    /// プラットフォームが traefik の動的設定(ipAllowList middleware)を書き出すディレクトリ。
     /// traefik(compose)が file provider でこの同じホストパスを読む。会社 IP
     /// 許可リストの変更はここへ書き直され、traefik がホットリロードする。
     pub traefik_dynamic_dir: PathBuf,
@@ -186,7 +186,7 @@ pub struct Config {
     pub fork_timeout_secs: u64,
     /// **危険操作の確認コードを log に出すことを明示的に許す**(`TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES`、
     /// 既定 false)。dev で Resend 未契約のとき owner がコードを使えるようにする退路。**本番では絶対に
-    /// 立てない** — log アクセス権だけで owner の危険操作(他人資源の stop/delete)を完遂できてしまう。
+    /// 立てない** — log アクセス権だけで owner の危険操作(他人リソースの stop/delete)を完遂できてしまう。
     /// off のまま mail も未設定なら、危険操作は「配信できない」として fail-fast する(admin/actions.rs)。
     pub dev_insecure_log_action_codes: bool,
 }
@@ -226,7 +226,7 @@ fn load_master_key() -> anyhow::Result<[u8; 32]> {
     })
 }
 
-/// DNS ホスト名として妥当か。**IP 字面量は拒否**(docker 網別名は DNS 名でしか効かず、証書にも
+/// DNS ホスト名として妥当か。**IP リテラルは拒否**(docker ネットワーク別名は DNS 名でしか効かず、証書にも
 /// IP SAN が無いため)。label は 1〜63 文字の `[a-zA-Z0-9-]` で、先頭末尾にハイフンを許さない
 /// (空 label = `..` や末尾ドット、全体 253 文字超も弾く)。`localhost` のような単一 label も可。
 fn is_dns_hostname(s: &str) -> bool {
@@ -244,10 +244,10 @@ fn is_dns_hostname(s: &str) -> bool {
 
 impl Config {
     /// prod で registry の push 入口(traefik basicAuth)を書くか。push 先が pull(ローカル
-    /// 127.0.0.1:5000)と別ホスト = 公網の認証付き registry がある = prod、という自然な信号。
+    /// 127.0.0.1:5000)と別ホスト = 外部の認証付き registry がある = prod、という自然な信号。
     /// dev は両者一致なので false(registry は無認証ループバック直結で入口を書かない)。
     /// TLS の有無(traefik 終端 / 上流終端)とは独立 — tunnel(tls=false)でも入口は要る。
-    /// **直連入口(`registry_direct`)だけ設定された部署でも true**:CI へ配る push 先が直連 host に
+    /// **直接接続入口(`registry_direct`)だけ設定された部署でも true**:CI へ配る push 先が直接接続 host に
     /// なるのに router が書かれず docker login が黙って割れる、を防ぐ(codex 監査)。
     pub fn registry_ingress(&self) -> bool {
         self.registry_push != self.registry_pull || self.registry_direct.is_some()
@@ -262,14 +262,14 @@ impl Config {
             .unwrap_or(&self.registry_push)
     }
 
-    /// 直連入口の `Host(...)` 用ホスト名(`registry_direct` から `:port` を落とす)。未設定なら None。
+    /// 直接接続入口の `Host(...)` 用ホスト名(`registry_direct` から `:port` を落とす)。未設定なら None。
     pub fn registry_direct_host(&self) -> Option<&str> {
         self.registry_direct
             .as_deref()
             .map(|d| d.split(':').next().unwrap_or(d))
     }
 
-    /// CI(GitHub Secret/Variable)へ配る push 先。直連入口があればそれを優先
+    /// CI(GitHub Secret/Variable)へ配る push 先。直接接続入口があればそれを優先
     /// (大きな層が CF 100MB 上限で 413 にならない経路)。無ければ従来の CF 経由 push ホスト。
     pub fn registry_ci_host(&self) -> &str {
         self.registry_direct.as_deref().unwrap_or(&self.registry_push)
@@ -287,7 +287,7 @@ impl Config {
         format!("{scheme}://{subdomain}.{}", self.domain)
     }
 
-    /// WebSocket 升级の `Origin` が管制面オリジンか(CSWSH 対策)。ブラウザは WS 升级で必ず
+    /// WebSocket アップグレードの `Origin` が管制面オリジンか(CSWSH 対策)。ブラウザは WS アップグレードで必ず
     /// `Origin` を送るため、**欠落も拒否**する(対話 WS は web 専用 = ブラウザ経路のみ想定)。
     pub fn origin_allowed(&self, origin: Option<&str>) -> bool {
         match origin {
@@ -301,7 +301,7 @@ impl Config {
 
     pub fn from_env() -> anyhow::Result<Self> {
         // 既定は **loopback** :9090(同居する amber は 8080)。本番は前段(CF Tunnel / 逆代理)が
-        // localhost へ転送する想定なので公網露出しないのが安全側。直 VPS で traefik コンテナが
+        // localhost へ転送する想定なのでインターネットへの露出しないのが安全側。直 VPS で traefik コンテナが
         // host-gateway 経由 apex を叩く場合だけ明示的に 0.0.0.0:9090 にし、:9090 は FW で塞ぐ(§13.B)。
         let bind_addr = std::env::var("TSUBOMI_BIND_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:9090".to_string())
@@ -398,21 +398,21 @@ impl Config {
         // 出す部署だけ `TSUBOMI_DB_SSLMODE_EXTERNAL=verify-full` を足す。dev は内部=disable を継ぐ。
         let db_public_sslmode = std::env::var("TSUBOMI_DB_SSLMODE_EXTERNAL")
             .unwrap_or_else(|_| db_internal_sslmode.clone());
-        // 外部接続文字列の提供可否。既定 false(公網 TCP 入口を持たない CF 部署で誤って
-        // 届かない接続文字列を見せないため)。公網 IP の VPS / ローカル dev で明示的に true にする。
+        // 外部接続文字列の提供可否。既定 false(公開 TCP 入口を持たない CF 部署で誤って
+        // 届かない接続文字列を見せないため)。グローバル IP の VPS / ローカル dev で明示的に true にする。
         let db_public_enabled = std::env::var("TSUBOMI_DB_PUBLIC_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         // 注入する内部入口(コンテナ → edge 上の pgbouncer を docker DNS で)。§7.2。
-        // **prod は pgbouncer 証書の名前(`db.<域名>`)にする** — compose がその名前を edge の
-        // 網別名として生やすので、公網に出ないまま厳格検証も通る(上の db_internal_sslmode 参照)。
-        // 既定は容器名 = TLS 無しの dev / 旧部署の従来動作。
+        // **prod は pgbouncer 証書の名前(`db.<ドメイン>`)にする** — compose がその名前を edge の
+        // ネットワーク別名として生やすので、インターネットに出ないまま厳格検証も通る(上の db_internal_sslmode 参照)。
+        // 既定はコンテナ名 = TLS 無しの dev / 旧部署の従来動作。
         let db_internal_host = std::env::var("TSUBOMI_DB_INTERNAL_HOST")
             .unwrap_or_else(|_| "tsubomi-pgbouncer".to_string());
         // **DNS ホスト名のみ**を許す(fail-fast)。この値は接続文字列 URL・派生 env の `_HOST`・
-        // docker 網別名の 3 箇所に埋まるので、壊れた値は**全テナントに**配られてから発覚する:
-        // `:` を含めると `postgres://u:p@host:6432:6432/db`、**IP 字面量**は DNS を介さないので
-        // 網別名が効かず(かつ証書に IP SAN が無いので厳格検証も落ちる)。port は別変数が持つ。
+        // docker ネットワーク別名の 3 箇所に埋まるので、壊れた値は**全テナントに**配られてから発覚する:
+        // `:` を含めると `postgres://u:p@host:6432:6432/db`、**IP リテラル**は DNS を介さないので
+        // ネットワーク別名が効かず(かつ証書に IP SAN が無いので厳格検証も落ちる)。port は別変数が持つ。
         if !is_dns_hostname(&db_internal_host) {
             anyhow::bail!(
                 "TSUBOMI_DB_INTERNAL_HOST must be a DNS hostname (IP 不可・port 不可): {db_internal_host}"
@@ -444,8 +444,8 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(6379);
-        // 公開 cache(外部 rediss://)。db_public_* の cache 版。公網は会社防火墙の都合で 443 一択
-        // (incident-frp-pg-public-2026-06-22)。既定 off(公網入口を持たない部署で誤って届かない串を見せない)。
+        // 公開 cache(外部 rediss://)。db_public_* の cache 版。公開ポートは会社ファイアウォールの都合で 443 一択
+        // (incident-frp-pg-public-2026-06-22)。既定 off(公開入口を持たない部署で誤って届かない接続文字列を見せない)。
         let cache_public_host = std::env::var("TSUBOMI_CACHE_PUBLIC_HOST")
             .unwrap_or_else(|_| "127.0.0.1".to_string());
         let cache_public_port: u16 = std::env::var("TSUBOMI_CACHE_PUBLIC_PORT")
@@ -459,7 +459,7 @@ impl Config {
         let volumes_dir = std::env::var("TSUBOMI_VOLUMES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/srv/tsubomi/volumes"));
-        // 既定 100 MiB。env で上書き可(将来の磁盘 quota とは別レイヤの即時防御)。
+        // 既定 100 MiB。env で上書き可(将来のディスク quota とは別レイヤの即時防御)。
         let max_upload_bytes: usize = std::env::var("TSUBOMI_MAX_UPLOAD_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -492,7 +492,7 @@ impl Config {
                 "TSUBOMI_REGISTRY_PUSH must be host[:port]([a-zA-Z0-9.:-] のみ、scheme/path 不可): {registry_push}"
             );
         }
-        // CF を通らない直連 push 入口(任意)。書式は registry_push と同じ host[:port]。
+        // CF を通らない直接接続 push 入口(任意)。書式は registry_push と同じ host[:port]。
         let registry_direct = std::env::var("TSUBOMI_REGISTRY_DIRECT")
             .ok()
             .filter(|s| !s.is_empty());
@@ -507,7 +507,7 @@ impl Config {
         }
         let platforms =
             std::env::var("TSUBOMI_PLATFORMS").unwrap_or_else(|_| "linux/arm64".to_string());
-        // M6 網隔離:per-service 私網の接頭辞 + 私網へ attach する infra コンテナ名。
+        // M6 ネットワーク隔離:per-service プライベートネットワークの接頭辞 + プライベートネットワークへ attach する infra コンテナ名。
         let svc_network_prefix = std::env::var("TSUBOMI_SVC_NETWORK_PREFIX")
             .unwrap_or_else(|_| "tsubomi-svc-".to_string());
         // 起動時に parse + 検証(use 時の parse / 黙ったフォールバックを避け、E2 egress が
@@ -638,13 +638,13 @@ mod tests {
 
     #[test]
     fn dns_hostname_accepts_real_names_and_rejects_ip_and_port() {
-        // 実際に使う 3 値(dev の容器名 / localhost / 本番の証書名)は通る。
+        // 実際に使う 3 値(dev のコンテナ名 / localhost / 本番の証書名)は通る。
         for ok in ["tsubomi-pgbouncer", "localhost", "db.tsubomi-app.com"] {
             assert!(is_dns_hostname(ok), "{ok}");
         }
         // port 混入は全テナントの URL を壊すので拒否(`@host:6432:6432/db` になる)。
         assert!(!is_dns_hostname("tsubomi-pgbouncer:6432"));
-        // IP 字面量は DNS を介さない = 網別名が効かず証書にも IP SAN が無いので拒否。
+        // IP リテラルは DNS を介さない = ネットワーク別名が効かず証書にも IP SAN が無いので拒否。
         assert!(!is_dns_hostname("127.0.0.1"));
         assert!(!is_dns_hostname("::1"));
         // 空 label / 末尾ドット / 単独ドット / 先頭末尾ハイフン。

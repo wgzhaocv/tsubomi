@@ -15,7 +15,7 @@ import { formatDate } from "@/lib/format";
 import { useCreateVolume, useVolumes } from "@/lib/volumes";
 
 // ボリューム一覧。RESOURCES(サイドメニュー)の「ボリューム」項目に対応する実画面。
-// 作成は名前を 1 つ入れるだけ(平台が一意な host_path を生成する)。クリックで
+// 作成は名前を 1 つ入れるだけ(プラットフォームが一意な host_path を生成する)。クリックで
 // ファイルブラウザ(/volumes/:id/files)へ — 假根の中をそのまま URL に持つ。
 
 export default function Volumes() {

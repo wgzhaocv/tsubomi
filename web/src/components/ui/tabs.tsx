@@ -52,7 +52,7 @@ export function Tabs({
 
   const currentActiveKey = activeKey !== undefined ? activeKey : internalActiveKey;
 
-  // tablist 内の各 tab に安定 id 前缀を与え、aria-controls / aria-labelledby を双方向に紐づける
+  // tablist 内の各 tab に安定 id 接頭辞を与え、aria-controls / aria-labelledby を双方向に紐づける
   const idPrefix = `animal-tabs-${React.useId().replace(/:/g, "")}`;
   const tabId = (k: string) => `${idPrefix}-tab-${k}`;
   const panelId = (k: string) => `${idPrefix}-panel-${k}`;

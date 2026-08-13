@@ -33,7 +33,7 @@ pub const WORKFLOW_PATH: &str = ".github/workflows/tsubomi-deploy.yml";
 // ============ service 公開範囲(visibility)の wire 値 ============
 // DB の CHECK・API リクエスト・DTO で共通の文字列(サーバの enum と CLI の表示 / 比較が共有)。
 
-/// route ファイル無し = 公網不可視(subdomain は温存)。
+/// route ファイル無し = インターネット不可視(subdomain は温存)。
 pub const VISIBILITY_PRIVATE: &str = "private";
 /// 既定:会社 IP 許可リストからのみ(従来挙動)。
 pub const VISIBILITY_COMPANY: &str = "company";
@@ -120,12 +120,12 @@ pub struct AuthInfo {
     /// ログインを許可された Google Workspace ドメイン(`TSUBOMI_ALLOWED_HD`)。
     pub allowed_domains: Vec<String>,
     /// 外部(human)接続文字列機能が有効か(`TSUBOMI_DB_PUBLIC_ENABLED`)。off の部署
-    /// (CF Tunnel 等、公網 TCP 入口なし)では web が DB の接続文字列カードを隠す。
+    /// (CF Tunnel 等、公開 TCP 入口なし)では web が DB の接続文字列カードを隠す。
     /// 秘密ではない(機能の有無を示すだけ)。古いクライアント互換のため `serde(default)`。
     #[serde(default)]
     pub db_public_enabled: bool,
     /// キャッシュの外部(`rediss://`)接続文字列機能が有効か(`TSUBOMI_CACHE_PUBLIC_ENABLED`)。
-    /// on の部署では web が cache 詳細で「手元から繋がる外部串」カードを出す(off は内部串の控えのまま)。
+    /// on の部署では web が cache 詳細で「手元から繋がる外部接続文字列」カードを出す(off は内部接続文字列の控えのまま)。
     /// 秘密ではない。古いクライアント互換のため `serde(default)`。
     #[serde(default)]
     pub cache_public_enabled: bool,
@@ -143,8 +143,8 @@ pub struct Me {
     /// `"user"` か `"owner"`。
     pub role: String,
     /// このセッションが現在、有効な共有パスワード viewer grant を持つか
-    /// (web 専用・8h で失効)。前端の閲覧ルート守衛が `role=="owner" || is_viewer`
-    /// で判定する(表示制御は UX、実防御は後端ゲート)。
+    /// (web 専用・8h で失効)。フロントエンドの閲覧ルート守衛が `role=="owner" || is_viewer`
+    /// で判定する(表示制御は UX、実防御はバックエンドゲート)。
     #[serde(default)]
     pub is_viewer: bool,
 }
@@ -206,7 +206,7 @@ pub struct RenameDatabaseReq {
 }
 
 /// `POST /api/databases/:id/fork`:既存 DB をこの瞬間の内容ごと新しい DB に複製する。
-/// 新 DB は完全な新規資源(新 wire 名 + 新 role + 新パスワード。元と資格情報を共有しない)。
+/// 新 DB は完全な新規リソース(新 wire 名 + 新 role + 新パスワード。元と資格情報を共有しない)。
 /// fork 後の同期はしない — 分岐した瞬間から別々の道を行くのが仕様(dev 環境の意義 = 汚してよい)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkDatabaseReq {
@@ -239,7 +239,7 @@ pub struct CacheDto {
     /// 最後の rotate 時刻。これより前にコピーした接続文字列は失効済み。
     #[serde(default)]
     pub rotated_at: Option<DateTime<Utc>>,
-    /// key 前缀のもと(= `cache_details.acl_user`)。`REDIS_KEY_PREFIX` = `<namespace>:`。
+    /// key 接頭辞のもと(= `cache_details.acl_user`)。`REDIS_KEY_PREFIX` = `<namespace>:`。
     /// 旧サーバ応答には無い(serde 既定 = 空文字)ので、表示側は空なら出さない。
     #[serde(default)]
     pub namespace: String,
@@ -268,7 +268,7 @@ pub struct CacheDetailDto {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub rotated_at: Option<DateTime<Utc>>,
-    /// key 前缀のもと。`REDIS_KEY_PREFIX` = `<namespace>:`。
+    /// key 接頭辞のもと。`REDIS_KEY_PREFIX` = `<namespace>:`。
     pub namespace: String,
     /// namespace 配下の key 数(SCAN 概算)。取得不能(valkey 不通)は null。
     #[serde(default)]
@@ -361,7 +361,7 @@ pub struct RenameServiceReq {
     pub name: String,
 }
 
-/// `GET /api/services/:id/probe`:内網の単発 TCP 探活(private service の verify 素材)。
+/// `GET /api/services/:id/probe`:内部ネットワークへの単発 TCP 疎通確認(private service の verify 素材)。
 /// 公開 URL 検証の代替であって同等ではない —「container_port で TCP を受けた」までしか
 /// 言わない。停止 / 未デプロイでも 200(running=false)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,21 +388,21 @@ pub struct ServiceProbeDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceLimitsDto {
     pub memory_mb: i32,
-    /// None = CPU 硬上限なし(相対権重のみ)。
+    /// None = CPU 上限なし(相対的な重み付けのみ)。
     pub cpu_limit_millis: Option<i32>,
 }
 
-/// `POST /api/services/:id/limits`:資源上限の変更。**次のデプロイから反映**
-/// (docker の memory / nano_cpus はコンテナ作成時パラメータ。走行中コンテナには遡及しない)。
-/// 少なくとも 1 項目の指定が必要。`clear_cpu_limit` は CPU 硬上限の解除
+/// `POST /api/services/:id/limits`:リソース上限の変更。**次のデプロイから反映**
+/// (docker の memory / nano_cpus はコンテナ作成時パラメータ。実行中のコンテナには遡及しない)。
+/// 少なくとも 1 項目の指定が必要。`clear_cpu_limit` は CPU 上限の解除
 /// (`cpu_limit_millis` との同時指定は 400)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetServiceLimitsReq {
-    /// メモリ硬上限(MiB)。None = 変更しない。
+    /// メモリ上限(MiB)。None = 変更しない。
     pub memory_mb: Option<i32>,
-    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 変更しない。
+    /// CPU 上限(millicores、1000 = 1 CPU)。None = 変更しない。
     pub cpu_limit_millis: Option<i32>,
-    /// true = CPU 硬上限を解除(NULL に戻す)。
+    /// true = CPU 上限を解除(NULL に戻す)。
     #[serde(default)]
     pub clear_cpu_limit: bool,
 }
@@ -463,7 +463,7 @@ pub struct ServiceDto {
     pub phase: String,
     /// 期望状態:running / stopped。
     pub desired_state: String,
-    /// app が容器内で listen する port(traefik の転送先)。
+    /// app がコンテナ内で listen する port(traefik の転送先)。
     pub container_port: i32,
     /// 現在走るべきイメージ(まだ deploy していなければ None)。
     #[serde(default)]
@@ -475,20 +475,20 @@ pub struct ServiceDto {
     /// 古いサーバ相手でも壊れないよう default(空文字)を許す。
     #[serde(default)]
     pub url: String,
-    /// 公開範囲:private(route 無し = 公網不可視)/ company(既定 = 会社 IP のみ)/
+    /// 公開範囲:private(route 無し = インターネット不可視)/ company(既定 = 会社 IP のみ)/
     /// public(全網)。旧サーバ相手は default(空文字)= company 扱い。
     #[serde(default)]
     pub visibility: String,
-    /// true = 有状態(deploy は stop-first:数秒瞬断と引き換えにデータ目録を単独占有。
-    /// 自帯 DB 等)。false(既定)= start-first swap(無瞬断)。旧サーバ相手は default(false)。
+    /// true = ステートフル(deploy は stop-first:数秒瞬断と引き換えにデータディレクトリを単独占有。
+    /// 持ち込み DB 等)。false(既定)= start-first swap(無瞬断)。旧サーバ相手は default(false)。
     #[serde(default)]
     pub stateful: bool,
-    /// メモリ硬上限 MiB。旧サーバ相手は default(0 = 不明)— CLI の作成回显検証が
+    /// メモリ上限 MiB。旧サーバ相手は default(0 = 不明)— CLI の作成表示検証が
     /// 「指定値が反映されていない」を正しく検出できる値にしておく。
     #[serde(default)]
     pub memory_mb: i32,
-    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 硬上限なし(cpu_shares のソフト
-    /// 権重のみ)。旧サーバ相手は default(None)。
+    /// CPU 上限(millicores、1000 = 1 CPU)。None = 上限なし(cpu_shares のソフト
+    /// 重み付けのみ)。旧サーバ相手は default(None)。
     #[serde(default)]
     pub cpu_limit_millis: Option<i32>,
 }
@@ -499,19 +499,19 @@ pub struct ServiceDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServiceReq {
     pub name: String,
-    /// app が容器内で listen する port(省略 = 8080)。
+    /// app がコンテナ内で listen する port(省略 = 8080)。
     #[serde(default)]
     pub container_port: Option<i32>,
     /// 公開範囲(省略 = port から推導:8080 → company / それ以外 → private)。
     #[serde(default)]
     pub visibility: Option<String>,
-    /// true = 有状態コンテナとして作成(deploy が stop-first になる)。省略 = false。
+    /// true = ステートフルコンテナとして作成(deploy が stop-first になる)。省略 = false。
     #[serde(default)]
     pub stateful: Option<bool>,
-    /// メモリ硬上限 MiB(省略 = 1024)。
+    /// メモリ上限 MiB(省略 = 1024)。
     #[serde(default)]
     pub memory_mb: Option<i32>,
-    /// CPU 硬上限(millicores、1000 = 1 CPU。省略 = 硬上限なし)。
+    /// CPU 上限(millicores、1000 = 1 CPU。省略 = 上限なし)。
     #[serde(default)]
     pub cpu_limit_millis: Option<i32>,
 }
@@ -535,7 +535,7 @@ pub struct RegistryCreds {
 /// - **registry.pass は per-user**(同ユーザの各 service 作成で同じ値が再度返る — RegistryCreds)。
 ///
 /// CLI / web はこの DTO で GitHub 連携(repo / secret / variable / workflow)を組み立てる —
-/// 平台は GitHub に一切触れない(ユーザ自身の gh が実行する)。
+/// プラットフォームは GitHub に一切触れない(ユーザ自身の gh が実行する)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateServiceResp {
     #[serde(flatten)]
@@ -548,14 +548,14 @@ pub struct CreateServiceResp {
     pub hook_url: String,
     /// build 対象 arch(GitHub Variable `TSUBOMI_PLATFORMS`、例 `linux/arm64`。§6.6)。
     pub platforms: String,
-    /// GHA ランナー(GitHub Variable `TSUBOMI_RUNNER`。平台が platforms から導出 —
+    /// GHA ランナー(GitHub Variable `TSUBOMI_RUNNER`。プラットフォームが platforms から導出 —
     /// arm64 単独なら `ubuntu-24.04-arm` 原生でビルドが桁違いに速い)。旧サーバは
     /// 送ってこないので default(空)— CLI は空なら設定をスキップする。
     #[serde(default)]
     pub runner: String,
-    /// `.github/workflows/tsubomi-deploy.yml` のテンプレ(平台が単一真源として配る)。
+    /// `.github/workflows/tsubomi-deploy.yml` のテンプレ(プラットフォームが単一真源として配る)。
     pub workflow_yaml: String,
-    /// GitHub 連携の手順コマンド列(リポジトリ直下で実行)。平台が **単一真源**として
+    /// GitHub 連携の手順コマンド列(リポジトリ直下で実行)。プラットフォームが **単一真源**として
     /// 組み立てる(workflow_yaml と同じく GitHub 連携契約の一部)。CLI(json の steps /
     /// gh 不在時のフォールバック表示)と web がそのまま表示に使う — 文字列を二重定義しない。
     pub setup_commands: Vec<String>,
@@ -712,7 +712,7 @@ pub struct ServiceMetricsDto {
     /// メモリ使用量(bytes)。
     #[serde(default)]
     pub mem_bytes: Option<i64>,
-    /// メモリ硬上限(bytes、`--memory`)。無制限なら宿主機 RAM だが tsubomi は必ず設定する。
+    /// メモリ上限(bytes、`--memory`)。無制限ならホスト RAM だが tsubomi は必ず設定する。
     #[serde(default)]
     pub mem_limit_bytes: Option<i64>,
     /// 起動以来の再起動回数(inspect の RestartCount)。OOM / クラッシュループの手がかり。
@@ -793,19 +793,19 @@ pub struct CreateIpAllowReq {
 // ============ ガバナンス:管制面の可視化(M4 S1、owner 専用・web)============
 
 /// `GET /api/admin/ranking` の各行 / overview の素材。匿名化済み(設計 v2 §7):
-/// **ユーザの真名は出すが、資源は `display_name` ではなく匿名番号**(`service1` 等)。
-/// 資源の内容(DB の中身 / ファイル / env 明文)は一切載せない。
+/// **ユーザの真名は出すが、リソースは `display_name` ではなく匿名番号**(`service1` 等)。
+/// リソースの内容(DB の中身 / ファイル / env 明文)は一切載せない。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminResourceRow {
-    /// 資源 ID(不透明な UUID。名前/内容ではないので匿名化を破らない)。owner 専用で、
+    /// リソース ID(不透明な UUID。名前/内容ではないので匿名化を破らない)。owner 専用で、
     /// S3「最後の砦」の代理操作(stop/delete)が対象を指すのに使う。
     pub resource_id: Uuid,
-    /// 資源の所有者の真名(users.name、無ければ email)。
+    /// リソースの所有者の真名(users.name、無ければ email)。
     pub owner_name: String,
     pub kind: String,
     /// 匿名ラベル `<kind><anon_seq>`(例:service1 / database2 / volume1)。display_name は出さない。
     pub anon_label: String,
-    /// ソート対象の使用量(bytes)。database=存储 / volume=占用 / service=内存(稼働中)。
+    /// ソート対象の使用量(bytes)。database=ストレージ / volume=使用量 / service=メモリ(稼働中)。
     /// 取得不能(停止中 service / 計測タイムアウト / 未対応の cache 等)は null。
     pub usage_bytes: Option<i64>,
     /// service のみ:CPU 使用率(%)。取得不能 / 停止中は null。
@@ -819,15 +819,15 @@ pub struct AdminResourceRow {
 pub struct AdminOverviewKind {
     pub kind: String,
     pub count: i64,
-    /// 使用量の合計(bytes)。種別内で意味は単一(service=稼働中内存 / database=存储 /
-    /// volume=占用)。取得できなかった分は 0 として加算。
+    /// 使用量の合計(bytes)。種別内で意味は単一(service=稼働中メモリ / database=ストレージ /
+    /// volume=使用量)。取得できなかった分は 0 として加算。
     pub total_usage_bytes: i64,
 }
 
 /// `GET /api/admin/overview` のレスポンス。匿名化された全体サマリ。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminOverviewResp {
-    /// 資源を 1 つ以上持つ(削除されていない)ユーザ数。
+    /// リソースを 1 つ以上持つ(削除されていない)ユーザ数。
     pub user_count: i64,
     /// kind は service / database / volume の固定順(cache は M5)。
     pub kinds: Vec<AdminOverviewKind>,
@@ -849,10 +849,10 @@ pub struct AdminActionResp {
 
 /// `GET /api/admin/audit` の各行(監査ログ閲覧・S4、owner 専用・web)。actor / target_user は
 /// 真名(name、無ければ email)で join 済み。target_resource は匿名化のため UUID のまま
-/// (資源名は出さない)。detail は非機密の jsonb(cidr / kind / 用量など)をそのまま。
+/// (リソース名は出さない)。detail は非機密の jsonb(cidr / kind / 用量など)をそのまま。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntryDto {
-    /// audit_log.id(BIGINT)。キーセット分頁のカーソルにも使う(id DESC)。
+    /// audit_log.id(BIGINT)。キーセットページングのカーソルにも使う(id DESC)。
     pub id: i64,
     pub created_at: DateTime<Utc>,
     /// 'owner.delete_service' / 'db.rotate' / 'disk.alert' など。
@@ -861,7 +861,7 @@ pub struct AuditEntryDto {
     pub actor_name: Option<String>,
     /// 代理操作の対象ユーザの真名(owner.* のみ)。それ以外は null。
     pub target_user_name: Option<String>,
-    /// 対象資源(UUID のまま。資源名は出さない)。
+    /// 対象リソース(UUID のまま。リソース名は出さない)。
     pub target_resource: Option<Uuid>,
     /// 付帯情報(非機密の jsonb)。
     pub detail: Option<serde_json::Value>,
@@ -871,7 +871,7 @@ pub struct AuditEntryDto {
 
 // ============ ガバナンス:共有パスワード viewer(M4 S5、web 専用)============
 // design v2 §7「見るは共有密码」— ログイン済み社内ユーザが共有パスワードを入れると
-// 管制面を**只读**で見られる(overview / ranking)。owner は設定 / リセットでき、
+// 管制面を**読み取り専用**で見られる(overview / ranking)。owner は設定 / リセットでき、
 // リセットすると旧 grant は全失効する。
 
 /// `POST /api/admin/viewer/login` のリクエスト。共有パスワード平文(HTTPS 前提)。
@@ -910,7 +910,7 @@ pub struct AdminOwnerDto {
     /// users 行があれば真名(無ければ null)。
     #[serde(default)]
     pub name: Option<String>,
-    /// 操作中の本人か(前端で自分の削除ボタンを無効化する)。
+    /// 操作中の本人か(フロントエンドで自分の削除ボタンを無効化する)。
     pub is_current: bool,
     /// 既にログイン済み(users 行があり role=owner)= 有効。false = 次回ログインで昇格。
     pub registered: bool,

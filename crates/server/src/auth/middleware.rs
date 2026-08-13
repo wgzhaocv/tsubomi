@@ -73,7 +73,7 @@ pub async fn require_auth(
 
     // CSRF/CSWSH 対策:cookie 由来の **不安全メソッド**(POST/PUT/PATCH/DELETE)は Origin を
     // 管制面オリジンに固定する。テナント app は `<sub>.<domain>` = 管制面と same-site なので
-    // `SameSite=Lax` だけでは同站子域からの cookie 付き POST(stop/delete/rotate/token 発行 等)を
+    // `SameSite=Lax` だけでは同站サブドメインからの cookie 付き POST(stop/delete/rotate/token 発行 等)を
     // 防げない(WS の `auth::require_ws_origin` と同じ穴 — HTTP 側にも同じ門を立てる)。Bearer
     // (CLI)は cookie を持たず CSRF が成立しないので上の経路で素通り。ブラウザは不安全メソッドに
     // 必ず Origin を付けるので、欠落も fail-closed(`origin_allowed(None)=false`)で拒否する。

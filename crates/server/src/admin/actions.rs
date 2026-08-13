@@ -1,4 +1,4 @@
-//! 最後の砦(M4 S3):owner が他人の資源を stop / delete する二段確認。
+//! 最後の砦(M4 S3):owner が他人のリソースを stop / delete する二段確認。
 //! 1 段目(code 無し)= 6 桁コードを生成して owner **自身**にメール(本人確認)。
 //! 2 段目(code 有り)= admin_action_codes を単回消費で検証 → 実行(既存のソフト削除を再利用)
 //! → `target_user` 付きで audit。owner + session を毎回検証(require_owner_web)。
@@ -86,7 +86,7 @@ async fn handle(
     }
 }
 
-/// 対象資源の (kind, 所有者 user_id)。削除済み / 不在は 404。
+/// 対象リソースの (kind, 所有者 user_id)。削除済み / 不在は 404。
 async fn resolve_resource(state: &AppState, id: Uuid) -> AppResult<(String, Uuid)> {
     sqlx::query_as("SELECT kind, user_id FROM resources WHERE id = $1 AND deleted_at IS NULL")
         .bind(id)

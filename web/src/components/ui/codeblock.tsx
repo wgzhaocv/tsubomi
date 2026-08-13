@@ -171,7 +171,7 @@ export function CodeBlock({
   return (
     <div
       className={cn(
-        // 容器:原典 codeBlockStyle の bg/border/radius を literal で保持。
+        // コンテナ:原典 codeBlockStyle の bg/border/radius を literal で保持。
         "relative overflow-hidden rounded-[20px] border border-[#3d3028] bg-[#2b2118]",
         className,
       )}

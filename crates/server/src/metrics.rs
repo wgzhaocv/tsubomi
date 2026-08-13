@@ -3,16 +3,16 @@
 //!
 //! 設計の要(ユーザ制約):**① コードに性能影響を与えない ② 頻度は高くなくてよい
 //! ③ 誰も見ていない時は監視器を起動しない ④ WebSocket**。→ `tokio::sync::broadcast` の
-//! **共有サンプラ**で実現する:最初の閲覧者が WS で繋いだ時だけ採样 task を起こし、
+//! **共有サンプラ**で実現する:最初の閲覧者が WS で繋いだ時だけサンプリング task を起こし、
 //! 5s 周期で 1 回採って全閲覧者へ扇出、最後の閲覧者が切れたら(送信先ゼロ)自動停止する。
-//! → 閲覧者ゼロなら採样 task は存在しない(要件③)。
+//! → 閲覧者ゼロならサンプリング task は存在しない(要件③)。
 //!
 //! 採取は新 crate を足さず(設計 §10-D「sysinfo を足さない」)、Linux なら /proc、
 //! ディスクは `df`(macOS/Linux 両対応)。dev(macOS native)は /proc が無いので CPU/メモリは
 //! None(UI は「—」)、ディスクのみ実値。prod(Linux コンテナ、host network)は /proc が host
 //! 値を返すので全部実値。
 //!
-//! 鉴权:`/api/admin/metrics` は `require_auth` middleware の内側 = WS 升级(cookie 付き GET)も
+//! 認可:`/api/admin/metrics` は `require_auth` middleware の内側 = WS アップグレード(cookie 付き GET)も
 //! AuthCtx を持つ。そこで `require_viewer_web`(owner または共有パスワード viewer・session のみ。
 //! Bearer 不可)で守る — リソース概要自体が viewer 可なので一貫(host 指標は非機密の platform 値)。
 
@@ -28,7 +28,7 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// 採样間隔。頻度は高くなくてよい(要件②)— 5s。
+/// サンプリング間隔。頻度は高くなくてよい(要件②)— 5s。
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 /// CPU% を初回フレームから出すための暖機間隔(差分窓)。CPU は 2 サンプルの差分なので、
 /// これが無いと初回は prev 無しで None になり「CPU だけ数秒遅れて出る」。起動時に 1 度
@@ -37,7 +37,7 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const CPU_WARMUP: Duration = Duration::from_millis(1000);
 
 /// ホスト指標のスナップショット。WS で JSON テキストとして送る。各値は best-effort:
-/// 取得不能(dev の macOS で /proc 無し、df 失敗 等)は None で、前端は「—」を出す。
+/// 取得不能(dev の macOS で /proc 無し、df 失敗 等)は None で、フロントエンドは「—」を出す。
 #[derive(Clone, Serialize)]
 pub struct HostMetrics {
     /// CPU 使用率(%、0–100)。前回サンプルとの差分で算出。
@@ -52,8 +52,8 @@ pub struct HostMetrics {
     pub disk_total: Option<u64>,
     /// ディスク使用率(%)。
     pub disk_pct: Option<u8>,
-    /// 平台自身(server + infra)の**各コンテナ**の CPU/メモリ(加総せず個別に出す)。
-    /// 用户 app は含めない(managed ラベルで除外)。dev は server が容器でないので出ない。
+    /// プラットフォーム自身(server + infra)の**各コンテナ**の CPU/メモリ(合算せず個別に出す)。
+    /// 用户 app は含めない(managed ラベルで除外)。dev は server がコンテナでないので出ない。
     pub platform: Vec<crate::services::docker::ContainerStat>,
     /// ホストの温度センサ一覧。取得不能(dev macOS / VM)は空 = UI は行ごと非表示。
     pub temps: Vec<TempSensor>,
@@ -76,14 +76,14 @@ pub struct DiskBytes {
 }
 
 /// `GET /api/admin/metrics`(WebSocket)。owner または viewer(web セッション)のみ。
-/// 升级後は共有サンプラへ subscribe し、5s 毎のスナップショットを socket へ転送する。
+/// アップグレード後は共有サンプラへ subscribe し、5s 毎のスナップショットを socket へ転送する。
 pub async fn metrics_ws(
     auth: AuthCtx,
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<impl IntoResponse> {
-    // CSWSH 対策:升级の Origin を管制面オリジンに固定する(terminal WS と同じ — SameSite=Lax は
+    // CSWSH 対策:アップグレードの Origin を管制面オリジンに固定する(terminal WS と同じ — SameSite=Lax は
     // same-site のテナント app からの WS 乗っ取りを防げない)。読み取り専用だが同種の経路を塞ぐ。
     crate::auth::require_ws_origin(&headers, &state.config)?;
     require_viewer_web(&auth)?;
@@ -169,7 +169,7 @@ fn spawn_sampler(state: AppState) {
             prev_cpu = cur_cpu;
             let mem = read_mem().await;
             let disk = disk_metrics(&state.config.volumes_dir).await;
-            // 平台自身の各コンテナ(server + infra)。docker stats を並行に取る(~1-2s)。
+            // プラットフォーム自身の各コンテナ(server + infra)。docker stats を並行に取る(~1-2s)。
             // 採取はロックの外なので host 指標の鮮度を妨げない。
             let platform = crate::services::docker::platform_stats(&state).await;
             let temps = read_temps().await;

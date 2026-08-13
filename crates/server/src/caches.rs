@@ -1,5 +1,5 @@
 //! cache(valkey)リソースの API ハンドラ(doc/paas-m5-design.md §4)。database(`databases.rs`)を
-//! 範に、平台が「期望状態」を resources / cache_details に持ち、現実(valkey の per-cache ACL)を
+//! 範に、プラットフォームが「期望状態」を resources / cache_details に持ち、現実(valkey の per-cache ACL)を
 //! そこへ収束させる。create は valkey に ACL を先に作り、成功してから platform 行を入れる
 //! (失敗時は ACL を掃除)。web と CLI は同一ハンドラの 2 入口 — 認証 extractor(AuthCtx)だけが分岐点。
 
@@ -50,11 +50,11 @@ pub fn routes() -> Router<AppState> {
         .route("/caches/{id}/rotate", post(rotate))
 }
 
-/// url/rotate が返す接続文字列。**公開 cache が有効な部署**(公網 VPS + sni-gate + valkey TLS)では
-/// 外部 `rediss://cache_public_host:port`(人が手元から繋げる upstash 式の串)、無効なら従来どおり
+/// url/rotate が返す接続文字列。**公開 cache が有効な部署**(グローバル IP の VPS + sni-gate + valkey TLS)では
+/// 外部 `rediss://cache_public_host:port`(人が手元から繋げる upstash 式の接続文字列)、無効なら従来どおり
 /// 内部 `redis://tsubomi-valkey:6379`(注入された service コンテナからのみ届く控え・§11-B)。
-/// `rediss` は ioredis 等が既定で CA 検証する(端点の valkey が LE 証書を出す)ので追加オプション不要。
-/// **硬 403 闸は付けない**:cache の内部串は「注入される REDIS_URL の控え」として off でも意味がある
+/// `rediss` は ioredis 等が既定で CA 検証する(エンドポイントの valkey が LE 証書を出す)ので追加オプション不要。
+/// **一律の 403 ゲートは付けない**:cache の内部接続文字列は「注入される REDIS_URL の控え」として off でも意味がある
 /// (DB の `require_db_public` とは意図的に非対称。詳細は `doc/paas-cache-public-design.md`)。
 fn build_url(state: &AppState, acl_user: &str, password: &str) -> String {
     let cfg = &state.config;
@@ -138,7 +138,7 @@ async fn insert_rows(
 
     // ユーザ単位で anon_seq の採番を直列化(同時 create の競合を防ぐ)。
     // ロック鍵は kind ごとに別(database=42 / cache=43 / volume=44 / service=45)= 同一ユーザの
-    // 跨 kind 並行 create が無駄に直列化しないように(perf review P6)。
+    // kind 横断 並行 create が無駄に直列化しないように(perf review P6)。
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 43)")
         .bind(user_id)
         .execute(&mut *tx)
@@ -303,7 +303,7 @@ pub async fn url(
 
 /// `POST /api/caches/:id/rotate`:パスワードを差し替える(旧接続文字列は即失効)。
 /// `valkey::set_user`(reset → 新パスで再構築)で旧パスを消し新パスを設定 = 既存の key 規則
-/// /コマンド白名単は維持(§7.1)。**再デプロイで新文字列が効く**(値は起動の瞬間に解決)。
+/// /コマンド許可リストは維持(§7.1)。**再デプロイで新文字列が効く**(値は起動の瞬間に解決)。
 ///
 /// 順序は **DB(真実源)を先に更新 → valkey に適用**(背骨:cache_details が期望状態、valkey は
 /// そこへ収束する)。これにより set_user が落ちても reconcile が DB の新パスへ**前向きに**収束する
@@ -389,7 +389,7 @@ pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<String>
     .await?;
     let (acl_user, namespace) = row.ok_or(AppError::NotFound)?;
 
-    // ACL を削除(= 即座にその資格でログイン不可)。key は内存に温存(復元で生き返る)。
+    // ACL を削除(= 即座にその資格でログイン不可)。key はメモリに温存(復元で生き返る)。
     valkey::del_user(&state.valkey, &acl_user).await?;
 
     let meta = json!({ "acl_user": acl_user, "namespace": namespace });

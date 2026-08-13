@@ -40,26 +40,26 @@ use tsubomi_shared::{
 use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
-/// subdomain 生成の予約語(平台 / インフラのホスト名と衝突させない)。
+/// subdomain 生成の予約語(プラットフォーム / インフラのホスト名と衝突させない)。
 const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "api"];
 /// deploy_key の乱数バイト数(base64url で ≈43 字)。HMAC の鍵そのもの。
 const DEPLOY_KEY_BYTES: usize = 32;
-/// 平台の HTTP 契約港(PORT env の既定 = workflow / traefik の想定)。visibility 推導の基準。
+/// プラットフォームの HTTP 契約港(PORT env の既定 = workflow / traefik の想定)。visibility 推導の基準。
 /// INSERT が常に列を明示するので実効真源はこの定数 — DDL の DEFAULT 8080 と一致させること。
 const DEFAULT_CONTAINER_PORT: i32 = 8080;
 const CONTAINER_PORT_RANGE: std::ops::RangeInclusive<i32> = 1..=65535;
-/// メモリ硬上限の既定 / 範囲(MiB)。既定 **1024** = migration 20260620 が OOM 対策で
+/// メモリ上限の既定 / 範囲(MiB)。既定 **1024** = migration 20260620 が OOM 対策で
 /// 512→1024 へ引き上げた DDL DEFAULT と一致させる(512 に戻すと是正の逆行)。
 /// 下限は最小級の app、上限は 16GB 共有ホストの節度。
 const DEFAULT_MEMORY_MB: i32 = 1024;
 const MEMORY_MB_RANGE: std::ops::RangeInclusive<i32> = 128..=4096;
-/// CPU 硬上限の許容範囲(millicores)。下限 100 = 0.1 CPU(それ未満は実用にならない)、
-/// 上限 16000 = 16 CPU(単機の物理上限を超えた指定は docker がエラーにするだけなので緩く)。
+/// CPU 上限の許容範囲(millicores)。下限 100 = 0.1 CPU(それ未満は実用にならない)、
+/// 上限 16000 = 16 CPU(単一ホストの物理上限を超えた指定は docker がエラーにするだけなので緩く)。
 const CPU_LIMIT_MILLIS_RANGE: std::ops::RangeInclusive<i32> = 100..=16000;
 
 /// 公開範囲(`service_details.visibility`)。DB の CHECK と対を成す単一真源 —
 /// API 入力検証(不正値は 400)と route 分岐(ipallow 有無)をここに集約する。
-/// 意味論は公開範囲設計 §0:private = route ファイルを書かない(公網不可視・subdomain 温存)、
+/// 意味論は公開範囲設計 §0:private = route ファイルを書かない(インターネット不可視・subdomain 温存)、
 /// company = 既定(route + 会社 IP 許可リスト)、public = route はあるが ipallow を挂けない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Visibility {
@@ -101,8 +101,8 @@ impl Visibility {
 }
 
 /// visibility 省略時の既定を port から推導する(stateful 設計 §0-B。推導は create のこの一度きり —
-/// 以後 port と visibility は独立)。8080 = 平台の HTTP 契約港 → 従来どおり company。それ以外 =
-/// 非 HTTP ソフト(自帯 DB 等)の想定 → private(traefik は HTTP しか話せないので route が
+/// 以後 port と visibility は独立)。8080 = プラットフォームの HTTP 契約港 → 従来どおり company。それ以外 =
+/// 非 HTTP ソフト(持ち込み DB 等)の想定 → private(traefik は HTTP しか話せないので route が
 /// 在っても乱码/502 の噪音にしかならない。公開したい非 8080 の HTTP 工具は明示指定で開ける)。
 fn default_visibility(container_port: i32) -> Visibility {
     if container_port == DEFAULT_CONTAINER_PORT {
@@ -232,7 +232,7 @@ pub async fn get_one(
 /// `PATCH /api/services/:id`:表示名のリネーム。**subdomain は不変** — 公開 URL・
 /// GitHub repo 名・registry repo・route ファイルはすべて subdomain / id に紐づくので
 /// 何も動かない(db rename の「接続文字列は変えない」と同型)。display_name は
-/// 表示と名前→id 解決にだけ効く。同名衝突は活体の部分ユニークが 409 に落とす。
+/// 表示と名前→id 解決にだけ効く。同名衝突は稼働中の部分ユニークが 409 に落とす。
 pub async fn rename(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -277,7 +277,7 @@ pub async fn rename(
     Ok(Json(service_row_to_dto(row, &state.config)))
 }
 
-/// memory_mb の範囲検証(create / limits 共有。定数・文案の単一真源)。
+/// memory_mb の範囲検証(create / limits 共有。定数・文言の単一真源)。
 fn check_memory_mb(m: i32) -> AppResult<()> {
     if !MEMORY_MB_RANGE.contains(&m) {
         return Err(AppError::BadRequest(format!(
@@ -407,9 +407,9 @@ pub(crate) async fn latest_succeeded_deploy(
     .await?)
 }
 
-/// 直近に成功した deploy の **id**。route が指すべき容器名は `deploy::container_name(service_id, この id)`
+/// 直近に成功した deploy の **id**。route が指すべきコンテナ名は `deploy::container_name(service_id, この id)`
 /// で一意に決まる(start-first の命名規約)。reconcile の route ドリフト収束 / 中断デプロイ復旧が、
-/// 「走っている任意の容器」ではなく**この容器**を正とするための真源(新旧併存時に route を旧へ巻き戻さない)。
+/// 「走っている任意のコンテナ」ではなく**このコンテナ**を正とするための真源(新旧併存時に route を旧へ巻き戻さない)。
 pub(crate) async fn latest_succeeded_deploy_id(
     state: &AppState,
     service_id: Uuid,
@@ -441,21 +441,21 @@ pub(crate) async fn latest_succeeded_deploy_ref(
     .await?)
 }
 
-/// serving すべき容器名 = **直近成功 deploy の容器**(`container_name`)を DB から導く
-/// (実走確認はしない)。成功 deploy 無し = 未デプロイは None。
+/// serving すべきコンテナ名 = **直近成功 deploy のコンテナ**(`container_name`)を DB から導く
+/// (稼働確認はしない)。成功 deploy 無し = 未デプロイは None。
 pub(crate) async fn expected_container_name(state: &AppState, id: Uuid) -> Option<String> {
     let deploy_id = match latest_succeeded_deploy_id(state, id).await {
         Ok(Some(d)) => d,
         Ok(None) => return None,
         Err(e) => {
-            tracing::warn!(error = ?e, %id, "serving 容器の解決:直近成功 deploy の取得に失敗");
+            tracing::warn!(error = ?e, %id, "serving コンテナの解決:直近成功 deploy の取得に失敗");
             return None;
         }
     };
     Some(deploy::container_name(id, deploy_id))
 }
 
-/// serving すべき容器名が今 `running_names` に居る(= 実際に走っている)時だけ Some。走っていない
+/// serving すべきコンテナ名が今 `running_names` に居る(= 実際に走っている)時だけ Some。走っていない
 /// (mid-deploy / クラッシュ)や成功 deploy 無しは None。新旧併存時に「正しい新版」を一意に選ぶ
 /// 唯一の判断点(reconcile の route drift 収束と網リンクの callee 解決が共有 — route ファイルでは
 /// なく DB を真源にするので private でも解ける)。
@@ -468,7 +468,7 @@ pub(crate) async fn expected_running_container(
     running_names.contains(&expected).then_some(expected)
 }
 
-/// `expected_running_container` の糖衣:docker から実走一覧を引いてから判定する。
+/// `expected_running_container` の糖衣:docker から稼働中一覧を引いてから判定する。
 /// `attach_callees`(網リンク)と visibility 切替が使う(reconcile は presence を既に
 /// 手に持っているので本体を直接呼ぶ — docker 照会を二重にしない)。
 /// SQL を先に引く — 未デプロイの callee で docker 照会を無駄撃ちしない。
@@ -571,11 +571,11 @@ pub(crate) async fn soft_delete(state: &AppState, id: Uuid) -> AppResult<()> {
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
-    // 削除を実際に行った時だけ私網を撤去する(コンテナは stop_containers で除去済み = 順序 OK)。
+    // 削除を実際に行った時だけプライベートネットワークを撤去する(コンテナは stop_containers で除去済み = 順序 OK)。
     // 競合で rows_affected==0 の側は先行 deleter が撤去済みなので触らない。restore は次 deploy の
     // ensure_service_network で再生成されるので restore 側は無改修。失敗は reconcile の孤児 GC が回収。
     if let Err(e) = network::remove_service_network(state, id).await {
-        tracing::warn!(error = ?e, %id, "soft_delete: 私網の撤去に失敗(reconcile が後で回収)");
+        tracing::warn!(error = ?e, %id, "soft_delete: プライベートネットワークの撤去に失敗(reconcile が後で回収)");
     }
     Ok(())
 }
@@ -603,7 +603,7 @@ pub async fn stop(
 /// `POST /api/services/:id/visibility`:公開範囲の切替(所有者のみ。公開範囲設計 §7)。
 /// **即時反映** — route ファイルは DB の期望状態から再生成できるので、lock 内で DB を先に更新し
 /// (背骨:DB=期望状態)、現実(ファイル)をその場で収束させる。env 注入と違い再デプロイ不要。
-/// public(ipallow 無し = 全網公開)も**本人裁量 + audit 兜底**で owner 限定にしない(§0-C)。
+/// public(ipallow 無し = 全網公開)も**本人裁量 + audit による事後追跡**で owner 限定にしない(§0-C)。
 pub async fn set_visibility(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -646,8 +646,8 @@ pub async fn set_visibility(
     .await;
 
     // 現実収束(lock 内)。失敗しても DB は更新済み = reconcile が ≤30s で収束させるので、
-    // 文案直通の 503(UnavailableMsg)で「次の一手」を返す(AI が自己修正できる — CLI 契約。
-    // 通常の 5xx は into_response が「内部エラー」に編校し文案が届かない)。生エラーは log のみ
+    // 文言直通の 503(UnavailableMsg)で「次の一手」を返す(AI が自己修正できる — CLI 契約。
+    // 通常の 5xx は into_response が「内部エラー」に編校し文言が届かない)。生エラーは log のみ
     // (クライアントへ内部詳細は出さない)。
     let converge_err = |e: AppError| {
         tracing::error!(error = ?e, %id, "visibility 切替の route 反映に失敗");
@@ -658,7 +658,7 @@ pub async fn set_visibility(
     match vis {
         Visibility::Private => route::remove(&state, id).map_err(converge_err)?,
         Visibility::Company | Visibility::Public => {
-            // serving 中(直近成功 deploy の容器が実走)の時だけ route を書く。停止 / 未デプロイは
+            // serving 中(直近成功 deploy のコンテナが稼働)の時だけ route を書く。停止 / 未デプロイは
             // 何も書かない —「停止 service に route ファイル無し」の不変条件を守り、次の
             // start / deploy が新しい visibility で書く(§7)。
             if let Some(container) = serving_container(&state, id).await {
@@ -678,7 +678,7 @@ pub async fn set_visibility(
 }
 
 /// `POST /api/services/:id/limits`:memory / cpus 上限の変更。値は run_digest_inner が
-/// デプロイのたびに DB から読み直すので、**次のデプロイから反映**(走行中コンテナには
+/// デプロイのたびに DB から読み直すので、**次のデプロイから反映**(実行中コンテナには
 /// 遡及しない — docker の memory / nano_cpus はコンテナ作成時パラメータ)。visibility と
 /// 違い現実収束段が無い = DB 更新だけなので deploy_lock も不要(UPDATE は原子的で、
 /// 進行中デプロイは自分が読んだ時点の値で完走する。それも仕様どおり「次から」)。
@@ -700,7 +700,7 @@ pub async fn set_limits(
             "cpu_limit_millis と clear_cpu_limit は同時に指定できません".into(),
         ));
     }
-    // 範囲検証は create と共有(check_* が定数・文案ごと単一真源)。
+    // 範囲検証は create と共有(check_* が定数・文言ごと単一真源)。
     if let Some(m) = req.memory_mb {
         check_memory_mb(m)?;
     }
@@ -743,9 +743,9 @@ pub async fn set_limits(
 
 /// `POST /api/services/:id/stateful`:stateful を **false→true の単方向**で有効化する
 /// (stateful 設計 §0-C / §10-D)。true→false は入口ごと作らない — stateless の swap
-/// デプロイは新旧コンテナが同一データ目録を同時に開く方向で、既に貯めたデータを
+/// デプロイは新旧コンテナが同一データディレクトリを同時に開く方向で、既に貯めたデータを
 /// 壊し得る。false→true は既存 workaround(DB を stateless で走らせてしまった)の救済で、
-/// 次のデプロイから stop-first になるだけ(走行中コンテナには遡及しない)。
+/// 次のデプロイから stop-first になるだけ(実行中のコンテナには遡及しない)。
 /// 既に true なら冪等成功(触らない・audit も書かない)。
 pub async fn set_stateful(
     auth: AuthCtx,
@@ -802,7 +802,7 @@ pub async fn set_stateful(
 
 /// `GET /api/services/:id/metrics`:稼働中コンテナの 1 発メトリクス(CPU / メモリ(上限比)/
 /// 再起動回数 / uptime / OOM)。停止 / 未デプロイでも 200(running=false)。所有者のみ。
-/// Bearer / session 両対応(logs / status と同層 = 自資源の読み取り)。
+/// Bearer / session 両対応(logs / status と同層 = 自リソースの読み取り)。
 pub async fn metrics(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -812,7 +812,7 @@ pub async fn metrics(
     Ok(Json(docker::service_metrics(&state, id).await))
 }
 
-/// `GET /api/services/:id/probe`:内網の単発 TCP 探活(private service の verify 素材。
+/// `GET /api/services/:id/probe`:内部ネットワークへの単発 TCP 疎通確認(private service の verify 素材。
 /// visibility 設計で verify を private 短絡にした際の残余 —「今この瞬間 listen しているか」を
 /// 公開 URL 無しで確かめる入口が無かった)。metrics と同じ「不在も答え」型:停止 / 未デプロイ
 /// でも 200(running=false)。判定の付加情報として is_callee(M6 リンクの被注入 = listen
@@ -843,7 +843,7 @@ pub async fn probe(
     }))
 }
 
-/// `?tail=N&since=TS`(since = unix 秒。快照 / 流式で共用)。
+/// `?tail=N&since=TS`(since = unix 秒。スナップショット / 流式で共用)。
 #[derive(serde::Deserialize)]
 pub struct LogsQuery {
     tail: Option<usize>,
@@ -905,7 +905,7 @@ async fn running_container_or_400(state: &AppState, id: Uuid) -> AppResult<Strin
 
 /// `POST /api/services/:id/exec`:稼働中コンテナ内で 1 コマンドを **非対話**に実行し、
 /// stdout/stderr/exit_code を捕獲して返す(`docker exec`(`-it` なし)相当 = AI / スクリプト /
-/// 線上診断用。対話シェルは web ターミナル)。所有者の自資源のみ(`ensure_owned`)= 既存の
+/// 線上診断用。対話シェルは web ターミナル)。所有者の自リソースのみ(`ensure_owned`)= 既存の
 /// web SQL と同一ティアの暴露(env 注入値が見える等は受容済み)。argv はそのまま渡す
 /// (shell 解釈なし):pipe/glob は呼び出し側が `sh -c` を組む。
 pub async fn exec(
@@ -941,7 +941,7 @@ pub async fn exec(
 
 /// `GET /api/services/:id/terminal`(WebSocket):所有者が自分の稼働中コンテナ内で対話シェルを
 /// 開く(**web 専用** — 対話 PTY は CLI の AI フレンドリ JSON 契約に合わない。CLI は一発 exec)。
-/// 所有者の自資源のみ(`ensure_owned`)= web SQL と同一ティアの暴露。升级前にコンテナ稼働中を
+/// 所有者の自リソースのみ(`ensure_owned`)= web SQL と同一ティアの暴露。アップグレード前にコンテナ稼働中を
 /// 確認し、双方向ポンプは `docker::handle_terminal`(地雷はそちらのコメント)。
 pub async fn terminal(
     auth: AuthCtx,
@@ -950,7 +950,7 @@ pub async fn terminal(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<impl IntoResponse> {
-    // CSWSH 対策:升级の Origin を管制面オリジンに固定する(SameSite=Lax は same-site の
+    // CSWSH 対策:アップグレードの Origin を管制面オリジンに固定する(SameSite=Lax は same-site の
     // テナント app からの WS 乗っ取りを防げない)。
     crate::auth::require_ws_origin(&headers, &state.config)?;
     // 対話ターミナルは **web 専用**(owner ガバナンスと同じく session 由来を要求 =
@@ -1093,7 +1093,7 @@ pub async fn list_injections(
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<InjectionRow> = sqlx::query_as(
         // 「注入値が今のコンテナと違う」時刻 = 注入の作成時刻と **cache の rotate 時刻**の遅い方。
-        // cache rotate は注入される資格情報そのもの(ACL パスワード)を差し替えるので、走行中の app は
+        // cache rotate は注入される資格情報そのもの(ACL パスワード)を差し替えるので、実行中の app は
         // 即座に認証エラーになる = 再デプロイが要る。database の rotate は **human role だけ**を回し
         // app role(注入される側)は不変なので、あちらは対象にしない(m3 設計 §7.2)。
         //
@@ -1129,7 +1129,7 @@ pub async fn list_injections(
 
 /// `POST /api/services/:id/injections`:database / volume / cache / **別 service** を注入する
 /// (バインディング)。反映には再デプロイ(値は起動の瞬間に解決 — 決定 #5)。service 注入は
-/// 内部直連 URL を渡し、網リンクは deploy / reconcile が張る(`doc/paas-service-link-design.md`)。
+/// 内部直接接続 URL を渡し、網リンクは deploy / reconcile が張る(`doc/paas-service-link-design.md`)。
 pub async fn create_injection(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -1139,7 +1139,7 @@ pub async fn create_injection(
     ensure_owned(&state, auth.user_id, id).await?;
 
     // 注入元は本人の database / volume / cache / service(未削除)。kind・表示名・subdomain(service のみ)を取る。
-    // 源クエリが user_id=$2 で縛るので、別ユーザの資源は NotFound = **同一 owner 限定は自動で担保**。
+    // 源クエリが user_id=$2 で縛るので、別ユーザのリソースは NotFound = **同一 owner 限定は自動で担保**。
     let resource: Option<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT r.kind, r.display_name, sd.subdomain
            FROM resources r
@@ -1188,7 +1188,7 @@ pub async fn create_injection(
     validate_env_key(&env_var)?;
 
     // 注入は env_var 本体に加えて**派生 env**(database の `_HOST`/`_PASSWORD` 等)も生む。既存注入の
-    // 占用名(本体 + 派生)と 1 つでも被ると、deploy の後勝ちで「URL は A・パスワードは B」のような
+    // 占有名(本体 + 派生)と 1 つでも被ると、deploy の後勝ちで「URL は A・パスワードは B」のような
     // 静かな取り違えになる(env_var 自体の重複は UNIQUE が弾くが、派生は素通りする)。ここで断る。
     // 検査と INSERT は**同一 tx + service 行の行ロック**で行う:別々にやると、空の service へ
     // `X` と `X_URL` を同時 POST した 2 本が互いを見ずに両方通り(env_var が違うので UNIQUE も
@@ -1274,8 +1274,8 @@ pub async fn create_injection(
     ))
 }
 
-/// この service の既存注入が**占用している env 名** → その持ち主の env_var。
-/// 占用 = 注入の env_var 本体 + そこから生える派生名(`inject::occupied_env_keys`)。
+/// この service の既存注入が**占有している env 名** → その持ち主の env_var。
+/// 占有 = 注入の env_var 本体 + そこから生える派生名(`inject::occupied_env_keys`)。
 async fn injection_env_names(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     service_id: Uuid,
@@ -1314,7 +1314,7 @@ async fn shadowed_static_env(
 }
 
 /// `DELETE /api/injections/:id`:注入を外す(所有権は service 経由で確認)。service 注入なら
-/// caller の私網から callee を即切断する(網リンクの掃除。再デプロイ不要)。
+/// caller のプライベートネットワークから callee を即切断する(網リンクの掃除。再デプロイ不要)。
 pub async fn delete_injection(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -1462,7 +1462,7 @@ fn mask_injected_value(key: &str, value: &str) -> String {
 }
 
 /// URL 形(`scheme://user:pass@host…`)の値のパスワード部だけを `***` に伏せる。
-/// URL でない値はそのまま(STORAGE_PATH / 前缀 / 静的 env は原文 — 暴露ティアは exec と同じで、
+/// URL でない値はそのまま(STORAGE_PATH / 接頭辞 / 静的 env は原文 — 暴露ティアは exec と同じで、
 /// これは事故防止のエチケット)。
 fn mask_url_password(value: &str) -> String {
     // scheme:// と @ の間に `user:pass` があるときだけ pass を置換。素朴なパースで十分
@@ -1609,11 +1609,11 @@ fn validate_mount_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// `POST /api/services`:service の平台側メタを作る(resources + service_details +
+/// `POST /api/services`:service のプラットフォーム側メタを作る(resources + service_details +
 /// deploy_key 生成 + subdomain 採番)。gh / registry 資格情報 / workflow は後チャンク。
 /// deploy_key(HMAC の鍵原文)は作成時にここで平文返却する。なお所有者は後から
 /// `GET /services/:id/deploy-config`(`tbm deploy --local` の退路)で **再取得できる**(自分の
-/// service のみ)— 平文を平台が持つので可能。**rotate API はまだ無い**:鍵漏洩時はサービスを
+/// service のみ)— 平文をプラットフォームが持つので可能。**rotate API はまだ無い**:鍵漏洩時はサービスを
 /// 削除して作り直す(per-service deploy_key/registry pass の rotate は後相 §で検討)。
 pub async fn create(
     auth: AuthCtx,
@@ -1643,7 +1643,7 @@ pub async fn create(
         None => default_visibility(container_port),
     };
     let stateful = req.stateful.unwrap_or(false);
-    // CPU 硬上限は任意(None = 従来どおりソフト権重のみ)。指定時だけ範囲を検証。
+    // CPU 上限は任意(None = 従来どおりソフトな重み付けのみ)。指定時だけ範囲を検証。
     if let Some(cpu) = req.cpu_limit_millis {
         check_cpu_limit_millis(cpu)?;
     }
@@ -1723,8 +1723,8 @@ pub async fn create(
     )
     .await;
 
-    // GitHub 連携に必要な残りの値(平台は GitHub に触れない — CLI/web がこの値で組み立てる)。
-    // setup_commands は平台が単一真源として作る(CLI/web は文字列を再構築しない)。registry は
+    // GitHub 連携に必要な残りの値(プラットフォームは GitHub に触れない — CLI/web がこの値で組み立てる)。
+    // setup_commands はプラットフォームが単一真源として作る(CLI/web は文字列を再構築しない)。registry は
     // service 作成より前に用意済み(上)。
     let hook_url = format!("{}/api/hook/deploy", state.config.server_url);
     let platforms = state.config.platforms.clone();
@@ -1795,7 +1795,7 @@ async fn insert_attempt(
 
     let mut tx = db.begin().await?;
     // anon_seq 採番の直列化。ロック鍵は kind ごとに別(database=42/cache=43/volume=44/service=45)=
-    // 跨 kind 並行 create を無駄に直列化しない(perf review P6)。
+    // kind 横断 並行 create を無駄に直列化しない(perf review P6)。
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1::text), 45)")
         .bind(user_id)
         .execute(&mut *tx)
@@ -1945,7 +1945,7 @@ mod tests {
         // volume は派生しない(mount_path を env_var に入れるだけ)。未知 kind も同様。
         assert!(inject::derived_env_keys("volume", "STORAGE_PATH").is_empty());
         assert!(inject::derived_env_keys("nope", "X_URL").is_empty());
-        // 占用名 = 本体 + 派生(create_injection の衝突検査が引く集合)。
+        // 占有名 = 本体 + 派生(create_injection の衝突検査が引く集合)。
         let occupied = inject::occupied_env_keys("cache", "REDIS_URL");
         assert!(occupied.contains(&"REDIS_URL".to_string()));
         assert!(occupied.contains(&"REDIS_KEY_PREFIX".to_string()));
@@ -1975,9 +1975,9 @@ mod tests {
 
     #[test]
     fn default_visibility_derives_from_port() {
-        // 8080(平台の HTTP 契約港)= 従来どおり company。
+        // 8080(プラットフォームの HTTP 契約港)= 従来どおり company。
         assert_eq!(default_visibility(8080), Visibility::Company);
-        // それ以外(自帯 DB 等の非 HTTP ソフト想定)= private。
+        // それ以外(持ち込み DB 等の非 HTTP ソフト想定)= private。
         assert_eq!(default_visibility(5432), Visibility::Private);
         assert_eq!(default_visibility(6379), Visibility::Private);
         assert_eq!(default_visibility(3000), Visibility::Private);

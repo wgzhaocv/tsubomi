@@ -26,12 +26,12 @@ pub struct AppStateInner {
     /// docker.sock の async クライアント(M3)。コンテナの pull / 起動 / 停止 /
     /// 一覧(後の reconcile)が使う。プラットフォームはホスト直走りで docker.sock を保持。
     pub docker: bollard::Docker,
-    /// service 単位のデプロイ直列化ロック(単機運用なのでインメモリで足りる)。
+    /// service 単位のデプロイ直列化ロック(単一ホスト運用なのでインメモリで足りる)。
     /// 同一 service への同時 deploy(hook / `--local`)はここで順番待ちし、コンテナ /
     /// route / 状態への競合を防ぐ。S7/S8 の start/stop/reconcile も同 service を触る時は
     /// このロックを取るべき(現状は run_digest だけが使う)。外側 = map を守る std Mutex、
     /// 中身 = 各 service の tokio Mutex(.await をまたいで保持するため)。
-    /// map は service 数ぶんしか増えない(小さな Arc が残るだけ。単機規模では掃除不要)。
+    /// map は service 数ぶんしか増えない(小さな Arc が残るだけ。単一ホスト規模では掃除不要)。
     pub deploy_locks: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     /// ホスト指標(CPU/メモリ/ディスク)の WS 配信チャンネル(metrics.rs)。閲覧者が
     /// 繋いでいる間だけ共有サンプラが 5s 毎に送る。初期受信者は捨てる(`subscribe` は

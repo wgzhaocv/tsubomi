@@ -9,7 +9,7 @@ import { useRunQuery } from "@/lib/databases";
 import { useEditorStore } from "@/lib/store/editor";
 
 // SQL コンソール(独立ページ)。当該 DB 自身の human 資格でサーバ側が実行する
-// (statement_timeout 10s + サーバ側 15s の硬い上限)。任意 SQL を流せる。
+// (statement_timeout 10s + サーバ側 15s の上限)。任意 SQL を流せる。
 // SQL 草稿と直近結果は zustand に置く(画面遷移で消えない。SQL は localStorage 永続)。
 
 // このマシンの修飾キー表示。実行判定は metaKey||ctrlKey の両対応なので、ここは

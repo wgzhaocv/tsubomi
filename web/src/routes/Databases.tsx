@@ -15,7 +15,7 @@ import { useCreateDatabase, useDatabases } from "@/lib/databases";
 import { formatBytes, formatDate, formatRelative } from "@/lib/format";
 
 // データベース一覧。RESOURCES(サイドメニュー)の「データベース」項目に対応する
-// 実画面。作成は名前を 1 つ入れるだけ(平台が wire 名・role・パスワードを生成する)。
+// 実画面。作成は名前を 1 つ入れるだけ(プラットフォームが wire 名・role・パスワードを生成する)。
 
 export default function Databases() {
   const navigate = useNavigate();

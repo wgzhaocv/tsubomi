@@ -33,7 +33,7 @@ function CacheDetailInner({ id }: { id: string }) {
   const navigate = useNavigate();
   const { data: cache, error } = useCache(id);
   const { data: authInfo } = useAuthInfoQuery();
-  // 公開 cache 有効な部署か。有効→外部 rediss:// 串(手元から繋がる)、無効→内部串の控え。
+  // 公開 cache 有効な部署か。有効→外部 rediss:// 串(手元から繋がる)、無効→内部接続文字列の控え。
   const publicEnabled = authInfo?.cache_public_enabled ?? false;
 
   const rename = useRenameCache(id);
@@ -152,7 +152,7 @@ function CacheDetailInner({ id }: { id: string }) {
 
           {cache && (
             <p className="text-xs font-medium text-muted-foreground">
-              キー前缀(<code className="font-mono">REDIS_KEY_PREFIX</code>):
+              キーの接頭辞(<code className="font-mono">REDIS_KEY_PREFIX</code>):
               <code className="font-mono font-semibold text-foreground">{cache.namespace}:</code>
               {" — "}
               {publicEnabled ? (

@@ -1,9 +1,9 @@
 //! valkey(cache)インスタンスとのやり取りを 1 箇所に集約する:per-cache の ACL ユーザの
 //! 発行 / 削除 / 起動時 + 周期の収束(doc/paas-m5-design.md §6 / §7.3)。管制面 DB(pg-platform)が
-//! 真実源で、valkey の per-cache ACL は揮発(`ACL SETUSER` はメモリのみ)なので平台が収束させる。
+//! 真実源で、valkey の per-cache ACL は揮発(`ACL SETUSER` はメモリのみ)なのでプラットフォームが収束させる。
 //!
-//! 隔離は ACL(値アクセス `~<ns>:*` + チャンネル `&<ns>:*` + コマンド白名単
-//! `+@all -@admin -@dangerous`)。acl_user / namespace は平台が `c_<shortid>` で生成する
+//! 隔離は ACL(値アクセス `~<ns>:*` + チャンネル `&<ns>:*` + コマンド許可リスト
+//! `+@all -@admin -@dangerous`)。acl_user / namespace はプラットフォームが `c_<shortid>` で生成する
 //! (英小文字始まりの安全な識別子)。redis の `.arg()` は各引数を独立した RESP バルク文字列で
 //! 送る(SQL のような文字列連結ではない)ので、コマンドインジェクションは原理的に起きない。
 
@@ -48,9 +48,9 @@ async fn set_user_on(
         .arg("reset") // 既存設定を全消去してから冪等に組み立てる
         .arg("on")
         .arg(format!(">{password}")) // パスワード追加は単一の `>`
-        .arg(format!("~{namespace}:*")) // この前缀の key だけ値を読み書き可
+        .arg(format!("~{namespace}:*")) // この接頭辞の key だけ値を読み書き可
         .arg("resetchannels")
-        .arg(format!("&{namespace}:*")) // pub/sub もこの前缀のチャンネルだけ
+        .arg(format!("&{namespace}:*")) // pub/sub もこの接頭辞のチャンネルだけ
         .arg("+@all")
         .arg("-@admin") // CONFIG / CLIENT KILL / ACL / REPLICAOF 等の管理系を禁止
         .arg("-@dangerous") // FLUSHALL / FLUSHDB / KEYS / SHUTDOWN / DEBUG / SWAPDB 等を禁止
@@ -58,7 +58,7 @@ async fn set_user_on(
         // 越境防止のためではない(スクリプト内の key/channel も ACL パターンで検査され cross-ns は NOPERM)。
         // **単一スレッドの共有 valkey でのイベントループ DoS を断つため** — 重い / 無限ループの Lua は
         // 全テナントを巻き込んで固める(`lua-time-limit` は自動 kill せず、テナントは SCRIPT KILL も不可)。
-        // 管理系(SCRIPT FLUSH / FUNCTION FLUSH = 共有状態破壊)も同カテゴリでまとめて塞がる
+        // 管理系(SCRIPT FLUSH / FUNCTION FLUSH = 共ステートフル破壊)も同カテゴリでまとめて塞がる
         // (旧 `-function -script` を包含。codex セキュリティ監査 2026-06-26 で EVAL 残存の DoS 面を指摘)。
         .arg("-@scripting")
         .query_async(conn)

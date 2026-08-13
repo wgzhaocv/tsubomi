@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 // それを包む TanStack Query フック。一覧は Query が単一の真実源。
 //
 // service は GitHub repo と 1:1 のデプロイ単位。create のレスポンスだけが deploy_key /
-// registry pass の **平文**を返す(以後 API では出さない)。平台は GitHub に触れないので、
+// registry pass の **平文**を返す(以後 API では出さない)。プラットフォームは GitHub に触れないので、
 // web は create 後にその値と「次の一手」(gh / git コマンド + workflow)を表示するだけ。
 
 export type Service = {
@@ -23,15 +23,15 @@ export type Service = {
   // 公開 URL(`<scheme>://<subdomain>.<domain>`)。サーバが算出して返す。
   // 古いサーバ相手では欠ける可能性があるので任意扱い。
   url?: string;
-  // 公開範囲:private(route 無し = 公網不可視)/ company(既定 = 会社 IP のみ)/
+  // 公開範囲:private(route 無し = インターネット不可視)/ company(既定 = 会社 IP のみ)/
   // public(全網)。旧サーバ相手では欠ける = company 扱い。
   visibility?: string;
-  // true = 有状態(deploy は stop-first:数秒瞬断・データ目録の単独占有。自帯 DB 等)。
+  // true = ステートフル(deploy は stop-first:数秒瞬断・データディレクトリの単独占有。持ち込み DB 等)。
   // 旧サーバ相手では欠ける = false 扱い。
   stateful?: boolean;
-  // メモリ硬上限 MiB。旧サーバ相手では欠ける。
+  // メモリ上限 MiB。旧サーバ相手では欠ける。
   memory_mb?: number;
-  // CPU 硬上限(millicores、1000 = 1 CPU)。null / 欠け = 硬上限なし(相対権重のみ)。
+  // CPU 上限(millicores、1000 = 1 CPU)。null / 欠け = 上限なし(相対的な重み付けのみ)。
   cpu_limit_millis?: number | null;
 };
 
@@ -44,7 +44,7 @@ export type CreateServiceResult = Service & {
   hook_url: string;
   platforms: string;
   workflow_yaml: string;
-  // GitHub 連携の手順コマンド列。平台が単一真源として組み立てる(web は表示するだけ)。
+  // GitHub 連携の手順コマンド列。プラットフォームが単一真源として組み立てる(web は表示するだけ)。
   setup_commands: string[];
 };
 
@@ -321,7 +321,7 @@ export function useSetServiceVisibility(id: string) {
   );
 }
 
-// memory / cpus 上限の変更。**次のデプロイから反映**(走行中コンテナには効かない)。
+// memory / cpus 上限の変更。**次のデプロイから反映**(実行中のコンテナには影響しない)。
 export type SetLimitsInput = {
   memory_mb?: number;
   cpu_limit_millis?: number;

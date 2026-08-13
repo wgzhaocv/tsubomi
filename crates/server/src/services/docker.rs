@@ -1,10 +1,10 @@
 //! bollard(docker.sock)の薄いラッパ。M3 のコンテナ操作を 1 箇所に集約する:
-//! digest 指定の pull / 起動(tsubomi 管理ラベル付き、per-service 私網。ルーティングは
+//! digest 指定の pull / 起動(tsubomi 管理ラベル付き、per-service プライベートネットワーク。ルーティングは
 //! file provider = services/route.rs)/ 旧コンテナの停止削除(swap・削除で再利用)。
 //! 後の reconcile(S8)/ lifecycle(S7)もここを通す。
 //!
-//! ネットワークは **per-service 私網 `tsubomi-svc-<id>` のみ**(M6 隔離の一線。services/network.rs):
-//! コンテナは自分の私網に attach された traefik / pgbouncer / valkey にしか会えず、他テナント
+//! ネットワークは **per-service プライベートネットワーク `tsubomi-svc-<id>` のみ**(M6 隔離の一線。services/network.rs):
+//! コンテナは自分のプライベートネットワークに attach された traefik / pgbouncer / valkey にしか会えず、他テナント
 //! app にも infra 内部網(pg-platform / pg-tenant / registry 内部面)にも物理的に届かない。
 
 use crate::error::{AppError, AppResult};
@@ -27,8 +27,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// 平台が付ける管理ラベル(reconcile / 孤児検出 / swap がこれで引く)。
-/// network.rs も per-service 私網に同じラベル(managed / service_id)を付け GC で引く。
+/// プラットフォームが付ける管理ラベル(reconcile / 孤児検出 / swap がこれで引く)。
+/// network.rs も per-service プライベートネットワークに同じラベル(managed / service_id)を付け GC で引く。
 pub(crate) const LABEL_SERVICE_ID: &str = "tsubomi.service_id";
 const LABEL_GIT_SHA: &str = "tsubomi.git_sha";
 pub(crate) const LABEL_MANAGED: &str = "tsubomi.managed";
@@ -44,7 +44,7 @@ pub struct RunSpec {
     pub container_port: i32,
     pub memory_mb: i32,
     pub cpu_shares: i32,
-    /// CPU 硬上限(millicores、1000 = 1 CPU)。None = 硬上限なし(cpu_shares のみ)。
+    /// CPU 上限(millicores、1000 = 1 CPU)。None = 上限なし(cpu_shares のみ)。
     pub cpu_limit_millis: Option<i32>,
     pub env: Vec<(String, String)>,
     /// volume 注入のバインドマウント(`"<host_path>:<mount_path>"`)。空なら無し。
@@ -59,7 +59,7 @@ pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> App
         .from_image(&repo)
         .tag(image_digest)
         .build();
-    // 全体に硬いタイムアウトを被せる:registry が固まると pull は無限に待ち得る。reconcile から
+    // 全体に強制タイムアウトを被せる:registry が固まると pull は無限に待ち得る。reconcile から
     // 呼ばれた場合に 1 件の hang が後背の収束ループ全体を凍らせる穴を塞ぐ(perf review P4)。
     let drain = async {
         let mut stream = state.docker.create_image(Some(opts), None, None);
@@ -105,7 +105,7 @@ const PULL_EXTERNAL_TIMEOUT_SECS: u64 = 600;
 const PUSH_INTERNAL_TIMEOUT_SECS: u64 = 600;
 /// コンテキスト無し Dockerfile の build(RUN の apt/pip は Pi では遅い)。
 const BUILD_TIMEOUT_SECS: u64 = 900;
-/// build コンテナのメモリ硬上限(= memswap で swap も無効化)。
+/// build コンテナのメモリ上限(= memswap で swap も無効化)。
 const BUILD_MEMORY_BYTES: i32 = 1024 * 1024 * 1024;
 /// build ログの保持上限(末尾のみ。エラー表示用)。
 const BUILD_LOG_TAIL_CHARS: usize = 2000;
@@ -144,7 +144,7 @@ pub(crate) async fn pull_external(state: &AppState, image_ref: &str) -> AppResul
         while let Some(item) = stream.next().await {
             item.map_err(|e| {
                 let msg = e.to_string();
-                // 失敗の典型 3 種に次の一手を併載する(AI が自己修正できる文案)。
+                // 失敗の典型 3 種に次の一手を併載する(AI が自己修正できる文言)。
                 let hint = if msg.contains("no matching manifest")
                     || msg.contains("does not match the specified platform")
                 {
@@ -174,7 +174,7 @@ pub(crate) async fn pull_external(state: &AppState, image_ref: &str) -> AppResul
 }
 
 /// pull / build 済みのローカルイメージを内部 registry の per-service repo へ tag + push する。
-/// 内部 registry はコンテナ自体に認証が無い(loopback。認証は公網入口の traefik 層)ので
+/// 内部 registry はコンテナ自体に認証が無い(loopback。認証は公開入口の traefik 層)ので
 /// 資格情報は不要。digest は push 応答に載らない(bollard 0.21 の PushImageInfo に digest
 /// フィールドが無い)ため、呼び出し側が registry API(pushed_manifest_digest)で取る。
 pub(crate) async fn push_to_internal(
@@ -235,9 +235,9 @@ pub(crate) async fn build_dockerfile(
         .t(image_tag)
         .pull("true")
         .rm(true)
-        // 宿主機保護(Pi は本番コンテナと同居):メモリ 1GiB 硬上限 + swap を無効化
+        // ホスト保護(Pi は本番コンテナと同居):メモリ 1GiB 上限 + swap を無効化
         // (memswap==memory で追加 swap 0 = SD/SSD のスラッシング防止)+ CPU を 2 コア相当に
-        // 制限(cpuquota/period。無制限だと RUN の native ビルドが全コアを 900s 占有し隣人を拖らせる)。
+        // 制限(cpuquota/period。無制限だと RUN の native ビルドが全コアを 900s 占有し隣人を巻き添えにしる)。
         .memory(BUILD_MEMORY_BYTES)
         .memswap(BUILD_MEMORY_BYTES)
         .cpuperiod(100_000)
@@ -293,9 +293,9 @@ fn clip_tail_in_place(s: &mut String, max: usize) {
     }
 }
 
-/// 新コンテナを create + start(per-service 私網のみ。起動の直前に ensure_service_network で
-/// 私網を用意し infra を attach 済みにする)。コンテナ名は **deploy ごとに一意**(`RunSpec` 参照)
-/// で、start-first swap の新旧が同じ私網に同居しても衝突しない。起動した container 名を返す。
+/// 新コンテナを create + start(per-service プライベートネットワークのみ。起動の直前に ensure_service_network で
+/// プライベートネットワークを用意し infra を attach 済みにする)。コンテナ名は **deploy ごとに一意**(`RunSpec` 参照)
+/// で、start-first swap の新旧が同じプライベートネットワークに同居しても衝突しない。起動した container 名を返す。
 pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult<String> {
     let name = spec.container_name.clone();
 
@@ -303,23 +303,23 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
     let labels = mgmt_labels(spec);
 
     let host_config = HostConfig {
-        // per-service 私網のみ(M6 網隔離):他テナント app には届かず、infra 内部網にも繋がない。
-        // 私網は下の ensure_service_network が起動の直前に用意し、infra を attach 済みにする。
+        // per-service プライベートネットワークのみ(M6 ネットワーク隔離):他テナント app には届かず、infra 内部網にも繋がない。
+        // プライベートネットワークは下の ensure_service_network が起動の直前に用意し、infra を attach 済みにする。
         network_mode: Some(super::network::svc_network_name(state, spec.service_id)),
         // volume 注入のバインドマウント(`<host_path>:<mount_path>`。S6)。無ければ付けない。
         binds: (!spec.binds.is_empty()).then(|| spec.binds.clone()),
-        // --memory 硬上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
+        // --memory 上限(OOM は単一コンテナだけ殺す)/ --cpu-shares ソフト制限。
         memory: Some((spec.memory_mb as i64) * 1024 * 1024),
         cpu_shares: Some(spec.cpu_shares as i64),
-        // 任意の CPU 硬上限(`--cpus` 相当。NanoCpus = millicores × 10^6。AI 審査 R4):
-        // ソフト権重は競合時にしか効かず、単機で CPU を独占する service が隣人を拖らせるため。
+        // 任意の CPU 上限(`--cpus` 相当。NanoCpus = millicores × 10^6。AI 審査 R4):
+        // ソフトな重み付けは競合時にしか効かず、単一ホストで CPU を独占する service が隣人を巻き添えにするため。
         nano_cpus: spec.cpu_limit_millis.map(|m| (m as i64) * 1_000_000),
-        // 容器加固(背骨「隔離は仕組みで守る」。memory 硬上限の隣に並べる宿主機保護):
-        //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾で宿主機の PID を食い潰させない。
+        // コンテナ強化(背骨「隔離は仕組みで守る」。memory 上限の隣に並べるホスト保護):
+        //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾でホストの PID を食い潰させない。
         //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定は 1024MB — migration 20260620)。
         pids_limit: Some(512),
         //  - log_config:json-file をローテート(10MB×3=最大 30MB/コンテナ)。無制限ログで
-        //    宿主機ディスクを埋めさせない(平台のログ取得は引き続き docker logs = json-file)。
+        //    ホストディスクを埋めさせない(プラットフォームのログ取得は引き続き docker logs = json-file)。
         log_config: Some(HostConfigLogConfig {
             typ: Some("json-file".to_string()),
             config: Some(HashMap::from([
@@ -329,8 +329,8 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         }),
         //  - no-new-privileges:setuid/setgid バイナリでの権限昇格を封じる。
         security_opt: Some(vec!["no-new-privileges=true".to_string()]),
-        //  - cap_drop NET_RAW:生ソケットを奪い、私網内 infra への ARP / パケット偽装を断つ
-        //    (per-service 私網 §M6 と二段構え。正規 app で NET_RAW を要るものはほぼ無い)。
+        //  - cap_drop NET_RAW:生ソケットを奪い、プライベートネットワーク内 infra への ARP / パケット偽装を断つ
+        //    (per-service プライベートネットワーク §M6 と二段構え。正規 app で NET_RAW を要るものはほぼ無い)。
         cap_drop: Some(vec!["NET_RAW".to_string()]),
         // 第一の保険(reconcile が第二)。
         restart_policy: Some(RestartPolicy {
@@ -348,12 +348,12 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         ..Default::default()
     };
 
-    // per-service 私網を冪等に用意し infra を attach する(起動の直前。DNS 解決と traefik
+    // per-service プライベートネットワークを冪等に用意し infra を attach する(起動の直前。DNS 解決と traefik
     // 経路の成立のため、create より前である必要がある)。失敗時は起こさない(壊れた service を作らない)。
     super::network::ensure_service_network(state, spec.service_id).await?;
     // 【デプロイ経路で必須・周期 reconcile とは別役割】新規 deploy は新しい /24 の網を作って即この先で
     // コンテナを起動する。ここで egress を収束させないと、新 subnet の「同桥 RETURN」が入る前に app が
-    // 起き、app→pgbouncer/valkey が `pool→私網 DROP` に巻かれて次の 30s reconcile まで DB/cache に繋がらない。
+    // 起き、app→pgbouncer/valkey が `pool→プライベートネットワーク DROP` に巻かれて次の 30s reconcile まで DB/cache に繋がらない。
     // reconcile_pass 側の呼び出しは周期リフレッシュで、これとは別物(消すとデプロイ直後に穴が開く)。
     super::egress::reconcile(state).await;
 
@@ -371,7 +371,7 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
     Ok(name)
 }
 
-/// 平台の管理ラベルだけ(reconcile / 孤児検出 / swap が `tsubomi.service_id` で引く)。
+/// プラットフォームの管理ラベルだけ(reconcile / 孤児検出 / swap が `tsubomi.service_id` で引く)。
 /// ルーティングは docker provider ではなく **file provider**(services/route.rs)が担うので
 /// traefik.* ラベルは付けない(Docker Engine 29 で docker provider が壊れる回避。route.rs / compose 参照)。
 fn mgmt_labels(spec: &RunSpec) -> HashMap<String, String> {
@@ -382,15 +382,15 @@ fn mgmt_labels(spec: &RunSpec) -> HashMap<String, String> {
     m
 }
 
-/// reconcile 用スナップショット:**1 回の list_by_service** で `(存在するか, 走行容器名の集合)` を返す。
-/// 存在収束(消えた容器の復活)と route ドリフト収束(route が正しい容器を指すか)が、これ 1 回で両方
-/// 賄える(以前は是非判定と容器名取得で 2 回 docker を叩いていた)。
+/// reconcile 用スナップショット:**1 回の list_by_service** で `(存在するか, 実行中コンテナ名の集合)` を返す。
+/// 存在収束(消えたコンテナの復活)と route ドリフト収束(route が正しいコンテナを指すか)が、これ 1 回で両方
+/// 賄える(以前は是非判定とコンテナ名取得で 2 回 docker を叩いていた)。
 ///  - **存在** = running / restarting が 1 つでも。厳格な `is_live`(restart_count==0 を要求)とは別物 —
 ///    クラッシュループ中(restarting)を「不在」と誤判すると毎パス作り直してしまう。restarting は
 ///    docker の restart policy が面倒を見るので「存在」とみなし手出ししない。
-///  - **走行容器名** = RUNNING な全コンテナ名(先頭 `/` 除去 = route backend の docker DNS 名)。
+///  - **実行中コンテナ名** = RUNNING な全コンテナ名(先頭 `/` 除去 = route backend の docker DNS 名)。
 ///    start-first swap の旧片付け(`remove_others`、best-effort)が失敗すると新旧が併存し得るので、
-///    呼び出し側は「どれが正か」を **deploy 履歴**(直近成功 deploy の容器名)で決める。ここは候補の列挙だけ
+///    呼び出し側は「どれが正か」を **deploy 履歴**(直近成功 deploy のコンテナ名)で決める。ここは候補の列挙だけ
 ///    (任意の 1 つを「正」と決めない — それが route を旧版へ巻き戻す事故の元だった)。restarting のみは空。
 pub(crate) async fn presence(
     state: &AppState,
@@ -416,8 +416,8 @@ pub(crate) async fn presence(
 
 /// **今この env を握って生きている**コンテナ名(RUNNING **+ RESTARTING**)。
 /// `presence` の `running_names` と違い RESTARTING も含めるのが要点で、用途が別:
-/// - route の後端 / drift 判定 = **RUNNING だけ**(再起動中の容器へ流しても 502 になる)
-/// - **設定が反映済みか**の判定 = ここ。crash loop 中の容器は `restart=unless-stopped` で
+/// - route のバックエンド / drift 判定 = **RUNNING だけ**(再起動中のコンテナへ流しても 502 になる)
+/// - **設定が反映済みか**の判定 = ここ。crash loop 中のコンテナは `restart=unless-stopped` で
 ///   **作成時の env のまま起き続ける**ので、「走っていない = 反映すべき相手が居ない」と扱うと、
 ///   crash を直すために入れた注入が「反映済み」に見えてしまう(codex review 2026-07-26)。
 pub(crate) async fn live_names(state: &AppState, service_id: Uuid) -> AppResult<Vec<String>> {
@@ -495,11 +495,11 @@ async fn force_remove(
     // 匿名 volume を作る**(`FROM postgres` 等では必中。postgres なら初回 initdb で数十 MB が
     // 実際に書かれる)。これを消さないと **deploy 回数に比例して匿名 volume が溜まる**
     // (コードベースに volume を消す処理は他に一つも無い)。
-    // 安全性:平台は service の永続化に named volume を一切使わない(volume 注入はホストの
+    // 安全性:プラットフォームは service の永続化に named volume を一切使わない(volume 注入はホストの
     // bind mount)。`v=true` が消すのは**そのコンテナ固有の匿名 volume だけ**で、bind mount の
     // 実体(ユーザの volume)にも named volume にも触れない。新コンテナは毎回新しい匿名 volume を
     // もらうので、そこに残す価値のあるデータは元々存在しない。
-    // 補足:`source.rs` の白名単は Dockerfile の `VOLUME` 命令を拒否するが、**基底イメージが
+    // 補足:`source.rs` の許可リストは Dockerfile の `VOLUME` 命令を拒否するが、**基底イメージが
     // 継承する `VOLUME` は検出できず**、経路 1/2(GitHub / `--local`)のユーザ Dockerfile には
     // そもそも制限が無い = 宣言側では塞げないので、回収側で受け止める。
     let rm = RemoveContainerOptionsBuilder::default()
@@ -541,7 +541,7 @@ async fn remove_service_containers(
 }
 
 /// 指定 service の現行コンテナを **全て** 停止 + 削除(service 削除 / stop / purge /
-/// reconcile 掃除の共有路径)。冪等。猶予は「何を止めるか」で決まるので **ここで stateful を
+/// reconcile 掃除の共有パス)。冪等。猶予は「何を止めるか」で決まるので **ここで stateful を
 /// 読む** — 呼び出し側に判断を配らない(deploy の stop-first だけ丁寧に止めて stop / delete が
 /// SIGKILL、では §0-G の意味が無い — altitude review 2026-07-03)。孤児(行なし)や
 /// soft-delete 済みでも service_details 行は purge まで残るので読める。無ければ既定(10s)。
@@ -565,8 +565,8 @@ pub async fn remove_others(state: &AppState, service_id: Uuid, keep_name: &str) 
 }
 
 /// `remove_others` の猶予指定版。中断デプロイ復旧(reconcile::recover_interrupted)専用:
-/// stateful の中断では「掃除対象の孤児新コンテナがまだ走行中」があり得るため、SIGKILL で
-/// データ目録を壊さないよう猶予を渡せる(§0-G。通常の swap 収尾は上の猶予不要が正しい)。
+/// stateful の中断では「掃除対象の孤児新コンテナがまだ実行中」があり得るため、SIGKILL で
+/// データディレクトリを壊さないよう猶予を渡せる(§0-G。通常の swap 収尾は上の猶予不要が正しい)。
 pub async fn remove_others_grace(
     state: &AppState,
     service_id: Uuid,
@@ -578,13 +578,13 @@ pub async fn remove_others_grace(
 
 /// 名前指定で 1 つだけ停止 + 削除(deploy 失敗時の新コンテナ片付け)。best-effort
 /// (失敗しても reconcile が孤児として後で掃除する。ここで失敗を伝播させない)。
-/// `grace_secs`:readiness 探測の TimedOut では**走行中の**新コンテナを消すため、stateful は
+/// `grace_secs`:readiness 探測の TimedOut では**実行中の**新コンテナを消すため、stateful は
 /// `STATEFUL_STOP_GRACE_SECS` を渡す(起動期の WAL 回復 / 迁移中に SIGKILL しない — §0-G)。
 pub async fn remove_one(state: &AppState, name: &str, grace_secs: Option<i32>) {
     let _ = force_remove(state, name, grace_secs).await;
 }
 
-/// 宿主 docker 上にある「平台が管理する service イメージ」への 1 参照。
+/// 宿主 docker 上にある「プラットフォームが管理する service イメージ」への 1 参照。
 ///
 /// docker のイメージは**実体(image id)と参照(tag / digest)が多対 1** で、実測では 1 つの実体が
 /// **別 service の tag と外部イメージの tag を同時に**持っていた(基底が同じなら層ごと実体を共有 —
@@ -603,12 +603,12 @@ pub struct ServiceImageRef {
 /// 宿主上の service イメージ参照を**一度の `list_images` で**列挙する。
 ///
 /// deploy は毎回 [`pull`] で新しい digest を宿主へ落とすが、**古い宿主イメージを消す口が
-/// どこにも無かった**:reconcile はコンテナ / route / 私網だけ、日次 GC は registry の
+/// どこにも無かった**:reconcile はコンテナ / route / プライベートネットワークだけ、日次 GC は registry の
 /// manifest / blob だけ、`ship.sh` の `docker image prune -f` は `<none>:<none>` の dangling
 /// だけ(残骸は `<repo>:<tag>` や `<repo>@sha256:…` なので当たらない)。結果、宿主のディスクが
 /// **deploy 回数に比例して無限に育つ**(1 版で数百 MB — 2026-07-25 に実測)。ここが列挙側。
 ///
-/// **共有ホスト前提の安全策**:`<registry_pull>/<uuid>` 前缀 + 直後が `:` か `@` の参照だけを
+/// **共有ホスト前提の安全策**:`<registry_pull>/<uuid>` 接頭辞 + 直後が `:` か `@` の参照だけを
 /// 拾う(この機は他プロジェクトのイメージと同居しているので `image prune -a` のような
 /// グローバル掃除は**絶対に使わない**)。`filters` で daemon 側に絞らせないのも意図的 —
 /// reference filter の一致は Engine の版 / image store 実装に依存し、変わると**静かに 0 件**に
@@ -636,7 +636,7 @@ pub async fn list_service_image_refs(state: &AppState) -> Vec<ServiceImageRef> {
                 continue;
             };
             let Ok(service_id) = rest[..sep].parse::<Uuid>() else {
-                continue; // 平台以外が同名前缀で置いたもの = 触らない
+                continue; // プラットフォーム以外が同名接頭辞で置いたもの = 触らない
             };
             out.push(ServiceImageRef {
                 service_id,
@@ -689,7 +689,7 @@ fn should_remove_host_image(
 ///
 /// `force` は使わない:実測では `force=true` が **他プロジェクトの停止中コンテナの conflict も
 /// 踏み越えて**実体ごと消し、その名前まで untag してしまう(Engine 29.4 で確認)。ここでは
-/// 「消せるものだけ消す」で十分 — 走行中 / 停止中コンテナが掴んでいる分は次の tick に回る。
+/// 「消せるものだけ消す」で十分 — 実行中 / 停止中コンテナが掴んでいる分は次の tick に回る。
 ///
 /// 戻り値は成功したか。呼び出し側がログの粒度(purge は恒久リークなので warn、日次は debug)を決める。
 async fn remove_image_ref(state: &AppState, reference: &str) -> AppResult<()> {
@@ -726,7 +726,7 @@ async fn remove_image_ref(state: &AppState, reference: &str) -> AppResult<()> {
 ///
 /// 年齢下限は**この層では扱わない**。「最近の deploy のイメージは消さない」判断は
 /// `registry::host_image_plan` が `deploys.created_at` を見て keep 集合に織り込む
-/// (docker の `ImageSummary.created` はイメージ自身のビルド時刻で本機の取得時刻ではないため、
+/// (docker の `ImageSummary.created` はイメージ自身のビルド時刻でこのホストが取得した時刻ではないため、
 /// 外部イメージでは年齢下限が即座に無効になる = 時間源に使えない。codex 監査 #8)。
 ///
 /// 戻り値 = 削除に成功した参照の数(**解放したディスク量ではない**:untag だけで実体が残る場合も
@@ -748,7 +748,7 @@ pub async fn prune_host_images(
                 removed += 1;
                 tracing::info!(service_id = %r.service_id, image = %r.reference, "宿主イメージ参照を削除した");
             }
-            // 走行中 / 停止中コンテナが掴んでいる間は消せない。日次はまた来るので debug、
+            // 実行中 / 停止中コンテナが掴んでいる間は消せない。日次はまた来るので debug、
             // purge は**この service を二度と訪れない**(行が消える)ので恒久リーク = warn。
             Err(e) if only.is_some() => {
                 tracing::warn!(error = ?e, service_id = %r.service_id, image = %r.reference, "宿主イメージ参照を回収できませんでした(永久削除なので再試行されません — 手動 `docker rmi` が必要)");
@@ -766,10 +766,10 @@ pub async fn prune_host_images(
 /// stop / delete(mod.rs::stop_containers)が共有する。
 pub(crate) const STATEFUL_STOP_GRACE_SECS: i32 = 30;
 
-/// stateful deploy の stop-first(設計 §3):指定 service の**走行中**コンテナを止める。
+/// stateful deploy の stop-first(設計 §3):指定 service の**実行中**コンテナを止める。
 /// **remove はしない** — 新コンテナの起動が失敗したら `restart_stopped` で再 start する退路を
-/// 残す(§0-E。stopped 容器の網 endpoint / 別名 / binds は docker が温存する = 再配線不要)。
-/// 止めた名前の列を返す(走行中の列挙は `presence` と共有 = 名前導出の単一真源)。
+/// 残す(§0-E。stopped コンテナの網 endpoint / 別名 / binds は docker が温存する = 再配線不要)。
+/// 止めた名前の列を返す(実行中の列挙は `presence` と共有 = 名プリアンブル出の単一真源)。
 /// 途中で失敗したら**既に止めた分をここで再 start してから** Err(半端な停止状態を呼び出し側に
 /// 押し付けない — 呼び出し側は Err 時に旧が走り続けている前提でよい)。
 pub async fn stop_running(
@@ -779,8 +779,8 @@ pub async fn stop_running(
 ) -> AppResult<Vec<String>> {
     // RUNNING だけでなく **RESTARTING も止める**(live_names)。presence の running_names は
     // RESTARTING を含まず、crash-loop 中の旧コンテナが停止対象から漏れる — その後 restart
-    // policy で復帰し、新コンテナと同一データ目録を双開し得る(codex 審査 2026-08-13)。
-    // docker stop は restarting 容器にも効き、restart policy のループも止める。
+    // policy で復帰し、新コンテナと同一データディレクトリを二重オープンし得る(codex 審査 2026-08-13)。
+    // docker stop は restarting コンテナにも効き、restart policy のループも止める。
     let running = live_names(state, service_id).await?;
     for (i, name) in running.iter().enumerate() {
         let opts = StopContainerOptionsBuilder::default().t(grace_secs).build();
@@ -794,7 +794,7 @@ pub async fn stop_running(
 
 /// コンテナが「確実に走っていない」ことの確認(不在 = true / stopped = true /
 /// running・restarting = false)。stateful 退路が旧を再 start する前の門 —
-/// 新コンテナの除去は best-effort なので、生き残っていたら旧を起こさない(双開防止)。
+/// 新コンテナの除去は best-effort なので、生き残っていたら旧を起こさない(二重オープン防止)。
 pub async fn confirmed_not_running(state: &AppState, name: &str) -> bool {
     match state.docker.inspect_container(name, None).await {
         Err(_) => true, // 見えない = 存在しない(除去済み)
@@ -897,9 +897,9 @@ pub async fn logs(
 }
 
 /// 指定 service のログを **follow で流す**(stdout+stderr、tail 行から、`since` 以降。
-/// LOG_STREAM_MAX で必ず終わる)。快照 `logs` と同じ any-state 解析 — crash-loop 中も
+/// LOG_STREAM_MAX で必ず終わる)。スナップショット `logs` と同じ any-state 解析 — crash-loop 中も
 /// `restart=unless-stopped` で dockerd が follow を保つので観察に使える。フレームは
-/// `into_bytes`(生バイト、lossy 変換なし。到着順 = daemon の多重化順で快照と同じ)。
+/// `into_bytes`(生バイト、lossy 変換なし。到着順 = daemon の多重化順でスナップショットと同じ)。
 /// コンテナ不在は 400 — 流式で静かな空流は「動いているが無言」と区別できず AI が
 /// 誤読するため、次の一手付きで明確に断る(404 は ensure_owned の領分)。
 pub async fn logs_stream(
@@ -938,7 +938,7 @@ pub async fn crash_summary(state: &AppState, name: &str, since: i64) -> Option<S
     let (exit, oom) = match event_exit {
         Some(e) => (e, event_oom || st.and_then(|s| s.oom_killed).unwrap_or(false)),
         None => {
-            // events 不発の fallback。走行/再起動中は inspect の exit_code が再起動でリセット
+            // events 不発の fallback。実行/再起動中は inspect の exit_code が再起動でリセット
             // 済み = あてにならないので、crash-loop の事実だけ伝える(OOM は true のときだけ —
             // false は否定の保証にならない)。
             let running = st.and_then(|s| s.running).unwrap_or(false);
@@ -1056,7 +1056,7 @@ pub async fn running_container_name(
 /// 巨大出力をメモリに丸ごと載せない(`tbm service exec app -- cat huge` 等)。
 const EXEC_OUTPUT_CAP: usize = 1024 * 1024;
 /// 1 コマンドの最大実行時間。超えたら捕獲済みを返して `timed_out=true`(長時間 / 対話は
-/// web ターミナルへ誘導)。exec プロセス自体は容器内に残り、容器の終了 / 再デプロイで回収される。
+/// web ターミナルへ誘導)。exec プロセス自体はコンテナ内に残り、コンテナの終了 / 再デプロイで回収される。
 const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 稼働中コンテナ内で 1 コマンドを **非対話**に実行し、stdout/stderr/exit_code を捕獲して返す
@@ -1098,7 +1098,7 @@ pub async fn exec_capture(
         .map_err(|e| AppError::Other(anyhow!("コマンドの起動に失敗: {e}")))?
     {
         // 出力はドレインしないと exec が滞留する。上限到達後もストリームは読み続ける
-        // (registry GC と同じ作法)。全体に硬いタイムアウトを被せる。
+        // (registry GC と同じ作法)。全体に強制タイムアウトを被せる。
         let drain = async {
             while let Some(item) = output.next().await {
                 let Ok(chunk) = item else { break };
@@ -1148,7 +1148,7 @@ pub async fn exec_capture(
 const TERMINAL_MAX_SESSION: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 /// 1 WS セッション:所有者が自分の稼働中コンテナ内で対話シェル(`/bin/sh`)を開く(web 専用)。
-/// 升级前に `ensure_owned` + コンテナ稼働中は確認済み。container_name は解決済み。
+/// アップグレード前に `ensure_owned` + コンテナ稼働中は確認済み。container_name は解決済み。
 ///
 /// ワイヤープロトコル:**client→server** は `Binary`=生 stdin / `Text`=制御 `{"type":"resize",…}`、
 /// **server→client** は exec 出力を `Binary`。詳細・地雷はコメント参照(Plan critique 反映)。
@@ -1175,7 +1175,7 @@ pub async fn handle_terminal(socket: WebSocket, state: AppState, container_name:
         .await
     {
         Ok(c) => c,
-        // 升级後はもう HTTP ステータスを返せない。開いた socket に人間可読のバイト列
+        // アップグレード後はもう HTTP ステータスを返せない。開いた socket に人間可読のバイト列
         //(xterm がそのまま表示)+ Close で伝える。内部 docker 詳細は漏らさない。
         Err(_) => return terminal_fail(socket, "シェルを起動できませんでした").await,
     };
@@ -1262,8 +1262,8 @@ pub async fn handle_terminal(socket: WebSocket, state: AppState, container_name:
     let _ = tokio::time::timeout(TERMINAL_MAX_SESSION, session).await;
 }
 
-/// 升级後の失敗を、開いた socket に人間可読バイト列(xterm がそのまま表示)+ Close で伝える。
-/// Text ではなく Binary:前端は inbound を端末へ食わせるだけで Text 制御の受信を持たないため。
+/// アップグレード後の失敗を、開いた socket に人間可読バイト列(xterm がそのまま表示)+ Close で伝える。
+/// Text ではなく Binary:フロントエンドは inbound を端末へ食わせるだけで Text 制御の受信を持たないため。
 async fn terminal_fail(mut socket: WebSocket, note: &str) {
     let body = format!("\r\n[tsubomi] {note}\r\n");
     let _ = socket.send(Message::Binary(body.into_bytes().into())).await;
@@ -1286,7 +1286,7 @@ fn parse_resize(json: &str) -> Option<(u16, u16)> {
 pub struct ServiceStat {
     /// CPU 使用率(%)。算出不能(system delta 0 / フィールド欠落)は None。
     pub cpu_pct: Option<f64>,
-    /// 内存使用量(bytes)。
+    /// メモリ使用量(bytes)。
     pub mem_bytes: i64,
 }
 
@@ -1296,7 +1296,7 @@ struct Sample {
     cpu_pct: Option<f64>,
     /// メモリ使用量(bytes)。
     mem_bytes: u64,
-    /// メモリ硬上限(bytes)。取得不能は None(`--memory` 未設定 = 宿主機 RAM を返し得る)。
+    /// メモリ上限(bytes)。取得不能は None(`--memory` 未設定 = ホスト RAM を返し得る)。
     mem_limit: Option<u64>,
 }
 
@@ -1409,18 +1409,18 @@ pub async fn service_metrics(state: &AppState, service_id: Uuid) -> ServiceMetri
     }
 }
 
-/// 平台自身の 1 コンテナの監視指標(リソース概要「プラットフォーム自身」。各コンテナ別に出す)。
+/// プラットフォーム自身の 1 コンテナの監視指標(リソース概要「プラットフォーム自身」。各コンテナ別に出す)。
 #[derive(Clone, serde::Serialize)]
 pub struct ContainerStat {
     /// 表示名(先頭の `tsubomi-` を剥がした短名。例 server / pg-platform / valkey)。
     pub name: String,
     /// CPU 使用率(%)。算出不能は None。
     pub cpu_pct: Option<f64>,
-    /// 内存使用量(bytes)。
+    /// メモリ使用量(bytes)。
     pub mem_bytes: u64,
 }
 
-/// 平台自身(server + infra)の各コンテナの 1 サンプル stats を返す(リソース概要の
+/// プラットフォーム自身(server + infra)の各コンテナの 1 サンプル stats を返す(リソース概要の
 /// 「プラットフォーム自身」)。対象 = 名前が `tsubomi-` で始まり、かつ用户 app の
 /// `tsubomi.managed` ラベルを**持たない** running コンテナ(= infra + server。用户 service
 /// コンテナは managed ラベルで除外)。各コンテナを並行に 1 サンプルする。best-effort:
@@ -1435,7 +1435,7 @@ pub async fn platform_stats(state: &AppState) -> Vec<ContainerStat> {
         .filter_map(|c| {
             let id = c.id?;
             let raw = c.names.as_ref()?.first()?.trim_start_matches('/').to_string();
-            // 平台容器だけ:tsubomi- 名前 かつ managed ラベル無し(用户 app を除外)。
+            // プラットフォームコンテナだけ:tsubomi- 名前 かつ managed ラベル無し(用户 app を除外)。
             let managed = c
                 .labels
                 .as_ref()
@@ -1524,12 +1524,12 @@ pub enum Readiness {
 
 /// デプロイ門禁の readiness 探測(AI 審査 R1):新コンテナが `container_port` で **TCP を
 /// 受けるまで** 1s 間隔で待つ。`is_live` は「起動直後に死んでいない」だけを見るため、監听錯
-/// port / 起動数秒後のクラッシュ / listen まで到達しない app が `succeeded` になり静默 502 に
+/// port / 起動数秒後のクラッシュ / listen まで到達しない app が `succeeded` になりサイレント 502 に
 /// なる穴があった — ここが commit_success 前の最後の門。HTTP でなく素の TCP なのは stateful
 /// (postgres / valkey 等)の非 HTTP service も同じ門を通すため(m3-design 決定 E の
 /// deferred readiness の最小形 — `health_path` migration は要らない)。
 ///
-/// 探測は server(ホストプロセス)→ コンテナの私網 IP へ直接 connect する。Linux はホストから
+/// 探測は server(ホストプロセス)→ コンテナのプライベートネットワーク IP へ直接 connect する。Linux はホストから
 /// docker bridge 配下 IP へ直達できる(応答は conntrack ESTABLISHED で egress の INPUT 遮断に
 /// 巻かれない)。**dev(macOS)は VM 越しで bridge IP に届かないため探測せず Ready 扱い**
 /// (egress::is_active と同じ「prod でのみ実効」の型)。
@@ -1570,13 +1570,13 @@ pub async fn wait_tcp_ready(
     }
 }
 
-/// 単発の内網 TCP 探活(`GET /services/{id}/probe` の実体)。`wait_tcp_ready` と役割が違う:
+/// 内部ネットワークへの単発 TCP 疎通確認(`GET /services/{id}/probe` の実体)。`wait_tcp_ready` と役割が違う:
 /// あちらはデプロイ門禁(listen まで**待つ** + 非 Linux は Ready を返す妥協 = 門を塞がない)、
 /// こちらは**現況報告**(1 回だけ connect + 探せない環境では「探せない」を正直に None で返す。
 /// 報告で嘘をつくと private worker の診断を誤らせる)。
 /// 探測対象 IP:**attach されている全網**を試し、どれかで受けたら listening(門禁と違い、
 /// 探測時点の callee は M6 で複数の caller 網に attach 済みがあり得る — `container_ip` の
-/// 「任意の 1 エントリ」だと対象網が非決定になる。特定 IP だけに bind する容器の
+/// 「任意の 1 エントリ」だと対象網が非決定になる。特定 IP だけに bind するコンテナの
 /// 「caller から見た到達性」までは保証しない = 受容。codex 審査 2026-08-13)。
 /// 戻り値:(running, listening)。listening=None は「探測不能」(非 Linux)。
 pub async fn probe_once(state: &AppState, name: &str, port: i32) -> (bool, Option<bool>) {
@@ -1625,11 +1625,11 @@ async fn tcp_connect_ok(ip: &str, port: i32) -> bool {
     )
 }
 
-/// inspect 結果からコンテナの私網 IP を取り出す(空文字は「未割当」なので弾く)。
-/// **前提**:探測時点の新コンテナは自分の per-service 私網 **のみ** に居る(M6 の callee attach =
-/// `attach_as_callee` は commit_success の後、周期 `reconcile_networks` も成功済み deploy の容器
+/// inspect 結果からコンテナのプライベートネットワーク IP を取り出す(空文字は「未割当」なので弾く)。
+/// **前提**:探測時点の新コンテナは自分の per-service プライベートネットワーク **のみ** に居る(M6 の callee attach =
+/// `attach_as_callee` は commit_success の後、周期 `reconcile_networks` も成功済み deploy のコンテナ
 /// しか触らない)ため「任意の 1 エントリ」で正しい。callee attach を commit 前へ動かすなら
-/// ここも svc 私網を名指しで選ぶ必要がある。
+/// ここも svc プライベートネットワークを名指しで選ぶ必要がある。
 fn container_ip(info: &bollard::models::ContainerInspectResponse) -> Option<String> {
     info.network_settings
         .as_ref()?
