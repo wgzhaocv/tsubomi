@@ -326,7 +326,7 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    `--wait` 無しで即叩くと旧版や 502 を見る。デプロイが failed ならその error を出して非零終了 =
    status の手動ポーリングは不要)。上限は `--timeout <秒>`(既定 180)。報告には現在 serving 中の
    デプロイ(`serving.git_sha` / `deploy_id`)も載る = 「見ているのが自分の新版か」が分かる。
-   **端到端で確実にするなら `--for-sha <sha|HEAD>`**(`tbm service verify <名前> --for-sha HEAD`):
+   **エンドツーエンドでで確実にするなら `--for-sha <sha|HEAD>`**(`tbm service verify <名前> --for-sha HEAD`):
    その commit のデプロイが**到着してから**完走を待つので、GitHub 経路で CI がまだビルド中
    (hook 未達)の窓もカバーする(`--wait` 単体はこの窓を待てず旧版を検証してしまう)。
    `deploy --watch` は内部でこれを使うので、--watch を使うなら verify は自動で済む。

@@ -143,17 +143,17 @@ services:
         target: /etc/pgbouncer/pgbouncer.ini
       - source: pgbouncer_userlist
         target: /etc/pgbouncer/userlist.txt
-    # default = pg-tenant への到達。tsubomi-edge は**居るだけ**(M6 網隔離の前は注入 app の
-    # 内部入口だったが、今テナント容器は per-service 私網にしか居ない — `config.rs` の
-    # svc_network_prefix 参照)。**注入 app への到達は平台が私網へ on-demand attach する経路**で、
-    # そこで付ける docker 網別名(= 注入ホスト名 = pgbouncer 証書の公開名)が
+    # default = pg-tenant への到達。tsubomi-edge は**居るだけ**(M6 ネットワーク隔離の前は注入 app の
+    # 内部入口だったが、今テナントコンテナは per-service プライベートネットワークにしか居ない — `config.rs` の
+    # svc_network_prefix 参照)。**注入 app への到達はプラットフォームがプライベートネットワークへ on-demand attach する経路**で、
+    # そこで付ける docker ネットワーク別名(= 注入ホスト名 = pgbouncer 証書の公開名)が
     # `services/network.rs::pgbouncer_aliases` に在る。compose で edge に別名を生やしても
     # テナントからは見えないので、ここには書かない(m3 設計 §11 決定 A')。
     networks: [default, tsubomi-edge]
 
-  # M3:ユーザ app イメージの置き場。平台は digest 指定で 127.0.0.1:5000(ループバック・無認証)
-  # から pull する。公網 push 入口は traefik 経由(registry.<ドメイン> + basicAuth)で、registry
-  # コンテナ自体には認証を付けない(平台のローカル pull を壊さないため)。
+  # M3:ユーザ app イメージの置き場。プラットフォームは digest 指定で 127.0.0.1:5000(ループバック・無認証)
+  # から pull する。インターネット push 入口は traefik 経由(registry.<ドメイン> + basicAuth)で、registry
+  # コンテナ自体には認証を付けない(プラットフォームのローカル pull を壊さないため)。
   registry:
     image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
     container_name: tsubomi-registry
@@ -169,11 +169,11 @@ services:
     volumes:
       - registry_data:/var/lib/registry
 
-  # M5:cache の共有 valkey 実例。per-cache の ACL ユーザは平台(server コンテナ。host ネット +
+  # M5:cache の共有 valkey 実例。per-cache の ACL ユーザはプラットフォーム(server コンテナ。host ネット +
   # docker.sock)が実行時に ACL SETUSER で足す(揮発 → server が起動時 + 30s で収束。§7.3)。
-  # default ユーザは off、平台専用 tsubomi-admin だけが管理権(§11-J)。admin は aclfile では
+  # default ユーザは off、プラットフォーム専用 tsubomi-admin だけが管理権(§11-J)。admin は aclfile では
   # なく command の --user で静的定義(aclfile は ${VAR} 非展開 + 実行時 SETUSER と排他)。
-  # 公網 / 会社 LAN には晒さない(§11-B:cache は内部注入のみ)。ホスト側 127.0.0.1:6433 は
+  # インターネット / 会社 LAN には晒さない(§11-B:cache は内部注入のみ)。ホスト側 127.0.0.1:6433 は
   # host ネットの server が admin 接続するため(pg-platform/pgbouncer と同じ loopback 公開)。
   valkey:
     image: valkey/valkey:8-alpine@sha256:77643d152547b446fc15cbafaff22004545663fcd40c6b28038ad283837baa75
@@ -198,13 +198,13 @@ services:
     ports:
       - "127.0.0.1:6433:6379"
     volumes:
-      - valkey_data:/data   # RDB(キー本体。per-cache ACL は平台が収束で貼り直す)
+      - valkey_data:/data   # RDB(キー本体。per-cache ACL はプラットフォームが収束で貼り直す)
     # default = host ネットの server が 127.0.0.1:6433 で admin 接続。tsubomi-edge = ユーザ
     # コンテナが `tsubomi-valkey:6379`(docker DNS)で内部入口に届くため(§11-A。pgbouncer と同型)。
     networks: [default, tsubomi-edge]
 
   # M3:ユーザ service / apex / registry の入口 + ルーティング。**file provider のみ**
-  # (docker provider は Docker Engine 29 で壊れる)。平台(ホスト直走り)が動的設定を
+  # (docker provider は Docker Engine 29 で壊れる)。プラットフォーム(ホスト直走り)が動的設定を
   # TSUBOMI_TRAEFIK_DYNAMIC_DIR に書き、traefik が watch でホットリロードする:
   # ipallow.yml(ipblock)/ svc-<id>.yml(route.rs)/ registry.yml(registry.rs)/ apex.yml(直VPSのみ)。
   #
@@ -229,12 +229,12 @@ services:
     ports:
       - "${TRAEFIK_BIND_ADDR:-127.0.0.1}:80:80"
     volumes:
-      # 平台が書き出すホストパスを read-only でマウント(docker.sock は不要)。
+      # プラットフォームが書き出すホストパスを read-only でマウント(docker.sock は不要)。
       # TSUBOMI_TRAEFIK_DYNAMIC_DIR(server の env)と一致させること。
       - ${TSUBOMI_TRAEFIK_DYNAMIC_DIR:-/srv/tsubomi/traefik-dynamic}:/etc/traefik/dynamic:ro
       # ローカルプラグイン源(vendor)を /plugins-local へ。Traefik は src/<moduleName>/ を探す。
       - ${TSUBOMI_TRAEFIK_PLUGINS_DIR:-/srv/tsubomi/traefik-plugins}:/plugins-local:ro
-    # apex router(直VPS時)の後端 host.docker.internal を host ゲートウェイへ(server は host ネット)。
+    # apex router(直VPS時)のバックエンド host.docker.internal を host ゲートウェイへ(server は host ネット)。
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks: [default, tsubomi-edge]
@@ -245,7 +245,7 @@ services:
     container_name: tsubomi-server
     restart: unless-stopped
     network_mode: host
-    # M6 egress:host netns で iptables(nft)を打ち、テナント容器の出站を遮断する(services/egress.rs)。
+    # M6 egress:host netns で iptables(nft)を打ち、テナントコンテナのアウトバウンドを遮断する(services/egress.rs)。
     # 既定の cap には NET_ADMIN が無く root でも iptables 不可なので明示追加(docker.sock を既に持つので
     # 相対的に小さな追加)。host netns は network_mode: host で既に共有済み。
     cap_add:
@@ -253,7 +253,7 @@ services:
     env_file:
       - .env.production
     volumes:
-      # M3:平台は docker.sock を保持してユーザコンテナを起動/停止/収束する(bollard)。
+      # M3:プラットフォームは docker.sock を保持してユーザコンテナを起動/停止/収束する(bollard)。
       # dev は host 直走りで native に持つが、本番はコンテナなのでホストの sock をマウントする。
       - /var/run/docker.sock:/var/run/docker.sock
       # バックアップ / ゴミ箱 dump をホストに永続化(server は host ネットなので
@@ -268,7 +268,7 @@ services:
       pg-tenant:
         condition: service_healthy
 
-# tsubomi-edge は external:平台(bollard)がユーザコンテナを attach する網。compose は参照だけ。
+# tsubomi-edge は external:プラットフォーム(bollard)がユーザコンテナを attach する網。compose は参照だけ。
 # デプロイ前に一度 `docker network create tsubomi-edge` する(infra/docker-compose.yml と同じ約束)。
 networks:
   tsubomi-edge:

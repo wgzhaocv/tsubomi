@@ -27,7 +27,7 @@ db-up:
     #!/usr/bin/env bash
     set -euo pipefail
     docker network create tsubomi-edge 2>/dev/null || true
-    # traefik の動的設定ディレクトリを先に作る(無いと docker が root 所有で作り、平台が書けない)。
+    # traefik の動的設定ディレクトリを先に作る(無いと docker が root 所有で作り、プラットフォームが書けない)。
     # パスは .env の TSUBOMI_TRAEFIK_DYNAMIC_DIR(dev は /tmp 配下、Mac 可書)。compose も同じ
     # .env を --env-file で読み、server の書き込み先と mount を揃える。
     dir=$(grep -E '^TSUBOMI_TRAEFIK_DYNAMIC_DIR=' .env 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
@@ -82,11 +82,11 @@ release-image:
 release-cli-publish:
     chmod +x scripts/release-cli.sh && scripts/release-cli.sh
 
-# 公網DB 辺縁 SNI 闸门(crates/sni-gate)を x86_64-linux に交叉編譯(配備せず確認だけ)。
+# インターネットDB エッジ SNI ゲート(crates/sni-gate)を x86_64-linux にクロスコンパイル(配備せず確認だけ)。
 build-sni-gate:
     PATH="$HOME/.cargo/bin:$PATH" cargo zigbuild --release -p tsubomi-sni-gate --target x86_64-unknown-linux-gnu
 
-# SNI 闸门を VPS(既定 proxy)へ build & deploy(二進制 + systemd unit、入替 & 再起動)。
+# SNI ゲートを VPS(既定 proxy)へ build & deploy(バイナリ + systemd unit、入替 & 再起動)。
 # 例: just ship-sni-gate  /  SNI_GATE_HOST=proxy just ship-sni-gate
 ship-sni-gate host="proxy":
     chmod +x scripts/ship-sni-gate.sh && scripts/ship-sni-gate.sh {{host}}

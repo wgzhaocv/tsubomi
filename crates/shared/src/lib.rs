@@ -434,8 +434,8 @@ pub struct MoveReq {
     pub to: String,
 }
 
-/// `GET /api/volumes/:id/usage`:卷の使用量(概要ページ用)。假根を再帰的に走査して
-/// 集計する(symlink は辿らない)。一覧では出さない — 全卷を走査すると高コストなので。
+/// `GET /api/volumes/:id/usage`:ボリュームの使用量(概要ページ用)。假根を再帰的に走査して
+/// 集計する(symlink は辿らない)。一覧では出さない — 全ボリュームを走査すると高コストなので。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeUsageDto {
     pub size_bytes: u64,
@@ -794,7 +794,7 @@ pub struct CreateIpAllowReq {
 
 /// `GET /api/admin/ranking` の各行 / overview の素材。匿名化済み(設計 v2 §7):
 /// **ユーザの真名は出すが、リソースは `display_name` ではなく匿名番号**(`service1` 等)。
-/// リソースの内容(DB の中身 / ファイル / env 明文)は一切載せない。
+/// リソースの内容(DB の中身 / ファイル / env 平文)は一切載せない。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminResourceRow {
     /// リソース ID(不透明な UUID。名前/内容ではないので匿名化を破らない)。owner 専用で、

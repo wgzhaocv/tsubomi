@@ -235,7 +235,7 @@ pub async fn get_one(
     Ok(Json(vol_row_to_dto(row.ok_or(AppError::NotFound)?)))
 }
 
-/// `GET /api/volumes/:id/usage`:卷の使用量(概要ページ用)。假根を再帰走査して集計。
+/// `GET /api/volumes/:id/usage`:ボリュームの使用量(概要ページ用)。假根を再帰走査して集計。
 /// 走査は重くなり得るので spawn_blocking でランタイムスレッドを塞がない。
 pub async fn usage(
     auth: AuthCtx,
@@ -256,7 +256,7 @@ pub async fn usage(
 }
 
 /// 走査の時間予算。これを超えたら打ち切り、truncated=true で下限値を返す
-/// (巨大な卷や遅いストレージで 1 リクエストが長引くのを防ぐ。精密な集計は M4)。
+/// (巨大なボリュームや遅いストレージで 1 リクエストが長引くのを防ぐ。精密な集計は M4)。
 const USAGE_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// 假根を再帰走査して (合計バイト, ファイル数, ディレクトリ数, 打ち切りか) を返す。

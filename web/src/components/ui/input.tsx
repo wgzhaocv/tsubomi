@@ -18,7 +18,7 @@ export interface InputProps extends Omit<
   id?: string;
   /** 可視ラベル(指定時は <label htmlFor> を input の上に描画) */
   label?: React.ReactNode;
-  /** 補助説明文(フィールド下に描画し aria-describedby で結ぶ) */
+  /** 補助説平文(フィールド下に描画し aria-describedby で結ぶ) */
   description?: React.ReactNode;
   /** エラーメッセージ(フィールド下に描画し aria-describedby で結ぶ) */
   errorMessage?: React.ReactNode;
@@ -85,7 +85,7 @@ export function Input({
   const isControlled = value !== undefined;
   const currentValue = isControlled ? value : innerValue;
 
-  // id 未指定なら自動生成し、label / 説明文 / エラー文と紐付ける
+  // id 未指定なら自動生成し、label / 説平文 / エラー文と紐付ける
   const reactId = React.useId();
   const inputId = id ?? reactId;
   const descriptionId = `${inputId}-description`;

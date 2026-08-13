@@ -120,7 +120,7 @@ export const router = createBrowserRouter([
           { path: "admin/ranking", element: <AdminRanking /> },
         ],
       },
-      // 監査ログ(真名 + 操作流水の明文 = §7 匿名化の範囲外)と共有パスワード設定は
+      // 監査ログ(真名 + 操作流水の平文 = §7 匿名化の範囲外)と共有パスワード設定は
       // owner のみ。<RequireOwner> に集約(バックエンドも require_owner_web)。
       {
         element: <RequireOwner />,

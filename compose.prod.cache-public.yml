@@ -1,6 +1,6 @@
-# 公開 cache(VPS)で valkey に **TLS 口を生やす**ための上書き。公網 IP を持つ VPS 部署 +
-# VPS 辺縁の sni-gate(:443)+ frp 中継とセットで使う(CF Tunnel 部署では使わない — redis の
-# 裸 TCP を公網へ出せない)。詳細設計は `doc/paas-cache-public-design.md`。
+# 公開 cache(VPS)で valkey に **TLS 口を生やす**ための上書き。グローバル IP を持つ VPS 部署 +
+# VPS エッジの sni-gate(:443)+ frp 中継とセットで使う(CF Tunnel 部署では使わない — redis の
+# 裸 TCP をインターネットへ出せない)。詳細設計は `doc/paas-cache-public-design.md`。
 #
 # 使い方(本番。Pi の ~/tsubomi-deploy):
 #   .env.production:
@@ -9,15 +9,15 @@
 #     TSUBOMI_CACHE_PUBLIC_PORT=443
 #   docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.cache-public.yml up -d valkey
 #   (ホストに他の overlay も在るなら **在るもの全部を -f に連ねる** — `just ship` は自動で全載せ。
-#    部分 -f だと compose が残りの overlay の容器を「孤児」誤報 + 再作成時に構成が欠ける)
+#    部分 -f だと compose が残りの overlay のコンテナを「孤児」誤報 + 再作成時に構成が欠ける)
 #
-# 仕組み:valkey が内部 6379(明文・不変)に加え :6380 で **TLS を端到端終端**(LE 証書 SAN=cache.<域名>)。
+# 仕組み:valkey が内部 6379(平文・不変)に加え :6380 で **TLS をエンドツーエンドで終端**(LE 証書 SAN=cache.<ドメイン>)。
 #   ホスト loopback 127.0.0.1:6380 に出し、frpc@Pi がそれを frps の loopback proxy 口へ中継 →
-#   VPS :443 の sni-gate が SNI=cache.<域名> をこの redis 後端へ振り分ける(`crates/sni-gate`)。
-#   **admin(127.0.0.1:6433)も内部注入(tsubomi-valkey:6379)も不変** = 平台 admin・注入された app は無影響。
+#   VPS :443 の sni-gate が SNI=cache.<ドメイン> をこの redis バックエンドへ振り分ける(`crates/sni-gate`)。
+#   **admin(127.0.0.1:6433)も内部注入(tsubomi-valkey:6379)も不変** = プラットフォーム admin・注入された app は無影響。
 #
-# 証書:cache_tls 卷の server.crt/server.key(SAN=cache.<域名> の LE)。acme.sh の reloadcmd
-#   (deploy/cache-public/reload-valkey-cert.sh)が更新時にこの卷へ cp + valkey に CONFIG SET で
+# 証書:cache_tls ボリュームの server.crt/server.key(SAN=cache.<ドメイン> の LE)。acme.sh の reloadcmd
+#   (deploy/cache-public/reload-valkey-cert.sh)が更新時にこのボリュームへ cp + valkey に CONFIG SET で
 #   無停止リロード。初回起動時に証書が無ければ valkey-certgen が自己署名を置く(valkey が起動できるように。
 #   本物の LE で上書きするまでの仮。pgbouncer-certgen と同型)。
 #
@@ -25,13 +25,13 @@
 #  * `command`(リスト)は後勝ちで全置換なので base(compose.prod.yml)の全行を再掲する。
 #  * `--tls-auth-clients no`:クライアント証書は要求しない(mutual-TLS ではない)。これが無いと
 #    valkey が client cert を要求し、ioredis 等の既定接続が落ちる。
-#  * TLS 口の公開は **loopback のみ**(127.0.0.1:6380)。公網露出は VPS :443 の sni-gate が単独で持つ
+#  * TLS 口の公開は **loopback のみ**(127.0.0.1:6380)。インターネットへの露出は VPS :443 の sni-gate が単独で持つ
 #    (valkey を直接 0.0.0.0 では出さない)。
 #  * `compose.prod.tls.yml`(直 VPS で traefik が :443 も終端)と同居する場合は別問題(本番は上流 TLS
 #    = traefik :80 のみ)。本 override は valkey だけを触り traefik には関与しない。
 services:
-  # 初回起動用の自己署名 TLS 証書(本物の LE が cache_tls 卷に無いとき valkey が起動できるように)。
-  # postgres:18 を流用(openssl 同梱・既に manifest 内。pgbouncer-certgen と同型)。鍵は卷内のみ。
+  # 初回起動用の自己署名 TLS 証書(本物の LE が cache_tls ボリュームに無いとき valkey が起動できるように)。
+  # postgres:18 を流用(openssl 同梱・既に manifest 内。pgbouncer-certgen と同型)。鍵はボリューム内のみ。
   valkey-certgen:
     image: postgres:18@sha256:29ee7bb30d804447dc9a91fd0d74322ae1dc3a4072cc6346f70a5ed6e783b565
     entrypoint: ["sh", "-c"]
@@ -70,7 +70,7 @@ services:
       - "~*"
       - "&*"
       - "+@all"
-      # 公開 TLS 口(内部 6379 明文・admin 6433 はそのまま)。
+      # 公開 TLS 口(内部 6379 平文・admin 6433 はそのまま)。
       - --tls-port
       - "6380"
       - --tls-cert-file

@@ -330,7 +330,7 @@ fn render_yaml(cidrs: &[String]) -> String {
 /// TCP の ipAllowList として流用する。**呼び出し側(sync)は許可リストが空なら本関数を呼ばない**
 /// = 公開 DB は fail-closed(DB を空リストで 0.0.0.0/0 に晒さない。HTTP service の空=fail-open とは別)。
 /// pgbouncer が client TLS を終端するので Traefik は **素の TCP passthrough**(`HostSNI(*)`・TLS 無し)=
-/// client の `sslmode=require` は pgbouncer と端到端で TLS を張る。`backend` = 内部 pgbouncer の
+/// client の `sslmode=require` は pgbouncer とエンドツーエンドでで TLS を張る。`backend` = 内部 pgbouncer の
 /// `host:port`(**コンテナ名**:db_internal_port。注入用の証書名ではない — 呼び出し側のコメント参照。
 /// 値はプラットフォーム生成なのでそのまま埋めて安全)。
 fn render_db_tcp_yaml(cidrs: &[String], backend: &str) -> String {

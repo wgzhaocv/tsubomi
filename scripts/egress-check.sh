@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# M6 egress(出站隔離)の回帰チェック。**prod Linux 上で実行**(dev OrbStack では網隔離を強制しないので
-# 無意味)。生存するテナント私網(tsubomi-svc-*)に使い捨て probe コンテナを attach し、出站が設計どおりに
+# M6 egress(アウトバウンド隔離)の回帰チェック。**prod Linux 上で実行**(dev OrbStack ではネットワーク隔離を強制しないので
+# 無意味)。生存するテナントプライベートネットワーク(tsubomi-svc-*)に使い捨て probe コンテナを attach し、アウトバウンドが設計どおりに
 # 縛られているかを assert する:
-#   放行: 公網(全 TCP)/ 同桥 infra(pgbouncer・valkey)
-#   遮断: 宿主機(gateway / LAN IP / tailnet IP の sshd:22)/ 他テナント(横移)
+#   許可: インターネット(全 TCP)/ 同桥 infra(pgbouncer・valkey)
+#   遮断: ホスト(gateway / LAN IP / tailnet IP の sshd:22)/ 他テナント(横移)
 # 設計は doc/paas-egress-design.md §4。
 #
 # 使い方(Pi 上 or ssh 越し):
 #   ./scripts/egress-check.sh
 #   NET=tsubomi-svc-<id> IMAGE=alpine:3 ./scripts/egress-check.sh
-# どれか 1 つでも「遮断されるべき宛先に到達できた / 放行されるべき宛先に到達できない」なら exit 1。
+# どれか 1 つでも「遮断されるべき宛先に到達できた / 許可されるべき宛先に到達できない」なら exit 1。
 set -euo pipefail
 
 IMAGE="${IMAGE:-alpine:3}" # probe イメージ(busybox の nc / timeout を使う)
@@ -26,7 +26,7 @@ subnet="$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subne
 gw="$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
 echo "対象テナント網: $net  subnet=$subnet  gateway(=宿主)=$gw"
 
-# ---- 宿主機の到達点を集める(遮断確認の的)----
+# ---- ホストの到達点を集める(遮断確認の的)----
 host_lan="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="src"){print $(i+1);exit}}' || true)"
 tailnet="$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
 echo "宿主 LAN IP=$host_lan  tailnet IP=${tailnet:-（なし）}"
@@ -60,12 +60,12 @@ ok()  { echo "  ✓ $1"; PASS=$((PASS+1)); }
 bad() { echo "  ✗ $1"; FAIL=$((FAIL+1)); }
 # 接続できれば 0、遮断(timeout)/ 拒否なら非 0。
 can() { timeout 5 nc -w 3 "$1" "$2" </dev/null >/dev/null 2>&1; }
-open()  { if can "$1" "$2"; then ok "$3"; else bad "$3 — 到達できない(放行されるべき)"; fi; }
+open()  { if can "$1" "$2"; then ok "$3"; else bad "$3 — 到達できない(許可されるべき)"; fi; }
 block() { if can "$1" "$2"; then bad "$3 — 到達できる(遮断されるべき)"; else ok "$3"; fi; }
 
 echo "probe ip=$(hostname -i 2>/dev/null)"
-echo "[放行されるべき]"
-open 1.1.1.1 443 "公網 1.1.1.1:443"
+echo "[許可されるべき]"
+open 1.1.1.1 443 "インターネット 1.1.1.1:443"
 # pgbouncer:6432 に到達できること自体が「DNS が同桥(同 /24=$TENANT_SUBNET)の IP を返す」証拠
 # (infra 網の 172.x に解決されると -d 172.16/12 DROP に巻かれ open は失敗する)。
 open tsubomi-pgbouncer 6432 "同桥 infra pgbouncer:6432(解決先が同 /24 $TENANT_SUBNET の確認も兼ねる)"

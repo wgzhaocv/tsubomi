@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 公網数据库 辺縁 SNI 闸门(crates/sni-gate)を VPS へ build & deploy する。
+# 公開データベース エッジ SNI ゲート(crates/sni-gate)を VPS へ build & deploy する。
 #   使い方: scripts/ship-sni-gate.sh [proxy]
 #
-# crates/sni-gate を x86_64-linux-gnu に交叉編譯 → 二進制 + systemd unit を scp →
+# crates/sni-gate を x86_64-linux-gnu にクロスコンパイル → バイナリ + systemd unit を scp →
 # 入替 & 再起動。VPS は x86_64 Debian(glibc)なので gnu ターゲット。
 #
 # 前提(release-cli.sh と同じ):
@@ -22,7 +22,7 @@ cargo zigbuild --release -p tsubomi-sni-gate --target "$TARGET"
 BIN="target/$TARGET/release/tsubomi-sni-gate"
 
 echo "=== ship to $HOST ==="
-# 二進制は一時名で scp → atomic mv(走行中バイナリの差し替えは mv が安全)。
+# バイナリは一時名で scp → atomic mv(実行中バイナリの差し替えは mv が安全)。
 # 1 つのバイナリを 2 インスタンスで使う:tsubomi-sni-gate(:443 pg)+ tsubomi-cache-gate(:8080 cache・
 # 独立 frp 池・SNI 無し許可)。両 unit を配って両方再起動する。
 scp -q "$BIN" "$HOST:/usr/local/bin/tsubomi-sni-gate.new"

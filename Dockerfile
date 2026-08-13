@@ -49,7 +49,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends postgresql-client-18 iptables rsync \
     && apt-get purge -y --auto-remove curl \
     && rm -rf /var/lib/apt/lists/*
-# M6 egress:server は host netns で `iptables` を打ってテナント出站を遮断する(services/egress.rs)。
+# M6 egress:server は host netns で `iptables` を打ってテナントアウトバウンドを遮断する(services/egress.rs)。
 # debian trixie の iptables は既定で **nft バックエンド** = host(v1.8.7 nf_tables)と一致するので
 # 同じテーブルを操作できる(legacy だと別テーブルで無効化する)。compose 側で cap_add: NET_ADMIN が要る。
 WORKDIR /app

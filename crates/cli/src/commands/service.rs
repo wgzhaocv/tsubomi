@@ -147,7 +147,7 @@ pub enum ServiceCmd {
         #[arg(long)]
         wait: bool,
         /// 指定 commit のデプロイが**到着して**完走するまで待ってから検証する(--wait を含意。
-        /// CI ビルド中=hook 未達の窓もカバーする端到端の待機)。値は full/短 sha どちらでも
+        /// CI ビルド中=hook 未達の窓もカバーするエンドツーエンドでの待機)。値は full/短 sha どちらでも
         /// 前方一致、`HEAD` は手元 repo から解決。例:`--for-sha $(git rev-parse HEAD)`
         #[arg(long)]
         for_sha: Option<String>,
@@ -1667,7 +1667,7 @@ struct VerifyReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     landed_noservice: Option<String>,
     /// いま serving 中のデプロイ(service.image_digest に一致する直近成功 deploy)。
-    /// 「見ているのが自分の新版か」を機械判別する材料(`--for-sha` と併用で端到端)。
+    /// 「見ているのが自分の新版か」を機械判別する材料(`--for-sha` と併用でエンドツーエンドで)。
     /// 特定できない(未デプロイ等)ときは省略。
     #[serde(skip_serializing_if = "Option::is_none")]
     serving: Option<ServingInfo>,

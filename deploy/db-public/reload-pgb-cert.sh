@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# acme.sh の reloadcmd から呼ぶ:db.tsubomi-app.com の LE 証書を pgbouncer の TLS 卷へ入れ、
+# acme.sh の reloadcmd から呼ぶ:db.tsubomi-app.com の LE 証書を pgbouncer の TLS ボリュームへ入れ、
 # pgbouncer に **SIGHUP で再読込**させ、**実際に出ている証書が入れた物と一致するまで確認する**。
 #
 # **これは仕組み上の要**(2026-07-26):service へ注入する内部接続文字列のホストは pgbouncer 証書の
@@ -15,8 +15,8 @@
 # 上書き可能な env:
 #   LE_DOMAIN   証書の名前(既定 db.tsubomi-app.com)。LE_DIR / 鍵ファイル名の単一真源。
 #   LE_DIR      acme.sh の証書ディレクトリ(既定 ~/.acme.sh/<LE_DOMAIN>_ecc)
-#   PGB_TLS_VOL pgbouncer TLS 卷名(既定 tsubomi-deploy_pgb_tls = compose の pgb_tls)
-#   PGB_NAME    pgbouncer の容器名(既定 tsubomi-pgbouncer)
+#   PGB_TLS_VOL pgbouncer TLS ボリューム名(既定 tsubomi-deploy_pgb_tls = compose の pgb_tls)
+#   PGB_NAME    pgbouncer のコンテナ名(既定 tsubomi-pgbouncer)
 set -eu
 
 LE_DOMAIN="${LE_DOMAIN:-db.tsubomi-app.com}"
@@ -24,22 +24,22 @@ LE_DIR="${LE_DIR:-$HOME/.acme.sh/${LE_DOMAIN}_ecc}"
 PGB_TLS_VOL="${PGB_TLS_VOL:-tsubomi-deploy_pgb_tls}"
 PGB_NAME="${PGB_NAME:-tsubomi-pgbouncer}"
 
-# **卷名の取り違え防止**:誤った名前を渡すと docker は新しい空卷を作って「成功」してしまい、
-# 実 pgbouncer は古い証書のまま = 最も危険な偽成功。実際に pgbouncer が使っている卷か確かめる。
+# **ボリューム名の取り違え防止**:誤った名前を渡すと docker は新しい空ボリュームを作って「成功」してしまい、
+# 実 pgbouncer は古い証書のまま = 最も危険な偽成功。実際に pgbouncer が使っているボリュームか確かめる。
 if ! docker inspect "$PGB_NAME" \
   --format '{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}' 2>/dev/null |
   grep -qx "$PGB_TLS_VOL"; then
-  echo "✗ 卷 $PGB_TLS_VOL は $PGB_NAME にマウントされていません(PGB_TLS_VOL を確認)" >&2
+  echo "✗ ボリューム $PGB_TLS_VOL は $PGB_NAME にマウントされていません(PGB_TLS_VOL を確認)" >&2
   exit 1
 fi
 
-# 1) LE 証書を pgb_tls 卷へ(一時 alpine コンテナで cp)。pgbouncer は読み取り専用 mount なので
-#    卷に直接書く必要がある(ホストから卷の中身は直接見えないため docker run 経由)。
+# 1) LE 証書を pgb_tls ボリュームへ(一時 alpine コンテナで cp)。pgbouncer は読み取り専用 mount なので
+#    ボリュームに直接書く必要がある(ホストからボリュームの中身は直接見えないため docker run 経由)。
 #    compose の pgbouncer-certgen が置く自己署名の種を、ここで公開名の LE 証書に差し替える。
 #
 #    **cert と key は「対」として切り替える**:2 つの mv の間で電源が落ちると新 cert + 旧 key が
-#    残り、次の起動で TLS が壊れる。そこで版付き目録へ両方置いて**symlink 1 本を張り替える**
-#    (rename は同一卷で原子的 = 対の切替も 1 手で済む)。pgbouncer.ini が指す
+#    残り、次の起動で TLS が壊れる。そこで版付きディレクトリへ両方置いて**symlink 1 本を張り替える**
+#    (rename は同一ボリュームで原子的 = 対の切替も 1 手で済む)。pgbouncer.ini が指す
 #    /etc/pgbouncer/tls/server.{crt,key} は、この symlink 経由で常に整合した対を指す。
 #    併せて **cert と key が対か**(公開鍵の一致)を切替前に検証する。
 docker run --rm \
@@ -59,16 +59,16 @@ docker run --rm \
     mkdir -p "/tls/$rel"
     cp /le/fullchain.cer "/tls/$rel/server.crt"
     cp "/le/${LE_DOMAIN}.key" "/tls/$rel/server.key"
-    # pgbouncer(非 root で走る)が読める必要がある。卷は docker 内部にしか露出しないので、
+    # pgbouncer(非 root で走る)が読める必要がある。ボリュームは docker 内部にしか露出しないので、
     # 実行 uid を仮定して締めるより **読めることを確実にする**方を採る(読めないと全テナントの
     # DB が落ちる = 締めすぎの代償が大きすぎる)。
     chmod 644 "/tls/$rel/server.crt" "/tls/$rel/server.key"
     # symlink を原子的に張り替える(ln -sf は既存を上書きするだけで原子的でないので tmp 経由)。
-    # **相対**リンクにするのが要点:この卷は helper では /tls、pgbouncer では
+    # **相対**リンクにするのが要点:このボリュームは helper では /tls、pgbouncer では
     # /etc/pgbouncer/tls にマウントされるので、絶対パスだと pgbouncer 側で解決できない。
     ln -sf "$rel/server.crt" /tls/.server.crt.lnk && mv -T /tls/.server.crt.lnk /tls/server.crt
     ln -sf "$rel/server.key" /tls/.server.key.lnk && mv -T /tls/.server.key.lnk /tls/server.key
-    # 古い版を掃除(直近 3 版だけ残す。ロールバック用の余地 + 卷の肥大防止)。
+    # 古い版を掃除(直近 3 版だけ残す。ロールバック用の余地 + ボリュームの肥大防止)。
     ls -1dt /tls/versions/*/ 2>/dev/null | tail -n +4 | xargs -r rm -rf
     # 入れた証書の指紋を、この後の閉環確認のために書き出す。
     openssl x509 -in /le/fullchain.cer -noout -fingerprint -sha256 | cut -d= -f2 > /tls/expected.fp'
@@ -76,9 +76,9 @@ docker run --rm \
 want=$(docker run --rm -v "$PGB_TLS_VOL":/tls:ro alpine:3 cat /tls/expected.fp)
 
 # 2) pgbouncer に再読込させる。SIGHUP は設定と証書を読み直すだけで、張られている接続は切らない。
-#    未起動(初回ブートストラップ等)なら証書は既に卷へ配置済みなので次の起動で読まれる = 正常終了。
+#    未起動(初回ブートストラップ等)なら証書は既にボリュームへ配置済みなので次の起動で読まれる = 正常終了。
 if ! docker kill -s HUP "$PGB_NAME" >/dev/null 2>&1; then
-  echo "$PGB_NAME 未起動 — 証書は卷に配置済み。次回起動で反映されます。"
+  echo "$PGB_NAME 未起動 — 証書はボリュームに配置済み。次回起動で反映されます。"
   exit 0
 fi
 

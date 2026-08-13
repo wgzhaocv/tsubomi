@@ -39,7 +39,7 @@ Google OAuth クライアント:Google Cloud Console で作成(種別:Web applic
 
 ## デプロイ
 
-単機運用・ホスト直走り。サーバは **host ネットワーク**で `127.0.0.1:9090`(本番は
+単一ホスト運用・ホスト直走り。サーバは **host ネットワーク**で `127.0.0.1:9090`(本番は
 `TSUBOMI_BIND_ADDR`)に待ち受け、前段の TLS リバースプロキシ越しに公開する。設定は
 ホスト毎の **`.env.production`**(git 管理外)。host ネットなので
 `DATABASE_URL=127.0.0.1:5434` が dev / 本番で共通のまま通る。`just` / ソース / sh が
@@ -178,7 +178,7 @@ tbm update               # 手動セルフアップデート(バージョンチ�
 tbm uninstall            # 設定・PATH・本体まで残留物ゼロで削除
 
 # M1 database
-tbm db create <名前>     # DB 作成(平台が wire 名・role・パスワードを生成)
+tbm db create <名前>     # DB 作成(プラットフォームが wire 名・role・パスワードを生成)
 tbm db list
 tbm db url <名前>        # 外部接続文字列(= パスワード。共有しない)
 tbm db connect <名前>    # 無密码で psql 接続(PGPASSWORD、履歴に残さない)
@@ -193,7 +193,7 @@ tbm service create <名前> [--github]             # service(GitHub 連携は任
 tbm deploy --local --service <名前>              # ローカルビルドでデプロイ(GitHub 不要の退路)
 tbm service status|logs|exec|verify|rollback <名前>
 tbm service visibility <名前> <private|company|public>  # 公開範囲(即時反映・再デプロイ不要)
-tbm inject <資源名> --into <service名>           # 注入(database/volume/cache/service → service)
+tbm inject <リソース名> --into <service名>           # 注入(database/volume/cache/service → service)
 ```
 
 CLI のサーバ URL の解決順:`--server` / `TSUBOMI_SERVER` → 保存済み設定

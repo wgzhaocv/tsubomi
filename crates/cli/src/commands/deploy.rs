@@ -366,7 +366,7 @@ async fn run_watch(
             .context("CI が失敗しました(上のログを確認)。修正して再度 push してください")?;
     }
 
-    // 4) CI 成功 = hook 到達済み。この sha のデプロイ完走を待って検証(端到端)。
+    // 4) CI 成功 = hook 到達済み。この sha のデプロイ完走を待って検証(エンドツーエンドで)。
     // 対象は表示名ではなく **UUID** で渡す(resolve_service_id が UUID を素通しする)—
     // CI 待ちの間に rename されると旧名の再解決が not_found で落ちるため。
     if !json {
