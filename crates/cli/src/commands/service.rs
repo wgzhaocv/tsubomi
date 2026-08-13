@@ -23,12 +23,15 @@ pub enum ServiceCmd {
     Create {
         /// 表示名(例:myapp)。GitHub repo 名には subdomain を使う
         name: String,
-        /// GitHub 連携(repo / secret / variable + workflow ファイル)も `gh` で自動的に組み立てる。
-        /// JSON 出力時でも実行するので、setup_commands の shell を手で叩く必要がない
-        /// (Windows / mac / Linux いずれの shell でも動き、secret は stdin 渡しで argv に出さない)。
-        /// `gh` が無い / 未ログインなら setup_commands を返すだけ(手動 fallback)。
+        /// GitHub 連携も組み立てる(**1.0.35 から既定** — このフラグは互換のための no-op)。
+        /// secret は stdin 渡しで argv / 出力に出ない。`gh` が無い / 未ログインなら
+        /// setup_commands を返すだけ(手動 fallback)
         #[arg(long)]
         github: bool,
+        /// GitHub 連携を行わず、resource だけ作って全量 DTO(deploy_key / registry pass /
+        /// setup_commands = **秘密を含む**)を返す。gh を使わず自前で連携を組む場合の退路
+        #[arg(long, conflicts_with = "github")]
+        no_github: bool,
         /// app が容器内で listen する port(省略 = 8080)。8080 以外を指定すると公開範囲の
         /// 既定が private になる(自帯 DB 等の非 HTTP コンテナ想定。`--visibility` で上書き可)
         #[arg(long)]
@@ -160,7 +163,7 @@ pub enum ServiceCmd {
     Delete {
         /// 対象サービスの表示名
         name: String,
-        /// `--github` 連携で作った GitHub repo(`<gh ユーザ>/<subdomain>`)も連带削除する。
+        /// GitHub 連携(create の既定)で作った repo(`<gh ユーザ>/<subdomain>`)も連带削除する。
         /// repo の削除は**即時かつ復元不能**(サービス本体のゴミ箱 3 日復元とは別)。
         /// gh に delete_repo スコープが要る(無ければ `gh auth refresh -h github.com -s delete_repo`)
         #[arg(long)]
@@ -470,7 +473,7 @@ pub async fn run(
                     None => {
                         if gh_ok() {
                             eprintln!(
-                                "ヒント: `--github` 連携で作った GitHub repo は残ります(`tbm service delete <name> --with-repo` で連带削除、または gh repo delete で手動削除)"
+                                "ヒント: GitHub 連携で作った repo は残ります(`tbm service delete <name> --with-repo` で連带削除、または gh repo delete で手動削除)"
                             );
                         }
                     }
@@ -508,7 +511,8 @@ pub async fn run(
         }
         ServiceCmd::Create {
             name,
-            github,
+            github: _github, // 1.0.35 から既定挙動(互換 no-op)
+            no_github,
             port,
             visibility,
             stateful,
@@ -521,10 +525,10 @@ pub async fn run(
             // リポジトリとして** GitHub に繋ぐので、repo でなければ service 作成(= サーバ側の
             // 副作用)の **前** に `git init` して半端な状態(service だけ出来て連携が失敗)を防ぐ。
             // init が要るのは configure_github が実際に走るときだけ — それは **gh が使えて**、
-            // かつ「json なら `--github` / text なら常に」連携経路に入るとき。gh が無い経路
-            // (fallback で setup_commands を返すだけ)は repo を作らないので init しない
-            // (不要な `.git` を掘らない)。gh_ok() は orchestrate でも再評価するが安価。
-            let created_git = gh_ok() && (github || !json) && ensure_git_repo()?;
+            // かつ `--no-github` でないとき(1.0.35 から json でも連携が既定。text と同じ挙動)。
+            // gh が無い経路(fallback で setup_commands を返すだけ)は repo を作らないので
+            // init しない(不要な `.git` を掘らない)。gh_ok() は orchestrate でも再評価するが安価。
+            let created_git = gh_ok() && !no_github && ensure_git_repo()?;
             // service 作成(サーバ側の最初の副作用)。失敗時、直前に掘った `.git` はまだ何も
             // 載っていない(空ディレクトリで init しただけ)ので削除して原子性を保つ —
             // 「remote add 失敗後に半端な状態が残る」という実利用フィードバックへの対処。
@@ -565,16 +569,31 @@ pub async fn run(
                 );
             }
             if json {
-                if github {
-                    // AI 経路でも GitHub 連携を Rust 側で組み立てる(setup_commands の bash 文字列を
-                    // AI が実行しなくてよい = OS 非依存。secret は stdin 渡しで argv に出さない)。
-                    // 結果は機械可読な JSON(秘密は出さない。gh 不在なら setup_commands を返す)。
-                    print_json(&orchestrate_json(&resp)?)?;
-                } else {
-                    // 既定:gh は実行せず DTO をそのまま返す(AI が setup_commands を実行)。
+                if no_github {
+                    // 退路:gh を実行せず DTO をそのまま返す(呼び出し側が setup_commands を実行)。
                     // resp は service(flatten)+ deploy_key + registry + hook_url + platforms
-                    // + workflow_yaml + setup_commands を含む。秘密はこの応答にしか出ない。
+                    // + workflow_yaml + setup_commands を含む = **秘密が stdout に出る**唯一の経路
+                    // (明示 opt-in。gh 無し環境ではこの手順自体が交付物 — security backlog 受容)。
                     print_json(&resp)?;
+                } else {
+                    // 既定(1.0.35〜):json でも GitHub 連携を Rust 側で組み立てる(text と同挙動)。
+                    // secret は stdin 渡しで argv にも stdout にも出ない = 転録に秘密が残らない
+                    // (機制で保証 — CLI 試用フィードバック S6)。gh 不在は fallback JSON に
+                    // setup_commands(秘密込み)が載る — 従来の既定と同じ露出ティアに退化。
+                    // 旧既定(摊平 DTO)が要る場合は `--no-github`。
+                    print_json(&orchestrate_json(&resp)?)?;
+                }
+            } else if no_github {
+                // text でも --no-github は連携せず、成功の形だけ回显して手順を stdout へ。
+                eprintln!(
+                    "サービスを作成しました:{} (service{}, subdomain={})",
+                    resp.service.display_name, resp.service.anon_seq, resp.service.subdomain
+                );
+                print_created_shape(&resp.service, visibility.is_none());
+                eprintln!("GitHub 連携は行っていません(--no-github)。連携する場合は以下を実行:");
+                eprintln!("  (deploy_key / registry pass は秘密です。共有・commit しないこと):");
+                for line in &resp.setup_commands {
+                    println!("{line}");
                 }
             } else {
                 orchestrate(&resp, visibility.is_none())?;
@@ -833,7 +852,7 @@ fn configure_github(resp: &CreateServiceResp) -> Result<String> {
     Ok(repo)
 }
 
-/// カレントが git リポジトリでなければ `git init -b main` する(`--github` 連携の前提)。
+/// カレントが git リポジトリでなければ `git init -b main` する(GitHub 連携 = create 既定の前提)。
 /// `gh repo create --source=.` と後の `git push` に repo が要り、カレントは元々 repo にする対象
 /// なので自動初期化する。**service 作成(サーバ側副作用)の前** に呼ぶことで半端な状態を防ぐ。
 /// 出力は stderr / null に倒し、JSON モードの stdout を汚さない。
@@ -906,12 +925,12 @@ fn ensure_tsubomi_remote(repo: &str) {
         .status();
 }
 
-/// JSON 出力 + `--github` 時の GitHub 連携。configure_github() を呼び、進捗は stderr・
+/// JSON 出力時の GitHub 連携(1.0.35 から既定)。configure_github() を呼び、進捗は stderr・
 /// **結果は機械可読な JSON** で返す。
 ///
 /// 秘密の扱い:成功時(`configured: true`)は stdout に秘密を出さない。**gh が無い / 途中で
 /// 失敗した場合だけ** fallback として `setup_commands`(deploy_key / registry pass を含む)を返す
-/// — これは非 `--github`(setup_commands を必ず返す)と同じ露出ティアで、受容済み。
+/// — これは `--no-github`(setup_commands を必ず返す)と同じ露出ティアで、受容済み。
 ///
 /// なぜ失敗を Err にせず fallback の JSON にするか:service は既にサーバ側で作成済みなので、
 /// ここでハード失敗すると AI は秘密(create 応答にしか出ない)を失い、再 `create` が 409 conflict
@@ -962,7 +981,7 @@ fn orchestrate_json(resp: &CreateServiceResp) -> Result<serde_json::Value> {
 /// workflow ファイルを書く(既存は基本上書きしない — ユーザの編集を尊重)。
 /// 例外:旧版の壊れた配方(存在しない npm パッケージ `@railway/nixpacks` を呼び CI が必ず失敗する)が
 /// 残っている場合だけは修正版で上書きする。これは平台の生成物でユーザ編集ではなく、放置すると
-/// `--github` が成功しても CI が同じ原因で失敗し続ける(= 今回の修正が届かない)。
+/// GitHub 連携が成功しても CI が同じ原因で失敗し続ける(= 今回の修正が届かない)。
 fn write_workflow_file(yaml: &str) -> Result<()> {
     let path = std::path::Path::new(WORKFLOW_PATH);
     if path.exists() {
@@ -985,12 +1004,12 @@ fn write_workflow_file(yaml: &str) -> Result<()> {
 }
 
 /// `--with-repo`:`<gh ユーザ>/<subdomain>` の GitHub repo を削除する(成功時は repo 名を返す)。
-/// repo が無い(手動削除済み / `--github` 未使用)は成功扱いにせずエラーで正直に報告する —
+/// repo が無い(手動削除済み / `--no-github` で未連携)は成功扱いにせずエラーで正直に報告する —
 /// 「消したつもりが別名で残っていた」を隠さない。delete_repo スコープ不足には次の一手を添える。
 ///
 /// **同名無関係 repo の誤削除防御**(審査指摘):`--local` 運用の service と同名の個人 repo が
 /// 偶然ある(subdomain は "blog" 等の一般語になりやすい)と、名前一致だけで消すのは不可逆事故。
-/// `--github` 連携は作成時に必ず variable `TSUBOMI_SERVICE_ID` を焼く(configure_github)ので、
+/// GitHub 連携は作成時に必ず variable `TSUBOMI_SERVICE_ID` を焼く(configure_github)ので、
 /// **それが今削した service の id と一致する repo だけ**を消す。
 fn delete_github_repo(subdomain: &str, service_id: &str) -> Result<String> {
     if !gh_ok() {
