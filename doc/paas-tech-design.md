@@ -95,10 +95,14 @@ create table resources (
   deleted_at   timestamptz,          -- 非 NULL = ゴミ箱の中
   purge_after  timestamptz,          -- = deleted_at + 3d。reconcile が期限到来で物理削除
   trash_meta   jsonb,                -- 復元に必要なもの:dump パス / trash パスなど
-  unique (user_id, kind, display_name),
-  unique (user_id, kind, anon_seq),
+  -- display_name の一意は活体のみ(表の下の部分ユニーク index、20260813000001)。
+  -- ゴミ箱は名前を占有しない:削除 → 同名で作り直し可。restore 時の活体衝突は
+  -- trash.rs が事前検査 + map_unique で 409 にする。
+  unique (user_id, kind, anon_seq),    -- ゴミ箱行も番号を保持(MAX+1 採番が全行を見る前提)
   unique (id, kind)                  -- ↓ detail / injections の「kind 付き複合 FK」用。
 );                                   --   「service にしか注入できない」を DB 制約にする
+create unique index resources_live_display_name_key
+    on resources (user_id, kind, display_name) where deleted_at is null;
 
 -- ============ detail 4 枚(スーパーテーブルと 1:1)============
 create table service_details (

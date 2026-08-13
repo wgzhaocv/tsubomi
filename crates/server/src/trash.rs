@@ -28,11 +28,15 @@ pub fn routes() -> Router<AppState> {
         .route("/trash/{id}", delete(purge))
 }
 
-/// 所有者チェック付きでゴミ箱の (kind, trash_meta) を引く。restore / purge が共有。
+/// 所有者チェック付きでゴミ箱の (kind, display_name, trash_meta) を引く。restore / purge が共有。
 /// 見つからない / 他ユーザ / 未削除は 404 に収束。
-async fn fetch_trashed(db: &PgPool, id: Uuid, user_id: Uuid) -> AppResult<(String, Option<Value>)> {
-    let row: Option<(String, Option<Value>)> = sqlx::query_as(
-        "SELECT kind, trash_meta FROM resources
+async fn fetch_trashed(
+    db: &PgPool,
+    id: Uuid,
+    user_id: Uuid,
+) -> AppResult<(String, String, Option<Value>)> {
+    let row: Option<(String, String, Option<Value>)> = sqlx::query_as(
+        "SELECT kind, display_name, trash_meta FROM resources
           WHERE id = $1 AND user_id = $2 AND deleted_at IS NOT NULL",
     )
     .bind(id)
@@ -40,6 +44,44 @@ async fn fetch_trashed(db: &PgPool, id: Uuid, user_id: Uuid) -> AppResult<(Strin
     .fetch_optional(db)
     .await?;
     row.ok_or(AppError::NotFound)
+}
+
+/// restore が活体同名と衝突したときの 409 文案。事前チェックと UPDATE の
+/// map_unique(TOCTOU の最終ガード)が同じ一文を使う — 二重管理しない。
+/// 具体的なコマンド名は書かない(kind→コマンドの対応は CLI の領分。
+/// 実在しないコマンドを案内する事故をサーバ側に作らない)。
+fn restore_conflict_msg(kind: &str, display_name: &str) -> String {
+    format!(
+        "同名の稼働中の{}「{display_name}」があるため復元できません。先にそちらの名前を変更するか削除してから復元してください",
+        kind_ja(kind)
+    )
+}
+
+/// restore 前の活体同名チェック。ゴミ箱は名前を占有しない(20260813000001)ので、
+/// 削除後に同名で作り直された活体と復元が衝突し得る。**物理復元(DB 再作成 /
+/// volume 移動 / ACL 再作成)より前に**弾く — 後段の 23505 では実体側の作業が
+/// 済んだ後になり、副作用だけ残して 500 になる。
+async fn ensure_restore_name_free(
+    db: &PgPool,
+    user_id: Uuid,
+    kind: &str,
+    display_name: &str,
+) -> AppResult<()> {
+    if crate::databases::live_name_exists(db, user_id, kind, display_name).await? {
+        return Err(AppError::Conflict(restore_conflict_msg(kind, display_name)));
+    }
+    Ok(())
+}
+
+/// kind の日本語名(エラー文案用)。
+fn kind_ja(kind: &str) -> &'static str {
+    match kind {
+        "service" => "サービス",
+        "database" => "データベース",
+        "cache" => "キャッシュ",
+        "volume" => "ボリューム",
+        _ => "リソース",
+    }
 }
 
 /// trash_meta から dump パスを取り出す(無ければ trash_dir/<id>.sql に既定)。
@@ -108,24 +150,40 @@ pub async fn restore(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let (kind, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
+    // per-resource 直列化(deploy_lock は Uuid 汎用のロック表)。restore ↔ purge/gc の
+    // 競合を閉じる:GC が期限切れ候補を読んだ後にユーザが restore しても、purge_resource は
+    // 同じロックの中で「まだゴミ箱に居るか」を見直すので、復元済み実体を壊さない。
+    // service の場合は deploy とも直列化される(望ましい副作用)。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+
+    let (kind, display_name, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
+    // 活体同名との衝突は物理復元の前に弾く(副作用を残して 23505 で落ちない)。
+    ensure_restore_name_free(&state.db, auth.user_id, &kind, &display_name).await?;
 
     let mut detail = json!({});
+    // 物理復元と同時に「取り消し方」を覚える:active 化 UPDATE が同名活体と衝突(TOCTOU)
+    // したとき、実体だけ復活した状態(旧資格情報で繋がる DB / 復活した ACL / host に戻った
+    // volume)を残さないための補償材料。
+    let mut undo = RestoreUndo::None;
     let action = match kind.as_str() {
         "database" => {
-            restore_database(&state, id, &trash_meta).await?;
+            let dbname = restore_database(&state, id, &trash_meta).await?;
+            undo = RestoreUndo::Database(dbname);
             "db.restore"
         }
         "volume" => {
-            restore_volume(&state, id, &trash_meta).await?;
+            let (host, trash) = restore_volume(&state, id, &trash_meta).await?;
+            undo = RestoreUndo::Volume { host, trash };
             "volume.restore"
         }
         "cache" => {
             // ACL を再作成 + 生存 key 数を報告(TRASH-1。allkeys-lru で温存中の key が evict され
             // 空かもしれない = データ復元は best-effort・§11-D)。詳細表示の key_count でも見える。
-            let survived = restore_cache(&state, id).await?;
+            let (survived, acl_user) = restore_cache(&state, id).await?;
             tracing::info!(%id, surviving_keys = ?survived, "cache 復元(データは best-effort)");
             detail = json!({ "surviving_keys": survived });
+            undo = RestoreUndo::Cache(acl_user);
             "cache.restore"
         }
         // service は永続実体が無い(コンテナは deploy で再生成)。下の deleted_at=NULL の
@@ -138,12 +196,33 @@ pub async fn restore(
 
     // 物理復元が成功してから resource を active に戻す。**これを実体の片付けより先に**:
     // ここで失敗しても実体が残り、gc に消されず再 restore できる(データを失わない)。
-    sqlx::query(
-        "UPDATE resources SET deleted_at = NULL, purge_after = NULL, trash_meta = NULL WHERE id = $1",
+    // 部分ユニーク(活体同名)との TOCTOU 衝突(事前チェックの後に同名 create が滑り込んだ
+    // 縫間 — create はこのロックの外)は 409 にした上で、**物理復元を巻き戻す**:
+    // 巻き戻さないと「復元失敗」なのに旧 DB が繋がる / volume の実体が trash に無く
+    // 後の purge が host 側データを永久孤児化する。行はゴミ箱のまま = 再 restore 可能。
+    let updated = sqlx::query(
+        "UPDATE resources SET deleted_at = NULL, purge_after = NULL, trash_meta = NULL
+          WHERE id = $1 AND deleted_at IS NOT NULL",
     )
     .bind(id)
     .execute(&state.db)
-    .await?;
+    .await;
+    match updated {
+        Ok(r) if r.rows_affected() == 0 => {
+            // ロック内では fetch_trashed 後に行が消える経路は無いはずだが、万一消えていたら
+            // 偽の 204 を返さない(実体は巻き戻して次の一手を明確に)。
+            undo_restore(&state, undo).await;
+            return Err(AppError::NotFound);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            undo_restore(&state, undo).await;
+            return Err(crate::databases::map_unique(
+                e,
+                restore_conflict_msg(&kind, &display_name),
+            ));
+        }
+    }
 
     // database のみ:active 化確定後に dump を片付ける(残っても無害なのでベストエフォート)。
     // volume は実体を mv で戻し済みなので片付ける残骸は無い。
@@ -163,9 +242,49 @@ pub async fn restore(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// 物理復元の取り消し方(restore の active 化 UPDATE が失敗したときの補償材料)。
+enum RestoreUndo {
+    /// 再作成した DATABASE を落とす(role は温存 = ゴミ箱状態に戻す)。
+    Database(String),
+    /// host へ戻した実体を trash へ mv し直す。
+    Volume {
+        host: PathBuf,
+        trash: PathBuf,
+    },
+    /// 再作成した ACL ユーザを消す。
+    Cache(String),
+    None,
+}
+
+/// 物理復元の巻き戻し(best-effort)。失敗は warn に留める — 行はゴミ箱のまま残って
+/// いるので、再 restore / purge がもう一度片付けの機会になる(volume だけは host 側に
+/// 残ると後の purge が拾えないため、失敗を大きめに警告する)。
+async fn undo_restore(state: &AppState, undo: RestoreUndo) {
+    match undo {
+        RestoreUndo::Database(dbname) => {
+            if let Err(e) = tenant::drop_database(&state.tenant_admin, &dbname).await {
+                tracing::warn!(error = ?e, dbname, "restore 補償: DATABASE の巻き戻しに失敗");
+            }
+        }
+        RestoreUndo::Volume { host, trash } => {
+            if let Err(e) = std::fs::rename(&host, &trash) {
+                tracing::error!(error = ?e, host = %host.display(), trash = %trash.display(),
+                    "restore 補償: volume 実体を trash へ戻せなかった — 行はゴミ箱のままなので \
+                     後の purge がこの host 側データを回収できない(手動対応が必要)");
+            }
+        }
+        RestoreUndo::Cache(acl_user) => {
+            if let Err(e) = crate::valkey::del_user(&state.valkey, &acl_user).await {
+                tracing::warn!(error = ?e, acl_user, "restore 補償: ACL の巻き戻しに失敗");
+            }
+        }
+        RestoreUndo::None => {}
+    }
+}
+
 /// cache の復元:detail の password で **同じ acl_user / namespace** の ACL を再作成
-/// (key は valkey に温存されていれば見える)。生存 key 数を返す(報告用・TRASH-1)。
-async fn restore_cache(state: &AppState, id: Uuid) -> AppResult<Option<i64>> {
+/// (key は valkey に温存されていれば見える)。生存 key 数と acl_user(補償用)を返す。
+async fn restore_cache(state: &AppState, id: Uuid) -> AppResult<(Option<i64>, String)> {
     let (acl_user, namespace, enc): (String, String, Vec<u8>) = sqlx::query_as(
         "SELECT acl_user, namespace, password_enc FROM cache_details WHERE resource_id = $1",
     )
@@ -174,12 +293,17 @@ async fn restore_cache(state: &AppState, id: Uuid) -> AppResult<Option<i64>> {
     .await?;
     let pw = state.crypto.decrypt(&enc)?;
     crate::valkey::set_user(&state.valkey, &acl_user, &namespace, &pw).await?;
-    Ok(crate::valkey::count_keys(&state.valkey, &namespace).await)
+    let count = crate::valkey::count_keys(&state.valkey, &namespace).await;
+    Ok((count, acl_user))
 }
 
 /// database の復元:role は残っているので DATABASE を再作成して dump を流し込む。
-/// dump 削除は呼び出し側(deleted_at クリア後)が行う。
-async fn restore_database(state: &AppState, id: Uuid, trash_meta: &Option<Value>) -> AppResult<()> {
+/// dump 削除は呼び出し側(deleted_at クリア後)が行う。dbname(補償用)を返す。
+async fn restore_database(
+    state: &AppState,
+    id: Uuid,
+    trash_meta: &Option<Value>,
+) -> AppResult<String> {
     // 流し込みは admin ではなくその DB の app role で行う(tenant::restore_database の doc 参照)
     // ので、pg_dbname と一緒に app の資格情報も引いて復号する。
     let (dbname, app_pw_enc): (String, Vec<u8>) = sqlx::query_as(
@@ -218,12 +342,16 @@ async fn restore_database(state: &AppState, id: Uuid, trash_meta: &Option<Value>
         let _ = tenant::drop_database(&state.tenant_admin, &names.dbname).await;
         return Err(e);
     }
-    Ok(())
+    Ok(names.dbname.clone())
 }
 
 /// volume の復元:trash へ mv した実体を host_path へ mv で戻す。
-/// active 化は呼び出し側(deleted_at クリア)が行う。
-async fn restore_volume(state: &AppState, id: Uuid, trash_meta: &Option<Value>) -> AppResult<()> {
+/// active 化は呼び出し側(deleted_at クリア)が行う。(host, trash)(補償用)を返す。
+async fn restore_volume(
+    state: &AppState,
+    id: Uuid,
+    trash_meta: &Option<Value>,
+) -> AppResult<(PathBuf, PathBuf)> {
     let (host, trash) = volume_paths(trash_meta, &state.config.trash_dir, id);
     let host =
         host.ok_or_else(|| AppError::BadRequest("復元に必要な host_path がありません".into()))?;
@@ -259,7 +387,7 @@ async fn restore_volume(state: &AppState, id: Uuid, trash_meta: &Option<Value>) 
             ));
         }
     }
-    Ok(())
+    Ok((host, trash))
 }
 
 /// `DELETE /api/trash/:id`:永久削除(ユーザ操作)。
@@ -268,9 +396,15 @@ pub async fn purge(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let (kind, trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
+    // 所有権 + 存在チェック(他人 / 活体は 404)。実際の対象確定は purge_resource が
+    // ロック内でやり直す(この読みと実行の間に restore が挟まれ得るため)。
+    let (kind, _display_name, _trash_meta) = fetch_trashed(&state.db, id, auth.user_id).await?;
 
-    purge_resource(&state, id, &kind, &trash_meta).await?;
+    // ロック内の再確認で「もうゴミ箱に居ない」= 並行 restore に負けた → 404
+    // (復元済みの実体を壊すより「見つからない」が正しい)。
+    if purge_resource(&state, id).await?.is_none() {
+        return Err(AppError::NotFound);
+    }
     audit(
         &state.db,
         Some(auth.user_id),
@@ -286,12 +420,28 @@ pub async fn purge(
 /// 物理削除のコア。ユーザの永久削除と reconcile の自動 purge が共有する。
 /// kind 毎に実体(tenant DB / role / dump)を片付けてから行を物理削除する
 /// (resources の行を消すと detail / roles はカスケードで消える)。
-pub(crate) async fn purge_resource(
-    state: &AppState,
-    id: Uuid,
-    kind: &str,
-    trash_meta: &Option<Value>,
-) -> AppResult<()> {
+///
+/// per-resource ロックの中で「まだゴミ箱に居るか」を**自分で**確認してから壊す:
+/// 呼び出し側(gc の候補スキャン / ユーザ purge の所有権チェック)が読んだ状態は
+/// ロック取得までに陳腐化し得る — 特に「GC が候補を読む → ユーザが restore →
+/// GC が purge」の順だと、復元直後の実体を破壊してしまう(codex 監査 2026-08-13)。
+/// 戻り値:Some(kind) = 消した / None = もうゴミ箱に居ない(触っていない)。
+pub(crate) async fn purge_resource(state: &AppState, id: Uuid) -> AppResult<Option<String>> {
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+
+    let row: Option<(String, Option<Value>)> = sqlx::query_as(
+        "SELECT kind, trash_meta FROM resources WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((kind, trash_meta)) = row else {
+        return Ok(None);
+    };
+    let kind = kind.as_str();
+    let trash_meta = &trash_meta;
+
     if kind == "database" {
         if let Ok((dbname,)) = sqlx::query_as::<_, (String,)>(
             "SELECT pg_dbname FROM database_details WHERE resource_id = $1",
@@ -379,9 +529,10 @@ pub(crate) async fn purge_resource(
         }
     }
 
-    sqlx::query("DELETE FROM resources WHERE id = $1")
+    // 述語はロック内再確認の縦深防御(ロックが正だが、消す側の最後の一手も条件付きに)。
+    sqlx::query("DELETE FROM resources WHERE id = $1 AND deleted_at IS NOT NULL")
         .bind(id)
         .execute(&state.db)
         .await?;
-    Ok(())
+    Ok(Some(kind.to_string()))
 }

@@ -1428,17 +1428,10 @@ pub async fn create(
         )));
     }
 
-    // 同名チェック(ゴミ箱内含む)。UNIQUE が最終ガードだが、先に弾いて分かりやすく。
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id=$1 AND kind='service' AND display_name=$2)",
-    )
-    .bind(auth.user_id)
-    .bind(&display_name)
-    .fetch_one(&state.db)
-    .await?;
-    if exists {
+    // 同名チェック(UNIQUE が最終ガードだが、先に弾いて分かりやすく)。
+    if crate::databases::live_name_exists(&state.db, auth.user_id, "service", &display_name).await? {
         return Err(AppError::Conflict(format!(
-            "サービス名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+            "サービス名 '{display_name}' は既に使われています。別の名前にしてください"
         )));
     }
 

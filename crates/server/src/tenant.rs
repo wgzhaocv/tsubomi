@@ -276,6 +276,10 @@ pub async fn recreate_for_restore(
 ) -> AppResult<()> {
     check_idents(names)?;
     let DbNames { dbname, owner, .. } = names;
+    // 再試行安全:前回の restore が「DATABASE 作成後・active 化前」に落ちていると
+    // DATABASE が残っていて CREATE が恒久に already-exists で詰む。行はまだゴミ箱 =
+    // この DB に正当な利用者は居ないので、落としてから作り直す(IF EXISTS + FORCE)。
+    drop_database(pool, dbname).await?;
     exec(pool, format!("CREATE DATABASE {dbname} OWNER {owner}")).await?;
     exec(
         pool,

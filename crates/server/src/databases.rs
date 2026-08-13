@@ -233,20 +233,33 @@ pub(crate) fn map_unique(e: sqlx::Error, conflict_msg: impl Into<String>) -> App
     }
 }
 
-/// 同名チェック(tenant DDL の前に行い、無駄な CREATE/DROP DATABASE を避ける)。
-/// UNIQUE (user_id, kind, display_name) はゴミ箱内(deleted_at)も含むのでここも全行を見る。
-/// 競合(同時 create/fork)は insert_rows の UNIQUE が最終ガード。create / fork が共有。
-async fn ensure_db_name_free(db: &PgPool, user_id: Uuid, display_name: &str) -> AppResult<()> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'database' AND display_name = $2)",
+/// 「活体だけが名前を占有する」の単一真源(部分ユニークインデックス
+/// `resources_live_display_name_key`、20260813000001 と同じ述語)。4 種 create の
+/// 事前チェックと trash restore の衝突検査が共有する — 文案は各呼び出し側が持つ
+/// (create は「別の名前に」、restore は「先に活体をどける」で本来違う)。
+/// 競合(同時 create 等)は UNIQUE が最終ガード。
+pub(crate) async fn live_name_exists(
+    db: &PgPool,
+    user_id: Uuid,
+    kind: &str,
+    display_name: &str,
+) -> AppResult<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM resources
+          WHERE user_id = $1 AND kind = $2 AND display_name = $3 AND deleted_at IS NULL)",
     )
     .bind(user_id)
+    .bind(kind)
     .bind(display_name)
     .fetch_one(db)
-    .await?;
-    if exists {
+    .await?)
+}
+
+/// 同名チェック(tenant DDL の前に行い、無駄な CREATE/DROP DATABASE を避ける)。create / fork が共有。
+async fn ensure_db_name_free(db: &PgPool, user_id: Uuid, display_name: &str) -> AppResult<()> {
+    if live_name_exists(db, user_id, "database", display_name).await? {
         return Err(AppError::Conflict(format!(
-            "データベース名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+            "データベース名 '{display_name}' は既に使われています。別の名前にしてください"
         )));
     }
     Ok(())

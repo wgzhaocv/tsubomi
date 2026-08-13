@@ -90,18 +90,11 @@ pub async fn create(
 ) -> AppResult<(StatusCode, Json<CacheDto>)> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
 
-    // 同名チェックを ACL 作成の前に(無駄な SETUSER/DELUSER を避ける)。UNIQUE はゴミ箱内
-    // (deleted_at)も含むので全行を見る。競合(同時 create)は insert_rows の UNIQUE が最終ガード。
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'cache' AND display_name = $2)",
-    )
-    .bind(auth.user_id)
-    .bind(&display_name)
-    .fetch_one(&state.db)
-    .await?;
-    if exists {
+    // 同名チェックを ACL 作成の前に(無駄な SETUSER/DELUSER を避ける)。
+    // 競合(同時 create)は insert_rows の UNIQUE が最終ガード。
+    if crate::databases::live_name_exists(&state.db, auth.user_id, "cache", &display_name).await? {
         return Err(AppError::Conflict(format!(
-            "キャッシュ名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+            "キャッシュ名 '{display_name}' は既に使われています。別の名前にしてください"
         )));
     }
 

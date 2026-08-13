@@ -51,10 +51,12 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 > 「デプロイ経路(§4)」「listen ポート」「自帯 DB か(§3.2)」「必要メモリ」を決めておく。
 > 作成直後の回显に port / visibility / stateful / memory が出るので、**意図と違ったらその場で作り直す**。
 >
-> **作り直しには手順がある**:`tbm service delete` は**ゴミ箱への soft delete** で、ゴミ箱内の名前も
-> 同名 create を 409 で弾く。よって同じ名前で作り直すには `tbm trash purge <名前>`(**不可逆** —
-> 実行前にユーザへ一言)を先に行うか、**別の名前で作る**。名前は subdomain = 公開 URL になるので、
-> 「まだ誰にも URL を渡していない」なら別名の方が安全。
+> **作り直しは delete → 同名 create でそのまま通る**:`tbm service delete` は**ゴミ箱への
+> soft delete** だが、ゴミ箱は名前を占有しない(server v54+)。`tbm trash purge` を挟む必要はない。
+> 注意点は復元側:同名で作り直した後に古い方を `tbm trash restore` すると活体と衝突して 409 になる
+> (先に活体を rename か delete)。同名がゴミ箱に複数堆積したら `tbm trash list` の id で特定する。
+> 旧サーバ(v53 以前)ではゴミ箱内の同名も 409 — そのときだけ従来どおり `tbm trash purge <名前>`
+> (**不可逆** — 実行前にユーザへ一言)か別名で。
 
 - service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 経路(既定)で出すなら、この
   作成時に `--github` を付ける**(repo/secret/variable と workflow 設定までこの 1 回で済む。§4 参照)。

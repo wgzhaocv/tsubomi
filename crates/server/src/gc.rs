@@ -290,9 +290,11 @@ async fn sweep_trash(state: &AppState) {
         }
     };
 
-    for (id, kind, meta) in expired {
-        match trash::purge_resource(state, id, &kind, &meta).await {
-            Ok(()) => {
+    for (id, kind, _meta) in expired {
+        // purge_resource がロック内で「まだゴミ箱に居るか」を見直す — このスキャンの後に
+        // restore されていたら None(触らない)。kind/meta もロック内で読み直される。
+        match trash::purge_resource(state, id).await {
+            Ok(Some(kind)) => {
                 tracing::info!(%id, kind, "gc: purged expired trash");
                 audit(
                     &state.db,
@@ -303,6 +305,9 @@ async fn sweep_trash(state: &AppState) {
                     None,
                 )
                 .await;
+            }
+            Ok(None) => {
+                tracing::info!(%id, kind, "gc: skip(スキャン後に復元された)");
             }
             Err(e) => tracing::warn!(error = ?e, %id, "gc: purge failed"),
         }

@@ -105,17 +105,10 @@ pub async fn create(
 ) -> AppResult<(StatusCode, Json<VolumeDto>)> {
     let display_name = validate::name(&req.name, MAX_NAME_LEN)?;
 
-    // 同名チェック(ゴミ箱内も含む。UNIQUE が最終ガード)。
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM resources WHERE user_id = $1 AND kind = 'volume' AND display_name = $2)",
-    )
-    .bind(auth.user_id)
-    .bind(&display_name)
-    .fetch_one(&state.db)
-    .await?;
-    if exists {
+    // 同名チェック(UNIQUE が最終ガード)。
+    if crate::databases::live_name_exists(&state.db, auth.user_id, "volume", &display_name).await? {
         return Err(AppError::Conflict(format!(
-            "ボリューム名 '{display_name}' は既に使われています(ゴミ箱内を含む)。別の名前にしてください"
+            "ボリューム名 '{display_name}' は既に使われています。別の名前にしてください"
         )));
     }
 
