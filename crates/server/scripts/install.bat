@@ -230,7 +230,7 @@ REM special-character entry can break the quoted "set" and make cmd execute a
 REM path fragment (this showed up as a stray error on some machines). A new
 REM terminal picks up the registry PATH cleanly.
 echo.
-echo 完了。PATH を反映するため、**新しい**ターミナルを開いてから次を実行してください:
+echo 完了。PATH を反映するため、「新しい」ターミナルを開いてから次を実行してください:
 echo.
 echo     tbm login
 echo.
