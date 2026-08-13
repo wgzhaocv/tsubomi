@@ -23,14 +23,10 @@ pub enum ServiceCmd {
     Create {
         /// 表示名(例:myapp)。GitHub repo 名には subdomain を使う
         name: String,
-        /// GitHub 連携も組み立てる(**1.0.35 から既定** — このフラグは互換のための no-op)。
-        /// secret は stdin 渡しで argv / 出力に出ない。`gh` が無い / 未ログインなら
-        /// setup_commands を返すだけ(手動 fallback)
-        #[arg(long)]
-        github: bool,
         /// GitHub 連携を行わず、resource だけ作って全量 DTO(deploy_key / registry pass /
         /// setup_commands = **秘密を含む**)を返す。gh を使わず自前で連携を組む場合の退路
-        #[arg(long, conflicts_with = "github")]
+        /// (連携は既定で自動 — secret は stdin 渡しで argv / 出力に出ない)
+        #[arg(long)]
         no_github: bool,
         /// app が容器内で listen する port(省略 = 8080)。8080 以外を指定すると公開範囲の
         /// 既定が private になる(自帯 DB 等の非 HTTP コンテナ想定。`--visibility` で上書き可)
@@ -511,7 +507,6 @@ pub async fn run(
         }
         ServiceCmd::Create {
             name,
-            github: _github, // 1.0.35 から既定挙動(互換 no-op)
             no_github,
             port,
             visibility,
@@ -1395,20 +1390,9 @@ pub(crate) async fn wait_deploy_only(
         quiet: json,
     };
     wait_for_deploy(c, server_url, token, id, name, spec).await?;
-    // 完走後に内網探活を一発(private の「URL 検証の代替」)。**旧サーバの端点欠如
-    // (not_found)だけ**従来の完走報告に退化し、それ以外(500 / 通信断)は握り潰さず
-    // 伝播する — 全エラーを飲むと probe:null + exit 0 が「検証済み」に見える(codex 審査)。
-    let probe = match build_probe_report(c, server_url, token, id, name).await {
-        Ok(r) => Some(r),
-        Err(e)
-            if e.downcast_ref::<api::ApiError>()
-                .is_some_and(|a| a.code == "not_found") =>
-        {
-            None
-        }
-        Err(e) => return Err(e),
-    };
-    let failed = probe.as_ref().is_some_and(|r| r.ok == Some(false));
+    // 完走後に内網探活を一発(private の「URL 検証の代替」)。エラーは握り潰さず伝播 —
+    // 飲むと probe 無し + exit 0 が「検証済み」に見える(codex 審査)。
+    let probe = build_probe_report(c, server_url, token, id, name).await?;
     if json {
         print_json(&serde_json::json!({
             "status": "succeeded",
@@ -1417,14 +1401,9 @@ pub(crate) async fn wait_deploy_only(
         }))?;
     } else {
         println!("デプロイ完了(private のため公開 URL 検証は無し)。");
-        match &probe {
-            Some(r) => r.print_text(),
-            None => println!(
-                "動作確認は `tbm service exec {name} -- <cmd>` / `tbm service logs {name}` で。"
-            ),
-        }
+        probe.print_text();
     }
-    if failed {
+    if probe.ok == Some(false) {
         std::io::stdout().flush().ok();
         std::process::exit(1);
     }

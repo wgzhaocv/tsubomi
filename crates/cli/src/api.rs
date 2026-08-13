@@ -37,9 +37,6 @@ fn code_for(status: reqwest::StatusCode) -> &'static str {
         404 => "not_found",
         409 => "conflict",
         400 | 422 => "validation",
-        // pre-v44 サーバは未知の POST /api を SPA fallback に渡さず ServeDir の 405 で返す。
-        // remap_endpoint_missing が「サーバ未対応」への振替に使う(単体では稀)。
-        405 => "method_not_allowed",
         // registry / 上流(Cloudflare)の request body 上限超過。CF 経由 registry の単層 ≈100MB
         // 制限が典型(deploy.rs が人話の対処も出す)。AI はこの code でリトライ無意味と判断できる。
         413 => "payload_too_large",
@@ -689,46 +686,24 @@ pub async fn service_rename(
     resp.json().await.context("failed to parse rename response")
 }
 
-/// 「サーバがこの機能に未対応」の単一真源(文言と最低バージョンを 1 箇所に)。
-/// 一覧から id を解決した直後でも、並行削除で**本物の 404** が返る余地はある —
-/// 断定せず両可の文案にする(codex 審査 2026-08-13)。
-fn endpoint_unsupported(feature: &str, min_version: &str) -> ApiError {
-    ApiError {
-        code: "not_found",
-        message: format!(
-            "サーバがこの機能({feature})に未対応か、対象が見つかりません(未対応ならサーバ更新が必要 — {min_version} 以降。対象は list で確認)"
-        ),
-    }
-}
-
-/// 応答の Content-Type が `needle` を含むか(ASCII 大小文字は無視 — `Text/HTML` 等の
-/// 変則ヘッダを見逃さない)。
-fn content_type_contains(resp: &reqwest::Response, needle: &str) -> bool {
-    resp.headers()
+/// JSON 応答を期待する端点の健全性チェック(CLI とサーバは同時に更新される前提 =
+/// 旧版互換の判定ではない。万一 JSON 以外が返ったら「版ズレの疑い」とだけ言う)。
+fn ensure_json(resp: &reqwest::Response, feature: &str) -> Result<()> {
+    let is_json = resp
+        .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.to_ascii_lowercase().contains(needle))
-}
-
-/// JSON 応答を期待する端点の共通形:content-type が JSON でない 2xx(上古サーバの
-/// SPA fallback = 200+HTML)を「未対応」に確定させる。metrics/probe/limits が共有。
-fn ensure_json(resp: &reqwest::Response, feature: &str, min_version: &str) -> Result<()> {
-    if !content_type_contains(resp, "application/json") {
-        return Err(endpoint_unsupported(feature, min_version).into());
+        .is_some_and(|ct| ct.to_ascii_lowercase().contains("application/json"));
+    if !is_json {
+        return Err(ApiError {
+            code: "server_error",
+            message: format!(
+                "{feature} の応答が JSON ではありません(CLI とサーバの版ズレの疑い — 双方を最新に)"
+            ),
+        }
+        .into());
     }
     Ok(())
-}
-
-/// 旧サーバで端点が無いときのエラーを「未対応」の文案に振り替える。
-/// - 404:v44+ は /api 未マッチ = 404(id は一覧解決済み → ほぼ端点欠如)。
-/// - 405:pre-v44 は未知 POST が SPA fallback に渡らず ServeDir の 405 になる(codex 審査)。
-fn remap_endpoint_missing(e: anyhow::Error, feature: &str, min_version: &str) -> anyhow::Error {
-    match e.downcast_ref::<ApiError>() {
-        Some(api) if api.code == "not_found" || api.code == "method_not_allowed" => {
-            endpoint_unsupported(feature, min_version).into()
-        }
-        _ => e,
-    }
 }
 
 /// 内網の単発 TCP 探活(private service の verify 素材)。metrics と同じ旧サーバ判定
@@ -743,9 +718,8 @@ pub async fn service_probe(
         c.get(format!("{server_url}/api/services/{id}/probe"))
             .bearer_auth(token),
     )
-    .await
-    .map_err(|e| remap_endpoint_missing(e, "probe", "v54"))?;
-    ensure_json(&resp, "probe", "v54")?;
+    .await?;
+    ensure_json(&resp, "probe")?;
     resp.json().await.context("failed to parse probe response")
 }
 
@@ -767,9 +741,8 @@ pub async fn service_set_limits(
                 clear_cpu_limit,
             }),
     )
-    .await
-    .map_err(|e| remap_endpoint_missing(e, "limits", "v54"))?;
-    ensure_json(&resp, "limits", "v54")?;
+    .await?;
+    ensure_json(&resp, "limits")?;
     resp.json().await.context("failed to parse limits response")
 }
 
@@ -779,17 +752,11 @@ pub async fn service_set_stateful(
     token: &str,
     id: &str,
 ) -> Result<()> {
-    // 204 応答には content-type が無いので JSON 陽性判定(ensure_json)は使えない。
-    // 上古サーバの SPA fallback(200+HTML)だけを陰性で弾く。
-    let resp = send_ok(
+    send_ok(
         c.post(format!("{server_url}/api/services/{id}/stateful"))
             .bearer_auth(token),
     )
-    .await
-    .map_err(|e| remap_endpoint_missing(e, "stateful", "v54"))?;
-    if content_type_contains(&resp, "text/html") {
-        return Err(endpoint_unsupported("stateful", "v54").into());
-    }
+    .await?;
     Ok(())
 }
 
@@ -956,7 +923,7 @@ pub async fn service_metrics(
             .bearer_auth(token),
     )
     .await?;
-    ensure_json(&resp, "metrics", "v43")?;
+    ensure_json(&resp, "metrics")?;
     resp.json()
         .await
         .context("failed to parse metrics response")
