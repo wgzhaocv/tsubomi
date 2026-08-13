@@ -32,7 +32,7 @@ set "INSTALL_DIR=%LOCALAPPDATA%\tbm\bin"
 set "ARCH=%PROCESSOR_ARCHITECTURE%"
 if defined PROCESSOR_ARCHITEW6432 set "ARCH=%PROCESSOR_ARCHITEW6432%"
 if /i not "%ARCH%"=="AMD64" (
-    echo tbm は Windows %ARCH% には未対応です(x86_64 のみ)
+    echo tbm は Windows %ARCH% には未対応です（x86_64 のみ）
     exit /b 1
 )
 set "TARGET=x86_64-pc-windows-gnu"
@@ -169,10 +169,10 @@ REM (we add that to PATH too). gh / claude also get a login hint when not signed
 echo.
 where git >nul 2>&1
 if errorlevel 1 (
-    echo git が見つかりません。MinGit をインストールします(管理者権限は不要)...
+    echo git が見つかりません。MinGit をインストールします（管理者権限は不要）...
     call :install_mingit
     if defined GIT_OK (
-        echo git(MinGit)をインストールしました
+        echo git（MinGit）をインストールしました
     ) else (
         echo 警告: git の自動インストールに失敗しました。手動でインストールしてください: https://gitforwindows.org/
     )
@@ -182,7 +182,7 @@ REM An inline command at the end of a sentence is easy to miss and hard to copy
 REM (real-usage feedback). The claude hints below follow the same shape.
 where gh >nul 2>&1
 if errorlevel 1 (
-    echo gh(GitHub CLI)が見つかりません。インストールします(管理者権限は不要)...
+    echo gh（GitHub CLI）が見つかりません。インストールします（管理者権限は不要）...
     call :install_gh
     if defined GH_OK (
         echo gh をインストールしました。GitHub に接続するには次を実行してください:
@@ -207,7 +207,7 @@ REM installer, no admin; lands in %USERPROFILE%\.local\bin\claude.exe. Either br
 REM sets two defaults in its settings.json (see :configure_claude).
 where claude >nul 2>&1
 if errorlevel 1 (
-    echo claude(Claude Code)が見つかりません。インストールします(管理者権限は不要)...
+    echo claude（Claude Code）が見つかりません。インストールします（管理者権限は不要）...
     call :install_claude
     if defined CLAUDE_OK (
         call :configure_claude
@@ -352,7 +352,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='
 if errorlevel 1 (
     echo 注意: Claude Code の設定を自動更新できませんでした。%USERPROFILE%\.claude\settings.json に tui=fullscreen と permissions.defaultMode=auto を追加してください
 ) else (
-    echo Claude Code の設定を更新しました(auto モード + fullscreen)
+    echo Claude Code の設定を更新しました（auto モード + fullscreen）
 )
 exit /b 0
 
