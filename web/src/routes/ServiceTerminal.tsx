@@ -47,6 +47,14 @@ type ConnState = "connecting" | "open" | "closed";
 
 const enc = new TextEncoder();
 
+// 「本当に遅れている」と見なす最下部からの距離(px)。1 行(既定フォントで約 17px)より
+// 大きく、2 行より小さい値 — ライブラリが最下部復帰で残す端数(実測 7px)は許し、
+// 1 行ぶん流れて見えなくなったら回収する。
+const BEHIND_PX = 24;
+// 「まだ下を追っている」と見なす距離(px)。BEHIND_PX より緩い(数行ぶんのホイール操作で
+// 初めて「自分で過去を読みに行った」と判定する)。
+const FOLLOW_PX = 40;
+
 // 1 セッション。WS を張り、端末の入力(onData)を Binary で送り、サーバからの Binary を端末へ書く。
 // resize は Text(JSON)で送る。unmount(タブ離脱 / 親の key 更新)で WS を閉じる
 // = バックエンドで sh が終了する。再接続は親が key を変えて丸ごと作り直す。
@@ -75,8 +83,14 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
   const [ready, setReady] = useState(false);
 
   // 最下部へ貼り付ける。ライブラリの描画は write → setTimeout(0) → rAF なので、同じ順で
-  // 1 つ後ろに並べて**描画後**の scrollHeight で貼る。ライブラリが描画の組み方を変えても
-  // 静かに壊れないよう、貼った次のフレームで距離を検算して 1 度だけ貼り直す。
+  // 1 つ後ろに並べて**描画後**の scrollHeight で見る。
+  //
+  // ★ **ライブラリの着地点と張り合わない**のが要点(ユーザ報告「打鍵のたびに揺れる」):
+  // ライブラリは入力のたびに scrollTop を行高の倍数へ丸めて最下部へ戻す(= 実測で真の
+  // 最下部より 7px 手前)。そこへ毎回 scrollTop = scrollHeight を代入すると、1 打鍵ごとに
+  // 7px 上下する。行 1 つぶんの端数は「もう最下部」と見なし、**本当に遅れた時だけ**直す。
+  // 遅れは 1 行(≈17px)ずつ増えるので、追従が止まっていれば 1 行遅れで必ず回収できる。
+  // 一度こちらが真の最下部へ戻すと、ライブラリ自身の追従判定(許容 5px)も復活する。
   const stickToBottom = useCallback(() => {
     if (stickPendingRef.current) return;
     stickPendingRef.current = true;
@@ -85,25 +99,21 @@ function TerminalPane({ id, onReconnect }: { id: string; onReconnect: () => void
         stickPendingRef.current = false;
         const el = scrollElRef.current;
         if (!el) return;
-        el.scrollTop = el.scrollHeight;
-        requestAnimationFrame(() => {
-          const e2 = scrollElRef.current;
-          if (e2 && e2.scrollHeight - e2.scrollTop - e2.clientHeight > 1) {
-            e2.scrollTop = e2.scrollHeight;
-          }
-        });
+        if (el.scrollHeight - el.scrollTop - el.clientHeight > BEHIND_PX) {
+          el.scrollTop = el.scrollHeight;
+        }
       });
     }, 0);
   }, []);
 
-  // 追従状態はユーザのスクロール(と貼り付けの結果)から拾う。許容 40px は、ライブラリが
-  // 最下部復帰で scrollTop を行高の倍数へ丸めた結果の端数(実測 7px)を「まだ下にいる」と
-  // 見なすため — ここが 5px しかないのがライブラリ側の追従が止まる原因だった。
+  // 追従状態はユーザのスクロール(と貼り付けの結果)から拾う。許容を広めに取るのは、
+  // ライブラリが最下部復帰で残す端数(実測 7px)を「まだ下にいる」と見なすため —
+  // ここが 5px しかないのがライブラリ側の追従が止まる原因だった。
   useEffect(() => {
     const el = scrollElRef.current;
     if (!ready || !el) return;
     const onScroll = () => {
-      followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 40;
+      followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_PX;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
