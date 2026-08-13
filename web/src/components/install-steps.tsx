@@ -49,26 +49,30 @@ export function installTargets(): InstallTarget[] {
       note: "~/.tbm/bin に入れて、PATH を通します(管理者権限は不要)。末尾の exec $SHELL でそのまま tbm が使えます。",
       command: `curl -fsSL ${origin}/install.sh | sh && exec $SHELL`,
     },
+    // Windows は cmd を先(= 既定)に置く:社給 PC は PowerShell の実行が制限されている
+    // ことがあり(実際に社内で発生)、PS を既定にすると最初の一歩で詰まる。cmd は制限の
+    // 影響を受けにくい。PowerShell 版はタブで選べる形で残す。
+    {
+      key: "cmd",
+      label: "Windows",
+      terminal: "コマンドプロンプト(cmd)",
+      note: "%LOCALAPPDATA%\\tbm\\bin に入れて、ユーザ PATH に追加します(管理者権限は不要)。スタートメニューで「cmd」を検索して開いてください。",
+      command: `curl -fsSL ${origin}/install.bat -o %TEMP%\\tbm-install.bat && %TEMP%\\tbm-install.bat`,
+    },
     {
       key: "ps",
       label: "Windows(PowerShell)",
       terminal: "PowerShell",
-      note: "%LOCALAPPDATA%\\tbm\\bin に入れて、ユーザ PATH に追加します(管理者権限は不要)。",
+      note: "PowerShell を使える方向け(会社の設定で実行が制限されている場合は左の cmd 版を)。同じ場所に入ります。",
       command: `irm ${origin}/install.ps1 | iex`,
-    },
-    {
-      key: "cmd",
-      label: "Windows(cmd)",
-      terminal: "コマンドプロンプト",
-      note: "PowerShell を使わない方向け。同じ場所に入ります。",
-      command: `curl -fsSL ${origin}/install.bat -o %TEMP%\\tbm-install.bat && %TEMP%\\tbm-install.bat`,
     },
   ];
 }
 
 // 実行環境から既定の OS を推測する(はじめにの導線で「まず 1 つだけ」見せるため)。
+// Windows の既定は cmd(installTargets のコメント参照 — 社内 PC の PowerShell 制限対策)。
 export function detectOs(): OsKey {
-  if (typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent)) return "ps";
+  if (typeof navigator !== "undefined" && /Win/i.test(navigator.userAgent)) return "cmd";
   return "unix";
 }
 
