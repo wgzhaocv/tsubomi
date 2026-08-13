@@ -724,6 +724,36 @@ async fn post_no_content(rb: reqwest::RequestBuilder, feature: &str) -> Result<(
     Ok(())
 }
 
+/// 内網の単発 TCP 探活(private service の verify 素材)。metrics と同じ旧サーバ判定
+/// (JSON でない 200 = SPA fallback = 未対応)。
+pub async fn service_probe(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<tsubomi_shared::ServiceProbeDto> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/probe"))
+            .bearer_auth(token),
+    )
+    .await
+    .map_err(|e| remap_endpoint_missing(e, "probe"))?;
+    let is_json = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("application/json"));
+    if !is_json {
+        return Err(ApiError {
+            code: "not_found",
+            message: "サーバがこの機能(probe)に未対応です(サーバ更新が必要 — v54 以降)"
+                .to_owned(),
+        }
+        .into());
+    }
+    resp.json().await.context("failed to parse probe response")
+}
+
 pub async fn service_set_limits(
     c: &reqwest::Client,
     server_url: &str,

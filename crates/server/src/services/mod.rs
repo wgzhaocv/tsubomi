@@ -124,6 +124,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/logs", get(logs))
         .route("/services/{id}/logs/stream", get(logs_stream))
         .route("/services/{id}/metrics", get(metrics))
+        .route("/services/{id}/probe", get(probe))
         .route("/services/{id}/exec", post(exec))
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
@@ -778,6 +779,39 @@ pub async fn metrics(
 ) -> AppResult<Json<tsubomi_shared::ServiceMetricsDto>> {
     ensure_owned(&state, auth.user_id, id).await?;
     Ok(Json(docker::service_metrics(&state, id).await))
+}
+
+/// `GET /api/services/:id/probe`:内網の単発 TCP 探活(private service の verify 素材。
+/// visibility 設計で verify を private 短絡にした際の残余 —「今この瞬間 listen しているか」を
+/// 公開 URL 無しで確かめる入口が無かった)。metrics と同じ「不在も答え」型:停止 / 未デプロイ
+/// でも 200(running=false)。判定の付加情報として is_callee(M6 リンクの被注入 = listen
+/// していないのは異常)と container_port を併載し、解釈は CLI/呼び出し側に委ねる。
+pub async fn probe(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<tsubomi_shared::ServiceProbeDto>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let container_port: i32 =
+        sqlx::query_scalar("SELECT container_port FROM service_details WHERE resource_id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    let is_callee = deploy::is_linked_callee(&state, id).await;
+
+    let (running, listening) = match serving_container(&state, id).await {
+        Some(name) => docker::probe_once(&state, &name, container_port).await,
+        None => (false, None),
+    };
+    Ok(Json(tsubomi_shared::ServiceProbeDto {
+        running,
+        // running かつ探測環境あり、のときだけ「探せた」。running=false は探すものが無い。
+        probed: listening.is_some(),
+        listening,
+        is_callee,
+        container_port,
+    }))
 }
 
 /// `?tail=N&since=TS`(since = unix 秒。快照 / 流式で共用)。

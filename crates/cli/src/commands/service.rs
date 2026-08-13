@@ -10,8 +10,8 @@ use crate::commands::{
 };
 use crate::config;
 use tsubomi_shared::{
-    CreateServiceResp, InjectionDto, ServiceDto, ServiceMetricsDto, VISIBILITY_COMPANY,
-    VISIBILITY_PRIVATE, VISIBILITY_PUBLIC, WORKFLOW_PATH,
+    CreateServiceResp, InjectionDto, ServiceDto, ServiceMetricsDto, ServiceProbeDto,
+    VISIBILITY_COMPANY, VISIBILITY_PRIVATE, VISIBILITY_PUBLIC, WORKFLOW_PATH,
 };
 
 /// `tbm service <サブコマンド>`。各コマンド = API 呼び出し 1 本(web と同じハンドラ)。
@@ -1254,13 +1254,21 @@ pub(crate) async fn run_verify(
     }
     let id = resolve_service_id(c, server_url, token, name).await?;
     let svc = api::service_get(c, server_url, token, &id).await?;
-    // private は公開 URL 自体が無効(route 無し)。探測すると接続失敗になり「サーバ障害」と
-    // 誤読させる(AI が無駄リトライする既知の実害パターン)ので、明確な文言で短絡する。
-    // 旧サーバ(visibility 空)は company 扱いで従来どおり探測する。
+    // private は公開 URL 自体が無効(route 無し)なので URL 検証はできない。代わりに
+    // **内網 TCP 探活**(server 側から serving コンテナの container_port へ単発 connect)で
+    // 「今この瞬間 listen しているか」を検証する。--wait / --for-sha はデプロイ完走を
+    // 待ってから探活(公開サービスの URL 検証と同じ順序)。
+    // 旧サーバ(visibility 空)は company 扱いで従来どおり URL を探測する。
     if svc.visibility == VISIBILITY_PRIVATE {
-        bail!(
-            "このサービスは非公開(visibility=private)です。公開 URL は無効のため検証をスキップしました。公開するには `tbm service visibility {name} company`(または public)を実行してください"
-        );
+        if wait || for_sha.is_some() {
+            let spec = WaitSpec {
+                for_sha: for_sha.as_deref(),
+                timeout_secs: timeout,
+                quiet: json,
+            };
+            wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+        }
+        return report_probe(c, server_url, token, &id, name, json).await;
     }
     if svc.url.is_empty() {
         bail!("このサービスには公開 URL がありません(`tbm service status {name}` で確認)");
@@ -1346,12 +1354,113 @@ pub(crate) async fn wait_deploy_only(
         quiet: json,
     };
     wait_for_deploy(c, server_url, token, &id, name, spec).await?;
+    // 完走後に内網探活を一発(private の「URL 検証の代替」)。旧サーバは probe 未対応 =
+    // None で従来どおり完走報告だけに退化する(watch を落とさない)。
+    let probe = api::service_probe(c, server_url, token, &id).await.ok();
+    let verdict = probe.as_ref().map(|p| probe_verdict(p, name));
     if json {
-        print_json(&serde_json::json!({ "status": "succeeded", "git_sha": for_sha }))?;
+        print_json(&serde_json::json!({
+            "status": "succeeded",
+            "git_sha": for_sha,
+            "probe": probe,
+            "probe_ok": verdict.as_ref().map(|(ok, _)| *ok),
+            "probe_note": verdict.as_ref().map(|(_, note)| note.clone()),
+        }))?;
     } else {
-        println!(
-            "デプロイ完了(private のため URL 検証はスキップ)。動作確認は `tbm service exec {name} -- <cmd>` / `tbm service logs {name}` で。"
+        println!("デプロイ完了(private のため公開 URL 検証は無し)。");
+        match &verdict {
+            Some((ok, note)) => {
+                println!("{} {note}", probe_mark(*ok));
+            }
+            None => println!(
+                "動作確認は `tbm service exec {name} -- <cmd>` / `tbm service logs {name}` で。"
+            ),
+        }
+    }
+    if let Some((Some(false), _)) = verdict {
+        std::io::stdout().flush().ok();
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// probe の判定:Some(true)=検証 OK / Some(false)=NG(exit 1 相当)/ None=判定不能
+/// (listen しない worker は合法なので、疑わしきは罰しない)。note は人間/AI 向けの一文。
+fn probe_verdict(p: &ServiceProbeDto, name: &str) -> (Option<bool>, String) {
+    if !p.running {
+        return (
+            Some(false),
+            format!(
+                "コンテナが走っていません(`tbm service status {name}` で phase、`tbm service logs {name}` で原因を確認)"
+            ),
         );
+    }
+    match p.listening {
+        None => (
+            None,
+            "コンテナは走行中(この環境では内網探活ができないため listen 確認は省略)".into(),
+        ),
+        Some(true) => (
+            Some(true),
+            format!(
+                "内網 TCP 探活 OK:port {} で接続を受けました(公開 URL 検証ではない — HTTP 応答の中身までは見ていない)",
+                p.container_port
+            ),
+        ),
+        Some(false) if p.is_callee => (
+            Some(false),
+            format!(
+                "port {} で listen していません。この service は内部リンクの callee(他 app から呼ばれる)なので異常です — listen ポートの一致と起動状態を確認(`tbm service logs {name}`)",
+                p.container_port
+            ),
+        ),
+        Some(false) => (
+            None,
+            format!(
+                "コンテナは走行中ですが port {} で listen していません(listen しない worker 型なら正常。HTTP を待ち受けるはずなら listen ポートを確認)",
+                p.container_port
+            ),
+        ),
+    }
+}
+
+/// verdict → 表示マーク(✓ / ✗ / –)。
+fn probe_mark(ok: Option<bool>) -> &'static str {
+    match ok {
+        Some(true) => "✓",
+        Some(false) => "✗",
+        None => "–",
+    }
+}
+
+/// private service の verify 本体:内網探活 1 発 + 判定を出力し、NG は exit 1。
+async fn report_probe(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    name: &str,
+    json: bool,
+) -> Result<()> {
+    let p = api::service_probe(c, server_url, token, id).await?;
+    let (ok, note) = probe_verdict(&p, name);
+    if json {
+        print_json(&serde_json::json!({
+            "kind": "probe",
+            "ok": ok,
+            "running": p.running,
+            "probed": p.probed,
+            "listening": p.listening,
+            "is_callee": p.is_callee,
+            "container_port": p.container_port,
+            "note": note,
+        }))?;
+    } else {
+        println!("{} {note}", probe_mark(ok));
+    }
+    if ok == Some(false) {
+        std::io::stdout().flush().ok();
+        std::process::exit(1);
     }
     Ok(())
 }

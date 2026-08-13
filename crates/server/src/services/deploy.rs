@@ -491,7 +491,7 @@ async fn start_container(
 /// この service が M6 内部リンクの callee(他 service に注入されている)か。private の readiness
 /// 探測可否の判定用。best-effort:DB エラー時は false(探測を増やす向きに倒さない — デプロイ自体を
 /// 止めないことを優先し、穴は次のユーザ契機デプロイで再判定される)。
-async fn is_linked_callee(state: &AppState, service_id: Uuid) -> bool {
+pub(crate) async fn is_linked_callee(state: &AppState, service_id: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM injections WHERE resource_id = $1)")
         .bind(service_id)
         .fetch_one(&state.db)

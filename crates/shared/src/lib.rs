@@ -361,6 +361,29 @@ pub struct RenameServiceReq {
     pub name: String,
 }
 
+/// `GET /api/services/:id/probe`:内網の単発 TCP 探活(private service の verify 素材)。
+/// 公開 URL 検証の代替であって同等ではない —「container_port で TCP を受けた」までしか
+/// 言わない。停止 / 未デプロイでも 200(running=false)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceProbeDto {
+    /// serving コンテナが走っているか(false なら以降のフィールドは判定材料なし)。
+    pub running: bool,
+    /// 探測を実施できたか。false = 環境が探せない(dev macOS はホスト→bridge 不達)。
+    #[serde(default)]
+    pub probed: bool,
+    /// TCP 接続を受けたか(probed=true のときだけ Some)。false でも private worker
+    /// (listen しない常駐)は正常 — is_callee と併せて判定する。
+    #[serde(default)]
+    pub listening: Option<bool>,
+    /// M6 内部リンクの callee(他 service から注入されている)か。callee は caller から
+    /// 呼ばれる前提 = listen していないのは異常。
+    #[serde(default)]
+    pub is_callee: bool,
+    /// 探測対象 port(service_details.container_port)。
+    #[serde(default)]
+    pub container_port: i32,
+}
+
 /// `POST /api/services/:id/limits`:資源上限の変更。**次のデプロイから反映**
 /// (docker の memory / nano_cpus はコンテナ作成時パラメータ。走行中コンテナには遡及しない)。
 /// 少なくとも 1 項目の指定が必要。`clear_cpu_limit` は CPU 硬上限の解除

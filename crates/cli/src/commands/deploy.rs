@@ -190,8 +190,9 @@ async fn run_source(
 
     if args.watch {
         // 完走待ち。公開サービスは URL + 子リソース検証まで(GitHub 経路の --watch と同じ着地点。
-        // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は公開 URL が無いので
-        // 完走だけ待って報告する(run_verify の private 短絡は「待たず失敗扱い」に見えるため分岐)。
+        // git_sha は純 hex なので --for-sha の sha 判定を通る)。private は完走待ち + 内網探活
+        // (wait_deploy_only。run_verify の private 分岐と同じ着地だが、deploy 文脈の
+        // status/git_sha 込みの JSON 形を保つためこちらを使う)。
         let svc = api::service_get(&c, &server_url, &token, &id).await?;
         if svc.visibility == tsubomi_shared::VISIBILITY_PRIVATE {
             return crate::commands::service::wait_deploy_only(

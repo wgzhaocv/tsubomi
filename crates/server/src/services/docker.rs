@@ -1555,6 +1555,41 @@ pub async fn wait_tcp_ready(
     }
 }
 
+/// 単発の内網 TCP 探活(`GET /services/{id}/probe` の実体)。`wait_tcp_ready` と役割が違う:
+/// あちらはデプロイ門禁(listen まで**待つ** + 非 Linux は Ready を返す妥協 = 門を塞がない)、
+/// こちらは**現況報告**(1 回だけ connect + 探せない環境では「探せない」を正直に None で返す。
+/// 報告で嘘をつくと private worker の診断を誤らせる)。
+/// 戻り値:(running, listening)。listening=None は「探測不能」(非 Linux / IP 未割当含まず —
+/// IP 未割当は Some(false))。
+pub async fn probe_once(state: &AppState, name: &str, port: i32) -> (bool, Option<bool>) {
+    let info = match state.docker.inspect_container(name, None).await {
+        Ok(i) => i,
+        Err(_) => return (false, None),
+    };
+    let running = info
+        .state
+        .as_ref()
+        .and_then(|s| s.running)
+        .unwrap_or(false);
+    if !running {
+        return (false, None);
+    }
+    if !cfg!(target_os = "linux") {
+        return (true, None); // dev macOS:ホスト → bridge IP 不達のため探測不能
+    }
+    let listening = match container_ip(&info) {
+        Some(ip) => {
+            let connect = tokio::net::TcpStream::connect((ip.as_str(), port as u16));
+            matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), connect).await,
+                Ok(Ok(_))
+            )
+        }
+        None => false,
+    };
+    (true, Some(listening))
+}
+
 /// inspect 結果からコンテナの私網 IP を取り出す(空文字は「未割当」なので弾く)。
 /// **前提**:探測時点の新コンテナは自分の per-service 私網 **のみ** に居る(M6 の callee attach =
 /// `attach_as_callee` は commit_success の後、周期 `reconcile_networks` も成功済み deploy の容器
