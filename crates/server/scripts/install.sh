@@ -315,4 +315,7 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "次のステップ: tbm login"
+echo "次のステップ:"
+echo ""
+echo "    tbm login"
+echo ""

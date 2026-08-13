@@ -258,4 +258,7 @@ if ($claudeOk) {
 }
 
 Write-Host ""
-Write-Host "次のステップ: tbm login"
+Write-Host "次のステップ:"
+Write-Host ""
+Write-Host "    tbm login"
+Write-Host ""

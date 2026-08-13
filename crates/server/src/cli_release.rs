@@ -126,12 +126,27 @@ pub async fn install_bat(State(state): State<AppState>) -> axum::response::Respo
     //  (1) 改行は CRLF 必須。LF のみだと goto / for / 遅延展開が壊れトークンが
     //      途中で千切れる(EXPECTED_SHA → CTED_SHA 等)。リポジトリ実体は LF・
     //      サーバは Linux なので include_str! も LF — ここで CRLF へ正規化する。
-    //  (2) 中身は ASCII のみ(install.bat 側で担保)。cmd は OEM コードページ
-    //      (日本語 Windows は cp932)でバッチを解釈するため、UTF-8 の日本語を
-    //      混ぜると Shift-JIS として誤対合され、空白や行境界を食って REM の断片を
-    //      コマンド実行してしまう。よって install.bat だけは日本語コメント禁止。
+    //  (2) **CP932(Shift-JIS)へ転碼して届ける**。cmd は OEM コードページ(日本語
+    //      Windows = cp932)でバッチを解釈するため、UTF-8 のまま日本語を届けると
+    //      誤対合で空白・行境界が食われ REM の断片がコマンド実行される(実害あり)。
+    //      CP932 で届けばネイティブに正しく解釈され、echo の日本語も化けない。
+    //      リポジトリ実体は UTF-8(エンコーディング契約は install.bat の頭注釈)。
+    //      CP932 に無い文字は '?' に置換される(unmappable) — 混入防止は install.bat
+    //      側の契約(全文が encode 可能なことを転碼時に debug_assert で見張る)。
     let crlf = include_str!("../scripts/install.bat")
         .replace("\r\n", "\n")
-        .replace('\n', "\r\n");
-    serve_script(&state, &crlf, "text/plain; charset=utf-8")
+        .replace('\n', "\r\n")
+        .replace("__SERVER_URL__", &state.config.server_url);
+    let (bytes, _, had_unmappable) = encoding_rs::SHIFT_JIS.encode(&crlf);
+    debug_assert!(!had_unmappable, "install.bat に CP932 非対応文字が混入");
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=Shift_JIS"),
+            (header::CACHE_CONTROL, "no-store, must-revalidate"),
+            (HeaderName::from_static("cdn-cache-control"), "no-store"),
+        ],
+        bytes.into_owned(),
+    )
+        .into_response()
 }

@@ -10,11 +10,14 @@ REM (git = MinGit zip, gh = official GitHub release). "tbm uninstall" removes th
 REM PATH entries and everything under %LOCALAPPDATA%\tbm (no leftovers).
 REM __SERVER_URL__ is replaced with the real domain by the server at serve time.
 REM
-REM IMPORTANT: keep this file ASCII-only. cmd.exe parses batch files using the
-REM console's OEM codepage (cp932 / Shift-JIS on Japanese Windows). UTF-8 non-ASCII
-REM bytes get mis-paired there, which swallows spaces and line breaks and makes cmd
-REM execute fragments of comments as commands. The design rationale lives in
-REM crates/server/src/cli_release.rs (Rust source is read as UTF-8, never by cmd).
+REM IMPORTANT(エンコーディング契約): このファイルのリポジトリ実体は UTF-8 だが、
+REM サーバ(cli_release.rs)が配信時に **CP932(Shift-JIS)へ転碼**する。cmd.exe は
+REM バッチをコンソールの OEM コードページ(日本語 Windows = cp932)で解釈するため、
+REM UTF-8 のまま日本語を届けると誤対合で空白・改行が食われ、REM の断片がコマンド
+REM 実行される(実害あり)。CP932 で届けばネイティブに正しく解釈される。守ること:
+REM   1. 日本語は echo の文面と REM コメントだけ。コマンド行のトークンは ASCII のまま。
+REM   2. echo 文面の括弧は全角()を使う(半角括弧は if ブロック内で ^ エスケープが要る)。
+REM   3. CP932 に無い文字(例: 〜 U+301C)を使わない -- 転碼が ? に落とす。
 setlocal enabledelayedexpansion
 
 if not defined TSUBOMI_SERVER_URL set "TSUBOMI_SERVER_URL=__SERVER_URL__"
@@ -23,7 +26,7 @@ set "INSTALL_DIR=%LOCALAPPDATA%\tbm\bin"
 set "ARCH=%PROCESSOR_ARCHITECTURE%"
 if defined PROCESSOR_ARCHITEW6432 set "ARCH=%PROCESSOR_ARCHITEW6432%"
 if /i not "%ARCH%"=="AMD64" (
-    echo tbm does not support Windows %ARCH% ^(x86_64 only^)
+    echo tbm は Windows %ARCH% には未対応です(x86_64 のみ)
     exit /b 1
 )
 set "TARGET=x86_64-pc-windows-gnu"
@@ -31,14 +34,14 @@ set "TARGET=x86_64-pc-windows-gnu"
 set "TMP_DIR=%TEMP%\tbm-install-%RANDOM%%RANDOM%"
 mkdir "%TMP_DIR%" >nul 2>&1
 if errorlevel 1 (
-    echo failed to create temp dir %TMP_DIR%
+    echo 一時フォルダを作成できませんでした: %TMP_DIR%
     exit /b 1
 )
 
 set "MANIFEST=%TMP_DIR%\manifest.json"
 curl -fsSL "%TSUBOMI_SERVER_URL%/api/cli/version/%TARGET%" -o "%MANIFEST%"
 if errorlevel 1 (
-    echo failed to fetch %TSUBOMI_SERVER_URL%/api/cli/version/%TARGET%
+    echo %TSUBOMI_SERVER_URL%/api/cli/version/%TARGET% の取得に失敗しました
     rmdir /s /q "%TMP_DIR%" >nul 2>&1
     exit /b 1
 )
@@ -61,10 +64,10 @@ REM manifest url is a relative path (domain-independent). If it starts with /, p
 if "!URL:~0,1!"=="/" set "URL=%TSUBOMI_SERVER_URL%!URL!"
 
 set "ARCHIVE=%TMP_DIR%\tbm.zip"
-echo downloading !URL!
+echo tbm をダウンロードしています: !URL!
 curl -fsSL "!URL!" -o "%ARCHIVE%"
 if errorlevel 1 (
-    echo download failed
+    echo ダウンロードに失敗しました
     rmdir /s /q "%TMP_DIR%" >nul 2>&1
     exit /b 1
 )
@@ -78,9 +81,9 @@ for /f "skip=1 delims=" %%H in ('certutil -hashfile "%ARCHIVE%" SHA256') do (
 set "ACTUAL_SHA=%ACTUAL_SHA: =%"
 
 if /i not "%ACTUAL_SHA%"=="%EXPECTED_SHA%" (
-    echo checksum mismatch for !URL!
-    echo   expected: %EXPECTED_SHA%
-    echo   actual:   %ACTUAL_SHA%
+    echo チェックサムが一致しません: !URL!
+    echo   期待値: %EXPECTED_SHA%
+    echo   実際:   %ACTUAL_SHA%
     rmdir /s /q "%TMP_DIR%" >nul 2>&1
     exit /b 1
 )
@@ -88,7 +91,7 @@ if /i not "%ACTUAL_SHA%"=="%EXPECTED_SHA%" (
 REM tar ships with Windows 10 1803+ and handles zip.
 tar -xf "%ARCHIVE%" -C "%TMP_DIR%"
 if errorlevel 1 (
-    echo failed to extract %ARCHIVE%
+    echo %ARCHIVE% の展開に失敗しました
     rmdir /s /q "%TMP_DIR%" >nul 2>&1
     exit /b 1
 )
@@ -96,7 +99,7 @@ if errorlevel 1 (
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 move /y "%TMP_DIR%\tbm.exe" "%INSTALL_DIR%\tbm.exe" >nul
 if errorlevel 1 (
-    echo failed to install to %INSTALL_DIR%
+    echo %INSTALL_DIR% へのインストールに失敗しました
     rmdir /s /q "%TMP_DIR%" >nul 2>&1
     exit /b 1
 )
@@ -104,7 +107,7 @@ if errorlevel 1 (
 rmdir /s /q "%TMP_DIR%" >nul 2>&1
 
 echo.
-echo tbm installed to %INSTALL_DIR%\tbm.exe
+echo tbm を %INSTALL_DIR%\tbm.exe に入れました
 
 REM PATH integration. Two requirements:
 REM   1. setx truncates at 1024 chars (silently corrupts a long user PATH).
@@ -131,14 +134,14 @@ if not defined REG_HAS_DIR (
     reg add "HKCU\Environment" /v Path /t REG_EXPAND_SZ /d "!NEW_PATH!" /f >nul
     if errorlevel 1 (
         echo.
-        echo warning: failed to update user PATH. Add manually:
+        echo 警告: ユーザ PATH の更新に失敗しました。次のフォルダを手動で PATH に追加してください:
         echo   %INSTALL_DIR%
         endlocal
         exit /b 0
     )
     setx _TBM_REFRESH 1 >nul 2>&1
     reg delete "HKCU\Environment" /v _TBM_REFRESH /f >nul 2>&1
-    echo added %INSTALL_DIR% to user PATH.
+    echo %INSTALL_DIR% をユーザ PATH に追加しました
 )
 
 REM Initial config: write server_url (the installer knows its own domain).
@@ -149,7 +152,7 @@ set "CFG_DIR=%APPDATA%\flegrowth\tsubomi\config"
 if not exist "%CFG_DIR%\config.toml" (
     if not exist "%CFG_DIR%" mkdir "%CFG_DIR%"
     >"%CFG_DIR%\config.toml" echo server_url = "%TSUBOMI_SERVER_URL%"
-    echo configured server: %TSUBOMI_SERVER_URL%
+    echo 接続先サーバを設定しました: %TSUBOMI_SERVER_URL%
 )
 
 REM Prerequisite tools (git / gh = GitHub CLI / claude = Claude Code). Skip whatever
@@ -160,12 +163,12 @@ REM (we add that to PATH too). gh / claude also get a login hint when not signed
 echo.
 where git >nul 2>&1
 if errorlevel 1 (
-    echo git not found. Installing MinGit ^(no admin^)...
+    echo git が見つかりません。MinGit をインストールします(管理者権限は不要)...
     call :install_mingit
     if defined GIT_OK (
-        echo git ^(MinGit^) installed.
+        echo git(MinGit)をインストールしました
     ) else (
-        echo warning: failed to auto-install git. Install manually: https://gitforwindows.org/
+        echo 警告: git の自動インストールに失敗しました。手動でインストールしてください: https://gitforwindows.org/
     )
 )
 REM Login hints are printed as "blank line + indented command on its own line".
@@ -173,20 +176,20 @@ REM An inline command at the end of a sentence is easy to miss and hard to copy
 REM (real-usage feedback). The claude hints below follow the same shape.
 where gh >nul 2>&1
 if errorlevel 1 (
-    echo gh ^(GitHub CLI^) not found. Installing ^(no admin^)...
+    echo gh(GitHub CLI)が見つかりません。インストールします(管理者権限は不要)...
     call :install_gh
     if defined GH_OK (
-        echo gh installed. To connect to GitHub now, run:
+        echo gh をインストールしました。GitHub に接続するには次を実行してください:
         echo.
         echo     "%INSTALL_DIR%\gh.exe" auth login --web --git-protocol https --clipboard
         echo.
     ) else (
-        echo warning: failed to auto-install gh. Install manually: https://github.com/cli/cli/releases
+        echo 警告: gh の自動インストールに失敗しました。手動でインストールしてください: https://github.com/cli/cli/releases
     )
 ) else (
     gh auth status >nul 2>&1
     if errorlevel 1 (
-        echo gh not logged in. To connect to GitHub, run:
+        echo gh が未ログインです。GitHub に接続するには次を実行してください:
         echo.
         echo     gh auth login --web --git-protocol https --clipboard
         echo.
@@ -198,22 +201,22 @@ REM installer, no admin; lands in %USERPROFILE%\.local\bin\claude.exe. Either br
 REM sets two defaults in its settings.json (see :configure_claude).
 where claude >nul 2>&1
 if errorlevel 1 (
-    echo claude ^(Claude Code^) not found. Installing ^(no admin^)...
+    echo claude(Claude Code)が見つかりません。インストールします(管理者権限は不要)...
     call :install_claude
     if defined CLAUDE_OK (
         call :configure_claude
-        echo claude installed. To log in now, run:
+        echo claude をインストールしました。ログインするには次を実行してください:
         echo.
         echo     "%USERPROFILE%\.local\bin\claude.exe" auth login
         echo.
     ) else (
-        echo warning: failed to auto-install claude. Install manually: https://claude.ai/install.cmd
+        echo 警告: claude の自動インストールに失敗しました。手動でインストールしてください: https://claude.ai/install.cmd
     )
 ) else (
     call :configure_claude
     claude auth status >nul 2>&1
     if errorlevel 1 (
-        echo claude not logged in. To log in, run:
+        echo claude が未ログインです。ログインするには次を実行してください:
         echo.
         echo     claude auth login
         echo.
@@ -227,12 +230,15 @@ REM special-character entry can break the quoted "set" and make cmd execute a
 REM path fragment (this showed up as a stray error on some machines). A new
 REM terminal picks up the registry PATH cleanly.
 echo.
-echo Done. Open a NEW terminal window so PATH changes take effect, then run: tbm login
+echo 完了。PATH を反映するため、**新しい**ターミナルを開いてから次を実行してください:
+echo.
+echo     tbm login
+echo.
 endlocal
 exit /b 0
 
 :bad_manifest
-echo incomplete manifest from %TSUBOMI_SERVER_URL%
+echo %TSUBOMI_SERVER_URL% から不完全な manifest を受け取りました
 rmdir /s /q "%TMP_DIR%" >nul 2>&1
 exit /b 1
 
@@ -338,9 +344,9 @@ REM "fullscreen". The PowerShell uses single-quoted string literals so no embedd
 REM double-quotes are needed; the pipes are literal inside the cmd-quoted argument.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $d=Join-Path $env:USERPROFILE '.claude'; $f=Join-Path $d 'settings.json'; New-Item -ItemType Directory -Path $d -Force | Out-Null; $c=$null; if (Test-Path $f) { try { $c = Get-Content -Raw -Path $f | ConvertFrom-Json } catch { $c=$null } }; if (($null -eq $c) -or ($c -isnot [pscustomobject])) { $c=[PSCustomObject]@{} }; if (($null -eq $c.permissions) -or ($c.permissions -isnot [pscustomobject])) { $c | Add-Member -NotePropertyName permissions -NotePropertyValue ([PSCustomObject]@{}) -Force }; if ($c.permissions.defaultMode -ne 'bypassPermissions') { $c.permissions | Add-Member -NotePropertyName defaultMode -NotePropertyValue 'auto' -Force }; $c | Add-Member -NotePropertyName tui -NotePropertyValue 'fullscreen' -Force; [System.IO.File]::WriteAllText($f, ($c | ConvertTo-Json -Depth 20))" >nul 2>&1
 if errorlevel 1 (
-    echo note: could not auto-update Claude settings. Add tui=fullscreen and permissions.defaultMode=auto to %USERPROFILE%\.claude\settings.json
+    echo 注意: Claude Code の設定を自動更新できませんでした。%USERPROFILE%\.claude\settings.json に tui=fullscreen と permissions.defaultMode=auto を追加してください
 ) else (
-    echo Claude Code settings updated ^(auto mode + fullscreen^).
+    echo Claude Code の設定を更新しました(auto モード + fullscreen)
 )
 exit /b 0
 
@@ -367,6 +373,6 @@ if not defined _AUP_HAS (
     reg add "HKCU\Environment" /v Path /t REG_EXPAND_SZ /d "!_AUP_NEW!" /f >nul
     setx _TBM_REFRESH 1 >nul 2>&1
     reg delete "HKCU\Environment" /v _TBM_REFRESH /f >nul 2>&1
-    echo added !_AUP_DIR! to user PATH.
+    echo !_AUP_DIR! をユーザ PATH に追加しました
 )
 exit /b 0
