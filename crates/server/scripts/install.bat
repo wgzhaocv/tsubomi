@@ -23,6 +23,8 @@ setlocal enabledelayedexpansion
 REM 最初の 1 行を何より先に出す:これが出ない = スクリプト自体が実行されていない
 REM (ダウンロード失敗 / 実行ポリシーによるブロック)と切り分けられる。
 echo tbm インストーラを開始します...
+REM 診断用:`set TBM_DEBUG=1` してから実行すると全コマンドをトレース表示する。
+if defined TBM_DEBUG echo on
 
 if not defined TSUBOMI_SERVER_URL set "TSUBOMI_SERVER_URL=__SERVER_URL__"
 set "INSTALL_DIR=%LOCALAPPDATA%\tbm\bin"
