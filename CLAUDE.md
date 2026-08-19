@@ -312,7 +312,7 @@ password`、リセットで旧 grant 全失効)。bcrypt は `spawn_blocking`、
 **否決(後相)**:owner 管理 UI(2 人目追加削除は env 種子のまま §10-H)/ viewer login の失敗レート制限
 (今は bcrypt + 最小長 8 のみ)。実装級は **`doc/paas-m4-design.md`**。
 
-**CPU の見せ方(2026-08-19。**未出荷** — 次の `just ship` + CLI リリースで出す)**:docker のコンテナ CPU% は **100% = 1 コア**
+**CPU の見せ方(2026-08-19、server v58 / tbm 1.1.0)**:docker のコンテナ CPU% は **100% = 1 コア**
 (`compute_cpu_pct` が online_cpus を掛ける)なので、8 コアの本番機で 4 コア使う app は「400%」と
 出て「使いすぎ」と誤読される。**分母は面ごとに違うのが仕様**で、片方に統一はできない —
 admin 概要 / ランキングは跨ユーザ比較なので**ホスト全体比**(サーバで正規化 = `cpu_pct_host`)、
