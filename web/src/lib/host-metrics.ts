@@ -8,7 +8,8 @@ import { useEffect, useState } from "react";
 // プラットフォーム自身の 1 コンテナ(server / pg-platform / valkey …)の使用量。合算せず個別表示。
 export type ContainerStat = {
   name: string;
-  cpu_pct: number | null;
+  /** **ホスト全体に対する** CPU 使用率(%)。サーバが正規化済み(docker の生値は 100% = 1 コア)。 */
+  cpu_pct_host: number | null;
   mem_bytes: number;
 };
 
@@ -20,7 +21,10 @@ export type TempSensor = {
 };
 
 export type HostMetrics = {
-  cpu_pct: number | null;
+  /** ホスト全体に対する CPU 使用率(%)。/proc/stat = 全コア合算。 */
+  cpu_pct_host: number | null;
+  /** ホストの論理コア数(/proc/stat の cpu 行数 = 上の % と同じ出典)。 */
+  host_cores: number | null;
   mem_used: number | null;
   mem_total: number | null;
   disk_used: number | null;

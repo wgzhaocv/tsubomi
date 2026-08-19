@@ -829,8 +829,10 @@ pub struct AdminResourceRow {
     /// ソート対象の使用量(bytes)。database=ストレージ / volume=使用量 / service=メモリ(稼働中)。
     /// 取得不能(停止中 service / 計測タイムアウト / 未対応の cache 等)は null。
     pub usage_bytes: Option<i64>,
-    /// service のみ:CPU 使用率(%)。取得不能 / 停止中は null。
-    pub cpu_pct: Option<f64>,
+    /// service のみ:CPU 使用率(**ホスト全体に対する %**。docker の生値は 100% = 1 コアで、
+    /// 跨リソースに並べると 8 コア機の 400% を「使いすぎ」と誤読させるため、サーバで
+    /// `docker::cpu_pct_of_host` を通してある)。取得不能 / 停止中 / コア数不明は null。
+    pub cpu_pct_host: Option<f64>,
     /// service のみ:コンテナが稼働中か。他種別は null。
     pub running: Option<bool>,
 }

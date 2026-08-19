@@ -40,8 +40,14 @@ const CPU_WARMUP: Duration = Duration::from_millis(1000);
 /// 取得不能(dev の macOS で /proc 無し、df 失敗 等)は None で、フロントエンドは「—」を出す。
 #[derive(Clone, Serialize)]
 pub struct HostMetrics {
-    /// CPU 使用率(%、0–100)。前回サンプルとの差分で算出。
-    pub cpu_pct: Option<f64>,
+    /// CPU 使用率(**ホスト全体に対する %**、0–100)。前回サンプルとの差分で算出
+    /// (/proc/stat = 全コア合算なので元からこの単位)。`platform` の各コンテナも同じ物差しに
+    /// 揃えてある。名前の `_host` は「1 コアに対する %」(docker 単位)との区別 —
+    /// この接尾が無い `cpu_pct` は `ServiceMetricsDto` の docker 生値だけ。
+    pub cpu_pct_host: Option<f64>,
+    /// ホストの論理コア数(`/proc/stat` の cpu 行数 = 上の % と同じ出典)。上の割合が
+    /// 「何に対するものか」を画面で言えるようにする。取得不能(dev macOS)は None。
+    pub host_cores: Option<i32>,
     /// 使用中メモリ(bytes)。MemTotal − MemAvailable。
     pub mem_used: Option<u64>,
     /// 総メモリ(bytes)。
@@ -165,7 +171,8 @@ fn spawn_sampler(state: AppState) {
             }
             // 採取はロックの外(数 ms の I/O + docker stats。ロックは送信判定だけ短く保つ)。
             let cur_cpu = read_cpu_times().await;
-            let cpu_pct = prev_cpu.zip(cur_cpu).and_then(|(p, c)| cpu_delta_pct(p, c));
+            let cpu_pct_host = prev_cpu.zip(cur_cpu).and_then(|(p, c)| cpu_delta_pct(p, c));
+            let host_cores = cur_cpu.and_then(|c| c.cores);
             prev_cpu = cur_cpu;
             let mem = read_mem().await;
             let disk = disk_metrics(&state.config.volumes_dir).await;
@@ -174,7 +181,8 @@ fn spawn_sampler(state: AppState) {
             let platform = crate::services::docker::platform_stats(&state).await;
             let temps = read_temps().await;
             let snap = HostMetrics {
-                cpu_pct,
+                cpu_pct_host,
+                host_cores,
                 mem_used: mem.map(|(used, _)| used),
                 mem_total: mem.map(|(_, total)| total),
                 disk_used: disk.map(|d| d.used),
@@ -251,11 +259,26 @@ fn parse_meminfo_kb(s: &str) -> Option<u64> {
 struct CpuTimes {
     total: u64,
     idle: u64,
+    /// 論理コア数(`/proc/stat` の `cpu0`, `cpu1`, … 行の本数)。使用率と**同じ出典**から取る
+    /// のが要点 — docker daemon 側のコア数(`AppState::host_cores`)は dev では VM への割当数
+    /// なので、「本体(ホスト)」の見出しの下に出すと嘘になる(codex 審査)。
+    cores: Option<i32>,
 }
 
 /// `/proc/stat` の先頭 "cpu …" 行を読む。macOS には無いので None(dev)。
 async fn read_cpu_times() -> Option<CpuTimes> {
     let text = tokio::fs::read_to_string("/proc/stat").await.ok()?;
+    // 個別コアの行(`cpu0` …)を数える。合計行 `cpu` は先頭だけなので数えない。
+    let cores = i32::try_from(
+        text.lines()
+            .filter(|l| {
+                l.strip_prefix("cpu")
+                    .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+            })
+            .count(),
+    )
+    .ok()
+    .filter(|&n| n > 0);
     let mut it = text.lines().next()?.split_whitespace();
     if it.next()? != "cpu" {
         return None;
@@ -269,6 +292,7 @@ async fn read_cpu_times() -> Option<CpuTimes> {
     Some(CpuTimes {
         total: vals.iter().sum(),
         idle,
+        cores,
     })
 }
 

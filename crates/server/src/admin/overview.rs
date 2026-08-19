@@ -65,9 +65,10 @@ const METRIC_CONCURRENCY: usize = 6;
 async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
     let (resource_id, owner_name, kind, anon_seq, pg_dbname, host_path, namespace) = raw;
     let anon_label = format!("{kind}{anon_seq}");
-    let (usage_bytes, cpu_pct, running) = match kind.as_str() {
+    let (usage_bytes, cpu_pct_host, running) = match kind.as_str() {
+        // CPU はホスト全体比(単位の選択は docker::stats 側 = ServiceStat の doc 参照)。
         "service" => match docker::stats(state, resource_id).await {
-            Some(s) => (Some(s.mem_bytes), s.cpu_pct, Some(true)),
+            Some(s) => (Some(s.mem_bytes), s.cpu_pct_host, Some(true)),
             None => (None, None, Some(false)),
         },
         "database" => (db_size(state, pg_dbname.as_deref()).await, None, None),
@@ -89,7 +90,7 @@ async fn resolve_row(state: &AppState, raw: RawRow) -> AdminResourceRow {
         kind,
         anon_label,
         usage_bytes,
-        cpu_pct,
+        cpu_pct_host,
         running,
     }
 }

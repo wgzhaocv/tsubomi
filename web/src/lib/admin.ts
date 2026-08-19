@@ -26,8 +26,9 @@ export type AdminResourceRow = {
   anon_label: string;
   /** 使用量(bytes)。database=ストレージ / volume=使用量 / service=稼働中メモリ。取得不能は null。 */
   usage_bytes: number | null;
-  /** service のみ:CPU 使用率(%)。 */
-  cpu_pct: number | null;
+  /** service のみ:CPU 使用率(**ホスト全体に対する %**。サーバが正規化済み — docker の
+   * 生値は 100% = 1 コアなので、跨リソースに並べると誤読する)。 */
+  cpu_pct_host: number | null;
   /** service のみ:稼働中か。 */
   running: boolean | null;
 };

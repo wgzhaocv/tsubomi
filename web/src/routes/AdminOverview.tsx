@@ -17,7 +17,7 @@ import {
 } from "@/lib/admin";
 import { type HostMetrics, type TempSensor, useHostMetrics } from "@/lib/host-metrics";
 import { RESOURCES } from "@/lib/resources";
-import { formatBytes, formatBytesPair } from "@/lib/format";
+import { formatBytes, formatBytesPair, formatPct } from "@/lib/format";
 
 // 管制面の総覧(owner 専用)。種別ごとの総数 + 総使用量 + リソース保有ユーザ数。
 // 匿名化(設計 v2 §7):リソースの名前・内容は出さない。owner ゲートは <RequireOwner>
@@ -86,7 +86,7 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
   // スナップショット未到着(WS 接続中 / 初回フレーム待ち)= 読み込み中 → Skeleton。
   // 到着後に個別の値が null(dev macOS の CPU/メモリ等)なのは「取得不能 = —」で別物。
   const loading = data == null;
-  const cpu = data?.cpu_pct ?? null;
+  const cpu = data?.cpu_pct_host ?? null;
   const memPct =
     data?.mem_used != null && data.mem_total ? (data.mem_used / data.mem_total) * 100 : null;
   const diskPct = data?.disk_pct ?? null;
@@ -101,17 +101,18 @@ function HostCard({ data, connected }: { data: HostMetrics | null; connected: bo
           <div className="flex flex-col">
             <span className="text-base font-bold text-foreground">サーバー</span>
             <span className="text-xs font-medium text-muted-foreground">
-              本体(ホスト)の使用状況 · {connected ? "約 5 秒ごとに更新" : "接続待ち…"}
+              {[
+                "本体(ホスト)の使用状況",
+                data?.host_cores != null ? `${data.host_cores} コア` : null,
+                connected ? "約 5 秒ごとに更新" : "接続待ち…",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </span>
           </div>
         </div>
         <div className="flex flex-col gap-3.5">
-          <MetricRow
-            label="CPU"
-            pct={cpu}
-            detail={cpu == null ? "—" : `${cpu.toFixed(0)}%`}
-            loading={loading}
-          />
+          <MetricRow label="CPU" pct={cpu} detail={formatPct(cpu)} loading={loading} />
           <MetricRow
             label="メモリ"
             pct={memPct}
@@ -201,7 +202,7 @@ function PlatformCard({ items, loading }: { items: HostMetrics["platform"]; load
                 <dt className="font-mono text-sm font-bold text-foreground">{c.name}</dt>
                 <dd className="flex items-center gap-5">
                   <span className="text-sm tabular-nums text-muted-foreground">
-                    CPU {c.cpu_pct == null ? "—" : `${c.cpu_pct.toFixed(0)}%`}
+                    CPU 全体の {formatPct(c.cpu_pct_host)}
                   </span>
                   <span className="w-20 text-right font-mono text-sm font-bold text-[#0b9c93]">
                     {formatBytes(c.mem_bytes)}

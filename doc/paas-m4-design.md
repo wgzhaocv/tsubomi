@@ -130,7 +130,7 @@ owner(/ S5 の viewer)が見るのは:
 
 | 種別 | 指標 | 採り方 |
 |---|---|---|
-| service | CPU% + 内存(bytes) | bollard 一発 stats(§3.3)。停止中は 0 / null |
+| service | CPU%(**ホスト全体比**)+ 内存(bytes) | bollard 一発 stats(§3.3)。停止中は 0 / null |
 | database | 存储(bytes) | `pg_database_size(pg_dbname)`(tenant_admin_url 経由) |
 | volume | 占用(bytes) | host_path のディレクトリ走査 or `du -sb`(best-effort、§3.4) |
 | cache | 已用内存 | **M5**(cache 自体が M5)。本書は出さない |
@@ -157,10 +157,21 @@ SELECT r.id, r.user_id, u.name, u.email, r.kind, r.anon_seq, r.deleted_at,
 ### 3.3 `docker.rs::stats`(新規、bollard 一発)
 
 ```
-pub async fn stats(state, service_id) -> Option<ContainerStat>
-  // bollard stats(stream=false)を 1 サンプル。CPU% は cpu_delta/system_delta*ncpu、
-  // 内存は memory_stats.usage。コンテナ不在 / 停止中は None(UI は「-」表示)。
+pub async fn stats(state, service_id) -> Option<ServiceStat>
+  // bollard stats(stream=false)を 1 サンプル。CPU% は cpu_delta/system_delta(**ncpu を
+  // 掛けない** = ホスト全体比)、内存は memory_stats.usage。不在 / 停止中は None(UI「-」)。
 ```
+
+**CPU の分母は面ごとに違う(2026-08-19 に確定。両方が必要で、片方に統一はできない)**:
+
+| 面 | 分母 | 理由 | wire のフィールド |
+|---|---|---|---|
+| admin 概要 / ランキング(本章) | **ホスト全体** | 跨ユーザに並べて比べるので、比較可能な分母はホストしかない。生の docker 値(100% = 1 コア)は 8 コア機の 400% を「使いすぎ」と誤読させる | `cpu_pct_host`(サーバで正規化済み) |
+| service 詳細 / `tbm service metrics` | **その service の上限**(無ければホスト) | 問いが「天井にどれだけ近いか(上限を上げるべきか)」なので | `cpu_pct`(docker 生値)+ `host_cores` + 適用済み `cpu_limit_millis` = **素材**を渡し、天井の選択は客側 |
+
+命名規約:`cpu_pct_host` = ホスト全体比、接尾の無い `cpu_pct` = docker 生値(`ServiceMetricsDto`
+だけ。CLI が消費する shipped フィールドなので改名しない)。正規化はコア数を掛けないだけなので
+**サンプル内在**で、起動時にキャッシュしたコア数に依存しない(= daemon のコア数が変わっても正しい)。
 
 reconcile が引く現行コンテナ名の解決は既存 `docker.rs` の流儀を踏襲(`tsubomi.service_id`
 ラベル or 現行名)。**best-effort**:stats が取れなくても overview は出す(指標欄が空)。

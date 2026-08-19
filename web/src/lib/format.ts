@@ -23,6 +23,12 @@ export function formatBytesPair(
   return `${formatBytes(used)} / ${formatBytes(total)}`;
 }
 
+// 百分率の単一の書式。取得不能は「—」。桁数を 1 箇所に置くのが目的 — 同じ画面の 2 枚の
+// カードで 0 桁 / 1 桁が混ざっていた(全体比は値が小さいので 1 桁ないと 0% に丸まる)。
+export function formatPct(v: number | null | undefined, digits = 1): string {
+  return v == null ? "—" : `${v.toFixed(digits)}%`;
+}
+
 // ISO 時刻 → 絶対日付(ja-JP)。一覧カードのフッタ等、日付だけ見せたい場面の単一の書式。
 export function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("ja-JP");

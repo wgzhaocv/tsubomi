@@ -312,6 +312,26 @@ password`、リセットで旧 grant 全失効)。bcrypt は `spawn_blocking`、
 **否決(後相)**:owner 管理 UI(2 人目追加削除は env 種子のまま §10-H)/ viewer login の失敗レート制限
 (今は bcrypt + 最小長 8 のみ)。実装級は **`doc/paas-m4-design.md`**。
 
+**CPU の見せ方(2026-08-19。**未出荷** — 次の `just ship` + CLI リリースで出す)**:docker のコンテナ CPU% は **100% = 1 コア**
+(`compute_cpu_pct` が online_cpus を掛ける)なので、8 コアの本番機で 4 コア使う app は「400%」と
+出て「使いすぎ」と誤読される。**分母は面ごとに違うのが仕様**で、片方に統一はできない —
+admin 概要 / ランキングは跨ユーザ比較なので**ホスト全体比**(サーバで正規化 = `cpu_pct_host`)、
+service 詳細 / `tbm service metrics` は「天井にどれだけ近いか」が問いなので**その service の
+上限**(無ければホスト全体)。後者はサーバが**素材**(docker 生値 `cpu_pct` + `host_cores` +
+**適用済み** `cpu_limit_millis`)を渡し天井の選択を客側に委ねる。命名で区別する(`_host` 接尾 =
+ホスト全体比 / 接尾なし = docker 生値、`ServiceMetricsDto` だけ = shipped CLI が消費するので改名しない)。
+正規化は `cpu_delta/system_delta` にコア数を**掛けないだけ**なので**サンプル内在** = 起動時に
+キャッシュしたコア数に依存しない。分母に**DB の設定値を使ってはいけない**:上限変更は次のデプロイ
+から効くので、変更直後は「実際は適用済み上限の 100% なのに『上限の 50%』」と嘘になる(未反映は
+`mem_limit_pending`/`cpu_limit_pending` が別に言う。判定もサーバ側 — CPU は下記の頭打ちが絡むため)。
+**CPU 上限の上界はホストのコア数**(固定 16 を廃止。daemon はコア数超えの NanoCPUs でコンテナ作成を
+拒否し、上限は次のデプロイから効くので「設定から遠く離れた場所でデプロイ失敗」になっていた)。
+入口検証(`check_cpu_limit_millis`)だけでは旧値・機体移動を塞げないので**施加点でも頭打ち**
+(`docker::effective_cpu_millis` = 規則の唯一の家)。ここで弾くと健全な app が全復活経路で永久停止する
+(v48 の穴と同型)ため、頭打ち + warn を選んだ(物理最大へ寄せる方向しかないので要求より少ない CPU に
+なることは原理上ない)。メモリの上限範囲は**方針値**なので固定のまま(docker は物理超えを拒否しない)。
+実装級は **`doc/paas-m4-design.md` §3.3** の分母表。
+
 **AI フィードバック第 4 弾(2026-07-26、server v53 / tbm 1.0.32):`sslmode` の駆動系差を仕組みで消す**。
 発端は「注入された `DATABASE_URL` が Go では繋がるのに Node で落ちる」。**`sslmode=require` の意味が
 駆動系で割れている**(libpq = 暗号化するが証書を検証しない / node-postgres = **厳格に検証**)ため、

@@ -18,6 +18,7 @@ import {
   useAdminAction,
   useAdminRanking,
 } from "@/lib/admin";
+import { formatPct } from "@/lib/format";
 import { useMeQuery } from "@/lib/auth";
 
 // 使用量ランキング(owner 専用)。匿名行(真名 + 匿名番号 + 使用量)を降順で。
@@ -58,9 +59,11 @@ function serviceState(row: AdminResourceRow): string {
   return row.running ? "稼働中" : "停止中";
 }
 
+// CPU は**ホスト全体に対する %**(サーバが正規化済み)。列見出しも「CPU(全体比)」にして
+// 何に対する割合かを言う — 裸の % は「1 コアに対する %」と読まれ得る(docker の生値の癖)。
 function cpuText(row: AdminResourceRow): string {
-  if (row.kind !== "service" || row.cpu_pct == null) return "—";
-  return `${row.cpu_pct.toFixed(1)}%`;
+  if (row.kind !== "service") return "—";
+  return formatPct(row.cpu_pct_host);
 }
 
 export default function AdminRanking() {
@@ -163,7 +166,7 @@ export default function AdminRanking() {
                     <th className="px-4 py-3">利用者</th>
                     <th className="px-4 py-3">リソース</th>
                     <th className="px-4 py-3 text-right">使用量</th>
-                    <th className="px-4 py-3 text-right">CPU</th>
+                    <th className="px-4 py-3 text-right">CPU(全体比)</th>
                     <th className="px-4 py-3 text-right">状態</th>
                     {isOwner && <th className="px-4 py-3 text-right">操作</th>}
                   </tr>

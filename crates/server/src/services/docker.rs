@@ -1317,16 +1317,20 @@ fn parse_resize(json: &str) -> Option<(u16, u16)> {
 
 /// owner ガバナンスの監視指標(M4 S1)。`(cpu_pct, mem_bytes)` を 1 サンプルで返す。
 pub struct ServiceStat {
-    /// CPU 使用率(%)。算出不能(system delta 0 / フィールド欠落)は None。
-    pub cpu_pct: Option<f64>,
+    /// CPU 使用率(**ホスト全体に対する %**)。この accessor は owner ガバナンス専用(M4 S1)で
+    /// 跨リソース比較にしか使わないので、単位の選択をここで済ませる(呼ぶ側の規律に頼らない)。
+    /// 算出不能(system delta 0 / フィールド欠落)は None。
+    pub cpu_pct_host: Option<f64>,
     /// メモリ使用量(bytes)。
     pub mem_bytes: i64,
 }
 
 /// 1 サンプルの stats 結果(`sample_stats` の戻り)。
 struct Sample {
-    /// CPU 使用率(%)。算出不能(system delta 0 / フィールド欠落)は None。
+    /// CPU 使用率(docker 単位 = 100% が 1 コア)。算出不能は None。
     cpu_pct: Option<f64>,
+    /// CPU 使用率(ホスト全体に対する %)。同じサンプルから別単位で出す。
+    cpu_pct_host: Option<f64>,
     /// メモリ使用量(bytes)。
     mem_bytes: u64,
     /// メモリ上限(bytes)。取得不能は None(`--memory` 未設定 = ホスト RAM を返し得る)。
@@ -1349,7 +1353,7 @@ pub async fn stats(state: &AppState, service_id: Uuid) -> Option<ServiceStat> {
         .and_then(|c| c.id)?;
     let s = sample_stats(state, &name).await?;
     Some(ServiceStat {
-        cpu_pct: s.cpu_pct,
+        cpu_pct_host: s.cpu_pct_host,
         mem_bytes: s.mem_bytes as i64,
     })
 }
@@ -1363,6 +1367,7 @@ async fn sample_stats(state: &AppState, name_or_id: &str) -> Option<Sample> {
     let mem = sample.memory_stats.as_ref();
     Some(Sample {
         cpu_pct: compute_cpu_pct(&sample),
+        cpu_pct_host: compute_cpu_pct_host(&sample),
         mem_bytes: mem.map(mem_working_set).unwrap_or(0),
         mem_limit: mem.and_then(|m| m.limit),
     })
@@ -1491,8 +1496,8 @@ pub async fn service_metrics(state: &AppState, service_id: Uuid) -> ServiceMetri
 pub struct ContainerStat {
     /// 表示名(先頭の `tsubomi-` を剥がした短名。例 server / pg-platform / valkey)。
     pub name: String,
-    /// CPU 使用率(%)。算出不能は None。
-    pub cpu_pct: Option<f64>,
+    /// CPU 使用率(**ホスト全体に対する %**)。算出不能は None。
+    pub cpu_pct_host: Option<f64>,
     /// メモリ使用量(bytes)。
     pub mem_bytes: u64,
 }
@@ -1526,7 +1531,7 @@ pub async fn platform_stats(state: &AppState) -> Vec<ContainerStat> {
         let name = raw.strip_prefix("tsubomi-").unwrap_or(&raw).to_string();
         Some(ContainerStat {
             name,
-            cpu_pct: s.cpu_pct,
+            cpu_pct_host: s.cpu_pct_host,
             mem_bytes: s.mem_bytes,
         })
     });
@@ -1540,9 +1545,11 @@ pub async fn platform_stats(state: &AppState) -> Vec<ContainerStat> {
     stats
 }
 
-/// Docker 公式の CPU% 算出:`(cpu_delta / system_delta) * online_cpus * 100`。
+/// `cpu_delta / system_delta` = **ホスト全体に対する使用率の比**(system_delta は全コアの
+/// 合計時間なので、この比自体が既に「機械のどれだけ」を表す)。docker 公式の CPU% は
+/// これに `online_cpus × 100` を掛けたもの = 100% が 1 コアという別単位。
 /// precpu(前サンプル)が無い / system delta が 0 なら None。
-fn compute_cpu_pct(s: &ContainerStatsResponse) -> Option<f64> {
+fn cpu_ratio(s: &ContainerStatsResponse) -> Option<f64> {
     let cpu = s.cpu_stats.as_ref()?;
     let pre = s.precpu_stats.as_ref()?;
     let cpu_delta = cpu
@@ -1554,8 +1561,22 @@ fn compute_cpu_pct(s: &ContainerStatsResponse) -> Option<f64> {
     if sys_delta <= 0.0 {
         return None;
     }
-    let ncpu = cpu.online_cpus.unwrap_or(1).max(1) as f64;
-    Some((cpu_delta / sys_delta) * ncpu * 100.0)
+    Some(cpu_delta / sys_delta)
+}
+
+/// Docker 公式の CPU%(**100% = 1 コア**)。`ServiceMetricsDto.cpu_pct` はこの単位で、
+/// 天井(その service の上限 / ホスト全体)の選択を客側に委ねるための素材として出す。
+fn compute_cpu_pct(s: &ContainerStatsResponse) -> Option<f64> {
+    let ncpu = s.cpu_stats.as_ref()?.online_cpus.unwrap_or(1).max(1) as f64;
+    Some(cpu_ratio(s)? * ncpu * 100.0)
+}
+
+/// **ホスト全体に対する** CPU%(0–100)。跨リソースを並べて比べる面(admin の概要 /
+/// ランキング)はこれを使う — 生値は 8 コア機の 400% を「使いすぎ」と誤読させる(実際は
+/// 全体の半分)。分母がサンプルの中に内在するので、起動時にキャッシュしたコア数に依存せず
+/// 陳腐化しない(codex 審査:daemon のコア数が変わっても自動で正しい)。
+fn compute_cpu_pct_host(s: &ContainerStatsResponse) -> Option<f64> {
+    Some(cpu_ratio(s)? * 100.0)
 }
 
 /// 新コンテナが「起動直後に落ちていない」ことを確認する(就緒ではなく **存活** 判定。
