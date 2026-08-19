@@ -30,19 +30,26 @@ RUN bun run build
 # stage がターゲット間で共有され、キャッシュも効く。
 # `--bin tsubomi-server` はサーバの依存グラフだけをコンパイルし、CLI 側をスキップする。
 FROM --platform=$BUILDPLATFORM rust:1.95-slim-trixie AS rust-builder
+# `libc6-dev-<arch>-cross` は**目標アーキの libc ヘッダ / ライブラリ**(sysroot)。cross gcc 本体とは
+# 別パッケージで、`--no-install-recommends` だと落ちる。無いと gcc が宿主の /usr/include に退避して
+# `bits/libc-header-start.h: No such file` で死ぬ(ring / jemalloc の C コンパイル。実測 2026-08-19)。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential gcc-x86-64-linux-gnu gcc-aarch64-linux-gnu \
+    build-essential \
+    gcc-x86-64-linux-gnu libc6-dev-amd64-cross \
+    gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY migrations ./migrations
-# TARGETARCH(amd64/arm64)→ rust の triple。リンカと `cc` crate 用の CC を目標アーキの
-# クロス gcc に向ける(前者が rustc のリンク、後者が jemalloc の C コンパイル)。成果物は
+# TARGETARCH(amd64/arm64)→ rust の triple。**目標 ≠ 構築アーキのときだけ**リンカと `cc` crate 用の
+# CC をクロス gcc に向ける(前者が rustc のリンク、後者が jemalloc / ring の C コンパイル)。native の
+# ときに向けると、cross の sysroot と宿主の native ライブラリが混ざる余地を作るだけで得が無い。成果物は
 # 最終 stage が triple を知らなくて済むよう `/out` の固定パスへ置く。
 # ※ `\` 継続の中に `#` コメント行を挟まない — パーサ次第で後続がシェルのコメントに
 #   飲まれ得るので、説明はこの位置に書く。
 ARG TARGETARCH
+ARG BUILDARCH
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) triple=x86_64-unknown-linux-gnu; cc=x86_64-linux-gnu-gcc ;; \
@@ -50,9 +57,10 @@ RUN set -eux; \
       *) echo "未対応の TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac; \
     rustup target add "$triple"; \
-    linker_var="CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER"; \
-    export "$linker_var=$cc"; \
-    export "CC_$(echo "$triple" | tr '-' '_')=$cc"; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      export "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER=$cc"; \
+      export "CC_$(echo "$triple" | tr '-' '_')=$cc"; \
+    fi; \
     cargo build --release --target "$triple" --bin tsubomi-server; \
     install -D "target/$triple/release/tsubomi-server" /out/tsubomi-server
 
