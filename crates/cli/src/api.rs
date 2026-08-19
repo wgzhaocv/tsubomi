@@ -929,6 +929,25 @@ pub async fn service_metrics(
         .context("failed to parse metrics response")
 }
 
+/// アクセス統計(`tbm service stats`)。未対応サーバは content-type 判定で誤診を防ぐ
+/// (metrics と同じ機構)。
+pub async fn service_stats(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    days: Option<u32>,
+) -> Result<tsubomi_shared::ServiceStatsDto> {
+    let q = days.map(|d| format!("?days={d}")).unwrap_or_default();
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/stats{q}"))
+            .bearer_auth(token),
+    )
+    .await?;
+    ensure_json(&resp, "stats")?;
+    resp.json().await.context("failed to parse stats response")
+}
+
 /// 稼働中コンテナ内で 1 コマンドを **非対話**に実行し、stdout/stderr/exit_code を捕獲して返す
 /// (web の対話ターミナルと対照的に AI / スクリプト / 線上診断向け)。argv はそのまま送る
 /// (shell 解釈なし — pipe/glob は呼び出し側が `sh -c` を組む)。

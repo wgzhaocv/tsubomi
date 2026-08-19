@@ -221,11 +221,38 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
+      # アクセス統計(doc/paas-service-stats-design.md):access log を JSON で stdout へ。
+      # 出力先は指定しない = stdout 既定。輪転は下の logging(json-file)が持つ — 自前の
+      # ファイル管理 / USR1 は作らない(§0-B)。server(stats.rs)が bollard logs で追尾する。
+      # fields は使う欄だけ keep(ログ肥大と余計な情報の保存を防ぐ)。Cf-* ヘッダは CF 配下で
+      # のみ信用する増強材料(採否は server 側 TSUBOMI_STATS_IP_SOURCE — ここでは記録するだけ)。
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.defaultmode=drop
+      - --accesslog.fields.names.RouterName=keep
+      - --accesslog.fields.names.ClientAddr=keep
+      - --accesslog.fields.names.RequestPath=keep
+      - --accesslog.fields.names.RequestMethod=keep
+      - --accesslog.fields.names.DownstreamStatus=keep
+      - --accesslog.fields.names.Duration=keep
+      - --accesslog.fields.names.StartUTC=keep
+      - --accesslog.fields.headers.defaultmode=drop
+      - --accesslog.fields.headers.names.User-Agent=keep
+      - --accesslog.fields.headers.names.Referer=keep
+      - --accesslog.fields.headers.names.Cf-Connecting-Ip=keep
+      - --accesslog.fields.headers.names.Cf-Ipcountry=keep
       # CF Tunnel 越しの実 client IP を Cf-Connecting-Ip → X-Forwarded-For に写すローカルプラグイン
       # (リポジトリに vendor:traefik-plugins/src/...)。web 入口に全体適用し、各 service の ipallow
       # より先に走らせる(ipallow の ipStrategy が書き換え後の XFF から実 client を取る)。
       - --experimental.localPlugins.cloudflared-source-ip.moduleName=github.com/kubitodev/traefik-cloudflared-source-ip
       - --entrypoints.web.http.middlewares=cloudflared-source-ip@file
+    # access log(stdout)の輪転は docker に任せる:上限 50m×3=150MB 焊死。
+    # docker logs API は輪転済みファイルも跨いで読める(tailer の since 追尾が壊れない)。
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     ports:
       - "${TRAEFIK_BIND_ADDR:-127.0.0.1}:80:80"
     volumes:

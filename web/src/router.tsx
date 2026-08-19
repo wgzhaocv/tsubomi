@@ -29,6 +29,7 @@ import ServiceDeploys from "@/routes/ServiceDeploys";
 import ServiceEnv from "@/routes/ServiceEnv";
 import ServiceLayout from "@/routes/ServiceLayout";
 import ServiceLogs from "@/routes/ServiceLogs";
+import ServiceStats from "@/routes/ServiceStats";
 import ServiceOverview from "@/routes/ServiceOverview";
 import ServiceTerminal from "@/routes/ServiceTerminal";
 import Services from "@/routes/Services";
@@ -72,6 +73,7 @@ export const router = createBrowserRouter([
           { path: "injections", element: <Navigate to="../env" replace /> },
           { path: "env", element: <ServiceEnv /> },
           { path: "logs", element: <ServiceLogs /> },
+          { path: "stats", element: <ServiceStats /> },
           { path: "terminal", element: <ServiceTerminal /> },
         ],
       },

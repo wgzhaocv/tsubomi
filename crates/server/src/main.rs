@@ -22,6 +22,7 @@ mod respond;
 mod routes;
 mod services;
 mod state;
+mod stats;
 mod tenant;
 mod trash;
 mod valkey;
@@ -72,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
     // 現実(コンテナ/route)を期望状態へ収束させる第二の保険(restart=unless-stopped が第一)。
     // 起動時フル + 30s ライト(S8)。serve はブロックしない(初回フルは spawn 内の 0 tick)。
     services::reconcile::spawn(state.clone());
+    // アクセス統計:traefik access log(stdout JSON)の追尾 → request_events へ batch INSERT
+    // (doc/paas-service-stats-design.md)。traefik 不在でも backoff 再接続で無害(dev 退路)。
+    stats::spawn(state.clone());
     // 起動時に IP 許可リストを traefik へ収束させる(middleware を必ず定義済みにする。
     // best-effort:書けなくてもサーバは起動する)。
     ipblock::sync_traefik(&state).await;

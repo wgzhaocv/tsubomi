@@ -141,6 +141,32 @@ export type ServiceMetrics = {
   cpu_limit_pending?: boolean | null;
 };
 
+// GET /api/services/:id/stats(アクセス統計)。shared の ServiceStatsDto と対。
+// 口径:requests は全リクエスト(静的資産・API 込み)、visitors は bot 除外・
+// 日単位リセットの匿名 visitor id の distinct(サーバ側コメント参照)。
+export type StatsSlice = { key: string; requests: number };
+export type ServiceStats = {
+  days: number;
+  interval: "hour" | "day";
+  // 集計窓(interval 境界へ切り下げ済み・UTC)。チャートの 0 埋めはこの範囲で行う。
+  from: string;
+  to: string;
+  series: { t: string; requests: number; visitors: number }[];
+  totals: {
+    requests: number;
+    visitors: number;
+    bot_requests: number;
+    avg_duration_ms: number | null;
+  };
+  top_paths: StatsSlice[];
+  statuses: StatsSlice[];
+  devices: StatsSlice[];
+  browsers: StatsSlice[];
+  oses: StatsSlice[];
+  countries: StatsSlice[];
+  referers: StatsSlice[];
+};
+
 // 注入のバインディング(InjectionDto 鏡)。valid=false は失効(注入元が削除済み)。
 export type Injection = {
   id: string;
@@ -166,6 +192,7 @@ export const serviceKeys = {
   env: (id: string) => ["services", id, "env"] as const,
   logs: (id: string) => ["services", id, "logs"] as const,
   metrics: (id: string) => ["services", id, "metrics"] as const,
+  stats: (id: string, days: number) => ["services", id, "stats", days] as const,
 };
 
 // エラー本文(サーバは AppError の日本語メッセージを text で返す)を投げる。
@@ -313,6 +340,15 @@ export function useServiceMetrics(id: string) {
     queryFn: () => getJson<ServiceMetrics>(`/api/services/${id}/metrics`),
     refetchInterval: (q) => (q.state.data?.running ? 20_000 : false),
     retry: false,
+  });
+}
+
+// アクセス統計。days はサーバ側の集計パラメータなので query key に含める(期間切替 = 別 query)。
+// 過去分は不変・新着も分単位で困らないので polling しない(staleTime 既定 60s)。
+export function useServiceStats(id: string, days: number) {
+  return useQuery({
+    queryKey: serviceKeys.stats(id, days),
+    queryFn: () => getJson<ServiceStats>(`/api/services/${id}/stats?days=${days}`),
   });
 }
 

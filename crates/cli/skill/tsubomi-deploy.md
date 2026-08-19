@@ -357,7 +357,9 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    - **実時ログ**は `tbm service logs <名前> --follow`(Ctrl-C / パイプ切断まで tail。`--since 5m`
      で遡り開始)。**稼働指標**は `tbm service metrics <名前>`(CPU / メモリの上限比 / 再起動回数 /
      uptime / OOM = クラッシュループ・OOM の切り分け)。**デプロイ履歴**は `tbm service deploys <名前>`
-     (rollback の戻し先 id 選び)。
+     (rollback の戻し先 id 選び)。**アクセス統計**は `tbm service stats <名前> [--days N]`
+     (リクエスト数 / 訪問者 / デバイス / ブラウザ / Top パス / 国 / リファラ。口径はリクエスト単位 —
+     pageview ではない。訪問者は bot 除外。private や M6 内部リンクの流量は公開入口を通らないので載らない)。
 3. DB / volume / cache を使うなら、実際に「書き込み → 読み戻し」で永続と隔離を確かめる。DB 側の
    読み戻しは **`tbm db query <db名> "<SQL>" --tsv`** が速い(psql 不要。`--tsv` = 行だけの
    タブ区切り・列名なし・NULL は空 — スカラーなら `$(…)` で一発捕获。表計算向けにヘッダ付き CSV は

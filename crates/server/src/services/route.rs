@@ -87,7 +87,7 @@ pub fn write(
     container_port: i32,
     ipallow: bool,
 ) -> AppResult<()> {
-    let name = format!("svc-{service_id}");
+    let name = router_name(service_id);
     let host = service_host(state, subdomain);
     let backend = format!("http://{container_name}:{container_port}");
     // 値はプラットフォーム生成(subdomain は作成時校験・コンテナ名は命名規約)だが、書き込み点でも許可リストで
@@ -338,11 +338,25 @@ fn parse_route_filename(name: &str) -> Option<Uuid> {
     Uuid::parse_str(stem).ok()
 }
 
+/// traefik の router / service 名(`svc-<uuid>`)。access log の `RouterName` にもこの名前が
+/// (provider 接尾辞付きで)出る — 書式と逆関数はこのファイルで一緒に暮らす(stats が使う)。
+pub(crate) fn router_name(service_id: Uuid) -> String {
+    format!("svc-{service_id}")
+}
+
+/// access log の `RouterName`(`svc-<uuid>@<provider>`)から uuid を取り出す
+/// [`router_name`] の逆関数。provider 接尾辞は検証しない(`@file` をベタ書きしない)。
+/// apex / catch-all / registry / middleware の行は prefix 不一致で None。
+pub(crate) fn parse_router_name(name: &str) -> Option<Uuid> {
+    let rest = name.strip_prefix("svc-")?;
+    Uuid::parse_str(rest.split('@').next()?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_catchall_doc, build_service_doc, parse_backend_container, parse_host, parse_ipallow,
-        parse_route_filename,
+        parse_route_filename, parse_router_name, router_name,
     };
     use uuid::Uuid;
 
@@ -450,5 +464,18 @@ mod tests {
         assert_eq!(parse_route_filename(&format!("svc-{id}.yml.tmp")), None);
         assert_eq!(parse_route_filename("svc-not-a-uuid.yml"), None);
         assert_eq!(parse_route_filename(&format!("{id}.yml")), None);
+    }
+
+    #[test]
+    fn router_name_round_trips_through_access_log_form() {
+        let id = Uuid::new_v4();
+        // traefik は provider 接尾辞を付けて記録する — 接尾辞込み・無しの両方で戻ること。
+        assert_eq!(parse_router_name(&format!("{}@file", router_name(id))), Some(id));
+        assert_eq!(parse_router_name(&router_name(id)), Some(id));
+        assert_eq!(parse_router_name(&format!("{}@docker", router_name(id))), Some(id));
+        assert_eq!(parse_router_name("apex@file"), None);
+        assert_eq!(parse_router_name("tsubomi-catchall@file"), None);
+        assert_eq!(parse_router_name("svc-not-a-uuid@file"), None);
+        assert_eq!(parse_router_name("registry@file"), None);
     }
 }

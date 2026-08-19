@@ -703,6 +703,71 @@ pub struct LogsResp {
     pub logs: String,
 }
 
+/// `GET /api/services/:id/stats` のレスポンス。アクセス統計(traefik access log 由来。
+/// doc/paas-service-stats-design.md)。**口径はリクエスト**(静的資産・API 込み — pageview では
+/// ない)。訪問者(visitors)は bot(UA 分類)除外・日単位リセットの匿名 visitor id の distinct。
+/// データが 1 件も無い期間でも 200(空の series / ゼロの totals)で返す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceStatsDto {
+    /// 集計対象の日数(リクエストの `?days`。既定 7)。上限(サーバの保留日数 = 既定 30)を
+    /// 超えた要求は 400 にせず**実効値へ丸めて**ここに返す — 窓の真実は days/from/to が言う。
+    pub days: u32,
+    /// 時系列の刻み。`"hour"`(days<=2)か `"day"`。サーバが days から自動決定する。
+    pub interval: String,
+    /// 集計窓の先頭(interval 境界へ切り下げ済み・UTC)。チャートの 0 埋めはこの範囲で行う
+    /// (クライアントの時計に依存しない)。
+    pub from: DateTime<Utc>,
+    /// 集計窓の末尾 = 現在を interval 境界へ切り下げた刻み(進行中バケット)。
+    pub to: DateTime<Utc>,
+    /// 時系列(interval 刻み、古い順)。イベントの無い刻みは行ごと欠ける(0 埋めは表示側)。
+    pub series: Vec<StatsPointDto>,
+    pub totals: StatsTotalsDto,
+    /// 以下は期間内の内訳 Top10(requests 降順)。key の語彙は各フィールドのコメント参照。
+    /// path はクエリ文字列除去済みの生パス。
+    pub top_paths: Vec<StatsSliceDto>,
+    /// key = `"2xx"` 形のステータス類別。
+    pub statuses: Vec<StatsSliceDto>,
+    /// key = `desktop | mobile | bot | other`。
+    pub devices: Vec<StatsSliceDto>,
+    /// key = ブラウザ名(UA 解析)。不明は `unknown`。
+    pub browsers: Vec<StatsSliceDto>,
+    /// key = OS 名(UA 解析)。不明は `unknown`。
+    pub oses: Vec<StatsSliceDto>,
+    /// key = 国コード(2 字、前段が CF のときだけ入る)。不明行は集計から除外。
+    pub countries: Vec<StatsSliceDto>,
+    /// key = Referer のホスト部。Referer 無しの行は集計から除外。
+    pub referers: Vec<StatsSliceDto>,
+}
+
+/// 時系列の 1 点。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsPointDto {
+    /// 刻みの先頭時刻(UTC、date_trunc)。
+    pub t: DateTime<Utc>,
+    pub requests: i64,
+    /// bot 除外の匿名 visitor id の distinct(刻み内)。
+    pub visitors: i64,
+}
+
+/// 期間全体の合計。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsTotalsDto {
+    pub requests: i64,
+    /// bot 除外・**期間全体**の distinct(series の visitors の合計とは一致しない —
+    /// 同一訪問者が複数の刻みに現れるため。日を跨ぐと visitor id 自体が変わる仕様も同根)。
+    pub visitors: i64,
+    pub bot_requests: i64,
+    /// 平均応答時間(ms)。行が無ければ None。
+    pub avg_duration_ms: Option<f64>,
+}
+
+/// 内訳 Top10 の 1 行。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsSliceDto {
+    pub key: String,
+    pub requests: i64,
+}
+
 /// `GET /api/services/:id/metrics` のレスポンス。稼働中コンテナの 1 サンプル指標 +
 /// inspect 由来のライフサイクル情報。停止 / 未デプロイでも 200(running=false + 各 None)で
 /// 返す — 「なぜ落ちているか」を見るのが主用途なので、不在を答えとして扱う。全フィールドは

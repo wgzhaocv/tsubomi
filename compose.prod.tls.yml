@@ -16,6 +16,24 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
+      # ---- base(compose.prod.yml)の accesslog 設定の再掲 ----
+      # overlay の command は**全置換**(マージされない)ので、ここに無いと accesslog が消えて
+      # 統計が静かにゼロになる(codex 審査 2026-08-20)。変更時は compose.prod.yml と揃えること。
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.defaultmode=drop
+      - --accesslog.fields.names.RouterName=keep
+      - --accesslog.fields.names.ClientAddr=keep
+      - --accesslog.fields.names.RequestPath=keep
+      - --accesslog.fields.names.RequestMethod=keep
+      - --accesslog.fields.names.DownstreamStatus=keep
+      - --accesslog.fields.names.Duration=keep
+      - --accesslog.fields.names.StartUTC=keep
+      - --accesslog.fields.headers.defaultmode=drop
+      - --accesslog.fields.headers.names.User-Agent=keep
+      - --accesslog.fields.headers.names.Referer=keep
+      - --accesslog.fields.headers.names.Cf-Connecting-Ip=keep
+      - --accesslog.fields.headers.names.Cf-Ipcountry=keep
       - --entrypoints.websecure.address=:443
       # :80 は :443 へリダイレクト(LE は TLS-ALPN-01 = :443 上なので干渉しない)。
       - --entrypoints.web.http.redirections.entrypoint.to=websecure

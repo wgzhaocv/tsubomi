@@ -4,6 +4,15 @@ use ipnet::Ipv4Net;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+/// アクセス統計の実 client IP の取り方(stats 設計 §2.1 — 偽装対策の要)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsIpSource {
+    /// CF Tunnel / CF proxy 配下:`Cf-Connecting-Ip` ヘッダを採用(CF が必ず覆写する)。
+    Cf,
+    /// 直連(traefik が入口):peer アドレス(ClientAddr)のみ採用、一切のヘッダを無視。
+    Peer,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: SocketAddr,
@@ -184,6 +193,14 @@ pub struct Config {
     /// db fork(dump + restore)全体の期限(秒。`TSUBOMI_FORK_TIMEOUT_SECS`、既定 300)。
     /// 超過はロールバック(作りかけの新 DB を掃除)して失敗にする。大庫は --schema-only へ誘導。
     pub fork_timeout_secs: u64,
+    /// アクセス統計の実 client IP の取り方(`TSUBOMI_STATS_IP_SOURCE`、既定 `cf`)。
+    /// **部署トポロジで明示分岐** — 「ヘッダがあれば使う」自動判定は偽装口になるので存在しない
+    /// (直連部署では任意クライアントが Cf-Connecting-Ip を自称できる = 訪客数を投毒できる。
+    /// CF 配下でヘッダが信用できるのは CF が必ず覆写するから — stats 設計 §2.1)。
+    pub stats_ip_source: StatsIpSource,
+    /// アクセス統計(request_events)の保留日数(`TSUBOMI_STATS_RETENTION_DAYS`、既定 30)。
+    /// gc の housekeeping(1h tick)が期限切れ行を DELETE する。
+    pub stats_retention_days: u32,
     /// **危険操作の確認コードを log に出すことを明示的に許す**(`TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES`、
     /// 既定 false)。dev で Resend 未契約のとき owner がコードを使えるようにする退路。**本番では絶対に
     /// 立てない** — log アクセス権だけで owner の危険操作(他人リソースの stop/delete)を完遂できてしまう。
@@ -569,6 +586,22 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
+        let stats_ip_source = match std::env::var("TSUBOMI_STATS_IP_SOURCE").as_deref() {
+            Err(_) | Ok("cf") => StatsIpSource::Cf,
+            Ok("peer") => StatsIpSource::Peer,
+            Ok(v) => anyhow::bail!("TSUBOMI_STATS_IP_SOURCE は cf | peer のみ: {v}"),
+        };
+        let stats_retention_days: u32 = std::env::var("TSUBOMI_STATS_RETENTION_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        // 0 は「過去全削除」、巨大値は i32 变换で負に化けて同じく全削除になる(codex 審査
+        // 2026-08-20)。掃除 SQL に渡る前に起動時 fail-fast(domain / master_key と同じ作法)。
+        if !(1..=3650).contains(&stats_retention_days) {
+            anyhow::bail!(
+                "TSUBOMI_STATS_RETENTION_DAYS は 1〜3650 で指定してください: {stats_retention_days}"
+            );
+        }
         // 危険操作コードの log 出力許可(dev 退路。本番では立てない — §admin/actions.rs)。
         let dev_insecure_log_action_codes = std::env::var("TSUBOMI_DEV_INSECURE_LOG_ACTION_CODES")
             .map(|v| v == "true" || v == "1")
@@ -627,6 +660,8 @@ impl Config {
             disk_critical_pct,
             ready_timeout_secs,
             fork_timeout_secs,
+            stats_ip_source,
+            stats_retention_days,
             dev_insecure_log_action_codes,
         })
     }

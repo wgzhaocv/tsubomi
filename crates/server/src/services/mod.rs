@@ -212,6 +212,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/logs", get(logs))
         .route("/services/{id}/logs/stream", get(logs_stream))
         .route("/services/{id}/metrics", get(metrics))
+        .route("/services/{id}/stats", get(crate::stats::stats))
         .route("/services/{id}/probe", get(probe))
         .route("/services/{id}/exec", post(exec))
         .route("/services/{id}/terminal", get(terminal))

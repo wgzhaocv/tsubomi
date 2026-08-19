@@ -27,11 +27,14 @@ export function MetricRow({
   pct,
   detail,
   loading,
+  mono = false,
 }: {
   label: string;
   pct?: number | null;
   detail: string;
   loading: boolean;
+  /** ラベルを等幅・切り詰め表示(パス / URL などの生値向け。統計の内訳が使う)。 */
+  mono?: boolean;
 }) {
   // 分母が無い行(上限なしの CPU など)は最初からバーを出さない。loading 中だけ
   // Skeleton のバーを見せて後から消すと行の高さが跳ねる。
@@ -39,7 +42,16 @@ export function MetricRow({
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-bold text-foreground">{label}</span>
+        <span
+          className={
+            mono
+              ? "min-w-0 truncate font-mono text-[13px] font-semibold text-foreground"
+              : "min-w-0 truncate text-sm font-bold text-foreground"
+          }
+          title={label}
+        >
+          {label}
+        </span>
         {loading ? (
           <Skeleton className="h-4 w-20" />
         ) : (

@@ -43,6 +43,7 @@ fn spawn_housekeeping(state: AppState) {
             sweep_auth(&state).await;
             sweep_trash(&state).await;
             check_disk(&state).await;
+            crate::stats::sweep(&state).await;
         }
     });
 }

@@ -2139,6 +2139,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a0e75113e14dc5acb068cd0786884f214f1312650a3d36d269f5c4f3cdee8a2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3311,6 +3323,7 @@ dependencies = [
  "tsubomi-shared",
  "url",
  "uuid",
+ "woothee",
 ]
 
 [[package]]
@@ -4016,6 +4029,16 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "woothee"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "896174c6a4779d4d7d4523dd27aef7d46609eda2497e370f6c998325c6bf6971"
+dependencies = [
+ "lazy_static",
+ "regex",
 ]
 
 [[package]]

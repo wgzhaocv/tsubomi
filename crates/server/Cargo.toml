@@ -41,3 +41,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tsubomi-shared = { version = "0.1.0", path = "../shared" }
 url = "2.5.8"
 uuid = { version = "1.23.3", features = ["v4", "serde"] }
+woothee = "0.13.0"

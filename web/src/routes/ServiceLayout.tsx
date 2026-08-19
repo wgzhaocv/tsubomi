@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   ArrowLeft,
+  ChartColumn,
   History,
   LayoutDashboard,
   ScrollText,
@@ -29,6 +30,7 @@ const NAV = [
   { to: "deploys", end: false, label: "デプロイ", icon: History },
   { to: "env", end: false, label: "環境変数", icon: SlidersHorizontal },
   { to: "logs", end: false, label: "ログ", icon: ScrollText },
+  { to: "stats", end: false, label: "統計", icon: ChartColumn },
   { to: "terminal", end: false, label: "ターミナル", icon: SquareTerminal },
 ] as const;
 

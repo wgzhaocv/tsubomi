@@ -35,6 +35,24 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.file.watch=true
       - --entrypoints.web.address=:80
+      # ---- base(compose.prod.yml)の accesslog 設定の再掲 ----
+      # overlay の command は**全置換**(マージされない)ので、ここに無いと accesslog が消えて
+      # 統計が静かにゼロになる(codex 審査 2026-08-20)。変更時は compose.prod.yml と揃えること。
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.defaultmode=drop
+      - --accesslog.fields.names.RouterName=keep
+      - --accesslog.fields.names.ClientAddr=keep
+      - --accesslog.fields.names.RequestPath=keep
+      - --accesslog.fields.names.RequestMethod=keep
+      - --accesslog.fields.names.DownstreamStatus=keep
+      - --accesslog.fields.names.Duration=keep
+      - --accesslog.fields.names.StartUTC=keep
+      - --accesslog.fields.headers.defaultmode=drop
+      - --accesslog.fields.headers.names.User-Agent=keep
+      - --accesslog.fields.headers.names.Referer=keep
+      - --accesslog.fields.headers.names.Cf-Connecting-Ip=keep
+      - --accesslog.fields.headers.names.Cf-Ipcountry=keep
       - --experimental.localPlugins.cloudflared-source-ip.moduleName=github.com/kubitodev/traefik-cloudflared-source-ip
       - --entrypoints.web.http.middlewares=cloudflared-source-ip@file
       # ---- 直接接続入口(この override 固有)----

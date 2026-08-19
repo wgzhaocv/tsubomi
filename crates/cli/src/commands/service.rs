@@ -124,6 +124,14 @@ pub enum ServiceCmd {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
     },
+    /// アクセス統計(リクエスト数 / 訪問者 / デバイス / ブラウザ / Top パス / 国)
+    Stats {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// 集計日数(既定 7。上限はサーバの保留日数 = 既定 30)
+        #[arg(long)]
+        days: Option<u32>,
+    },
     /// デプロイ履歴(id / sha / 状態 / 時刻)。rollback の戻し先選びに使う
     Deploys {
         /// 対象サービスの表示名(`tbm service list` で確認)
@@ -414,6 +422,15 @@ pub async fn run(
                 print_json(&m)?;
             } else {
                 print_metrics(&name, &m, &svc);
+            }
+        }
+        ServiceCmd::Stats { name, days } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let s = api::service_stats(&c, &server_url, &token, &id, days).await?;
+            if json {
+                print_json(&s)?;
+            } else {
+                print_stats(&name, &s);
             }
         }
         ServiceCmd::Deploys { name } => {
@@ -1246,6 +1263,42 @@ async fn follow_logs(
         // 軽い待機を挟んで再接続(切断直後の連打を避ける)。
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
+}
+
+/// アクセス統計の text 表示。口径(リクエスト単位・訪問者は bot 除外)を必ず言う —
+/// Vercel の pageview と取り違えたまま報告されるのが一番の誤診源。
+fn print_stats(name: &str, s: &tsubomi_shared::ServiceStatsDto) {
+    println!("{name}: 直近 {} 日のアクセス統計(リクエスト単位・訪問者は bot 除外)", s.days);
+    println!(
+        "  リクエスト: {}  訪問者: {}  bot: {}  平均応答: {}",
+        s.totals.requests,
+        s.totals.visitors,
+        s.totals.bot_requests,
+        s.totals
+            .avg_duration_ms
+            .map(|v| format!("{v:.0}ms"))
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    if s.totals.requests == 0 {
+        println!("  (期間内のアクセスはありません)");
+        return;
+    }
+    let section = |title: &str, rows: &[tsubomi_shared::StatsSliceDto]| {
+        if rows.is_empty() {
+            return;
+        }
+        println!("  {title}:");
+        for r in rows.iter().take(5) {
+            println!("    {:>7}  {}", r.requests, r.key);
+        }
+    };
+    section("Top パス", &s.top_paths);
+    section("ステータス", &s.statuses);
+    section("デバイス", &s.devices);
+    section("ブラウザ", &s.browsers);
+    section("OS", &s.oses);
+    section("国", &s.countries);
+    section("リファラ", &s.referers);
 }
 
 /// metrics の text 表示(json は DTO 素通し)。
