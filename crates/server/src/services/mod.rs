@@ -319,8 +319,13 @@ fn check_cpu_limit_millis(state: &AppState, cpu: i32) -> AppResult<()> {
         } else {
             ""
         };
+        // **両方の単位で言う**。この列の単位は millicores だが、入口の多くは `tbm service limits
+        // --cpus` / web の入力欄で **コア数**を扱う。片方だけ書くと読み手が 1000 で割る作業を
+        // 引き受けることになり、「次の一手を含める」に反する(f64 の {} は 8.0 を "8" と出す)。
         return Err(AppError::BadRequest(format!(
-            "cpu_limit_millis は {CPU_LIMIT_MILLIS_MIN}〜{max}(millicores、1000 = 1 CPU)にしてください{note}"
+            "cpu_limit_millis は {CPU_LIMIT_MILLIS_MIN}〜{max}(millicores、1000 = 1 CPU)にしてください{note}。             コア数で指定する入口(`tbm service limits --cpus` / web)では {}〜{} です",
+            CPU_LIMIT_MILLIS_MIN as f64 / 1000.0,
+            max as f64 / 1000.0
         )));
     }
     Ok(())

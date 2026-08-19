@@ -16,18 +16,45 @@ COPY web/ ./
 RUN bun run build
 
 # ---- rust:サーババイナリをビルド ----
-# jemalloc-sys は jemalloc を C からコンパイルするので、ビルダーには C
-# ツールチェーン(build-essential = gcc + make)が要る。`--bin tsubomi-server`
-# はサーバの依存グラフだけをコンパイルし、CLI 側の依存をスキップする。
-FROM rust:1.95-slim-trixie AS rust-builder
+# **ビルドホストの native アーキで動かし、rust の交差編譯で目標アーキを出す**
+# (`--platform=$BUILDPLATFORM` + `--target`)。web stage と同じ理由 + もう一つ:
+# ここを目標アーキで動かすと amd64 側の `cargo build` が **QEMU エミュレーション下で
+# Rust をフルコンパイル**することになり、multi-arch ビルドが桁違いに遅くなる
+# (2026-08-19:これが Hub への multi-arch push を諦めていた実際の理由)。加えて
+# 目標アーキの `rust:1.95`(1.14GB)を Hub から取る必要も消える = 回線が細い開発機で
+# 詰まる箇所が 1 つ減る。
+#
+# jemalloc-sys は jemalloc を C からコンパイルするので、目標アーキ用の C クロス
+# ツールチェーンが要る(Debian の gcc-<arch>-linux-gnu。zig は使わない — macOS 宿主の
+# cargo-zigbuild は sqlx の proc-macro dylib を壊す実測あり)。両アーキ分を入れておくと
+# stage がターゲット間で共有され、キャッシュも効く。
+# `--bin tsubomi-server` はサーバの依存グラフだけをコンパイルし、CLI 側をスキップする。
+FROM --platform=$BUILDPLATFORM rust:1.95-slim-trixie AS rust-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    build-essential gcc-x86-64-linux-gnu gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 COPY migrations ./migrations
-RUN cargo build --release --bin tsubomi-server
+# TARGETARCH(amd64/arm64)→ rust の triple。リンカと `cc` crate 用の CC を目標アーキの
+# クロス gcc に向ける(前者が rustc のリンク、後者が jemalloc の C コンパイル)。成果物は
+# 最終 stage が triple を知らなくて済むよう `/out` の固定パスへ置く。
+# ※ `\` 継続の中に `#` コメント行を挟まない — パーサ次第で後続がシェルのコメントに
+#   飲まれ得るので、説明はこの位置に書く。
+ARG TARGETARCH
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu; cc=x86_64-linux-gnu-gcc ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; cc=aarch64-linux-gnu-gcc ;; \
+      *) echo "未対応の TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "$triple"; \
+    linker_var="CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER"; \
+    export "$linker_var=$cc"; \
+    export "CC_$(echo "$triple" | tr '-' '_')=$cc"; \
+    cargo build --release --target "$triple" --bin tsubomi-server; \
+    install -D "target/$triple/release/tsubomi-server" /out/tsubomi-server
 
 # ---- ランタイム ----
 # debian-slim に PGDG の postgresql-client-18 だけを足す。M1 のバックアップ /
@@ -53,7 +80,7 @@ RUN apt-get update \
 # debian trixie の iptables は既定で **nft バックエンド** = host(v1.8.7 nf_tables)と一致するので
 # 同じテーブルを操作できる(legacy だと別テーブルで無効化する)。compose 側で cap_add: NET_ADMIN が要る。
 WORKDIR /app
-COPY --from=rust-builder /build/target/release/tsubomi-server /usr/local/bin/tsubomi-server
+COPY --from=rust-builder /out/tsubomi-server /usr/local/bin/tsubomi-server
 COPY --from=web-builder /web/dist /app/web/dist
 EXPOSE 9090
 # サーバは web/dist から SPA を配信し(TSUBOMI_WEB_DIR デフォルト、/app 相対)、
