@@ -237,17 +237,20 @@ function Chart({
           />
         ))}
         {buckets.map((b, i) => {
-          const bw = x.bandwidth();
-          const bx = x(b.t) ?? 0;
-          const reqH = yMax - y(b.requests);
-          const visH = yMax - y(b.visitors);
+          // 2 系列は**並列**の双柱(重ね描きは値が近いと縞模様の 1 本に見えて系列が読めない —
+          // ユーザ報告 2026-08-20)。band が広い時(バケット数が少ない疎データ)は上限幅で
+          // 中央寄せし、1 本だけの「板」にしない。
+          const band = x.bandwidth();
+          const bw = Math.min(band, 48);
+          const bx = (x(b.t) ?? 0) + (band - bw) / 2;
+          const half = bw * 0.46;
           return (
             <Group key={b.t}>
               {/* hover の当たり判定は列全体(細い棒だけだと狙いにくい)。 */}
               <Bar
-                x={bx - (bw * 0.25) / 2}
+                x={x(b.t) ?? 0}
                 y={0}
-                width={bw * 1.25}
+                width={band}
                 height={yMax}
                 fill={hover === i ? "rgba(196,184,158,0.18)" : "transparent"}
                 onMouseEnter={() => setHover(i)}
@@ -256,19 +259,19 @@ function Chart({
               <Bar
                 x={bx}
                 y={y(b.requests)}
-                width={bw}
-                height={reqH}
-                rx={Math.min(3, bw / 2)}
+                width={half}
+                height={yMax - y(b.requests)}
+                rx={Math.min(3, half / 2)}
                 fill="#0CC0B5"
                 pointerEvents="none"
               />
               {b.visitors > 0 && (
                 <Bar
-                  x={bx + bw * 0.3}
+                  x={bx + bw - half}
                   y={y(b.visitors)}
-                  width={bw * 0.4}
-                  height={visH}
-                  rx={Math.min(2, bw / 4)}
+                  width={half}
+                  height={yMax - y(b.visitors)}
+                  rx={Math.min(3, half / 2)}
                   fill="#794f27"
                   pointerEvents="none"
                 />
