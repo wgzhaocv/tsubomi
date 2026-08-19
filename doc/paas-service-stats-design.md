@@ -142,9 +142,11 @@ CREATE INDEX request_events_service_ts ON request_events (service_id, ts);
    静かにゼロ**になる。3 枚全部に再掲済み — 以後 accesslog 設定を変えるときは base + 3 overlay +
    dev infra の **5 箇所**を揃えること。
 2. **`just ship` は traefik を再作成しない**(`up -d --no-recreate` + server 単換 = 無瞬断の代償)。
-   **この機能の初回上線時だけ**、明示的に traefik を上げ直す:
-   `docker compose -f compose.prod.yml -f compose.prod.cache-public.yml -f compose.prod.registry-direct.yml up -d traefik`
-   (数秒の全 app 瞬断が出るので深夜帯推奨。以後の ship では不要)。
+   **既存機での初回上線時だけ**、明示的に traefik を上げ直す(**自分の部署が使っている overlay の組**を
+   全部 `-f` に載せること — 組が欠けると別の設定に巻き戻る):
+   `docker compose --env-file .env.production -f compose.prod.yml -f <使用中の overlay…> up -d traefik`
+   (数秒の全 app 瞬断が出るので深夜帯推奨。以後の ship では不要。**新規 VPS への部署では不要** —
+   最初から accesslog 入りの compose で作成されるため)。
 
 ## 6. 地雷
 

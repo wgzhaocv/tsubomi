@@ -460,6 +460,26 @@ UTF-8、配信時に CP932 へ転碼(cli_release.rs。cmd は OEM コードペ�
 配信側は unmappable を tracing::error で見張る。旧版互換は全撤去(ユーザ定調:利用者が付くまで
 互換は負債)。
 
+**subdomain 後の追加(マイルストーン外):service アクセス統計(2026-08-20、server v60 / tbm 1.1.2)**。
+Vercel 風の per-service 統計を**平台自身の機能**として(CF 非依存・ユーザ app 無改変・請求路径零遅延)。
+背骨:traefik access log(stdout JSON。compose は **base + 3 overlay + dev infra の 5 箇所** —
+overlay の command は**全置換**なので再掲必須、欠けると統計が静かにゼロ)→ `stats.rs` の tailer
+(bollard logs follow + timestamps、offset は platform_config `stats_tail_since`・INSERT 成功後にのみ前進 =
+欠落より重複、16KiB partial frame は \n まで再構成、満杯 flush 失敗は bail → backoff 再読、境界 dedup は
+「探索中のみ ts < saved」)→ `request_events`(migration `20260819000002`、FK CASCADE = purge 自動連鎖、
+BRIN(ts)、保留 `TSUBOMI_STATS_RETENTION_DAYS` 既定 30・起動時 1〜3650 強制)→ **クエリ時集計**
+(事前集計なし。単一 REPEATABLE READ RO tx、`date_trunc(…,'UTC')`、窓は interval 境界揃えで DTO が
+from/to を返し web の 0 埋めが従う、days 超過は 400 でなく実効値へ丸め)。**IP は保存しない**
+(visitor = sha256(UTC日付+IP+UA) 先頭 16B の日次ローテ匿名 hash、bot は UA 分類で訪客から除外)。
+**実 IP は `TSUBOMI_STATS_IP_SOURCE` で明示分岐**(cf=Cf-Connecting-Ip / peer=ClientAddr のみ。
+「ヘッダがあれば使う」自動判定は偽装口なので無い — 直 VPS 部署は peer、.env.example / m3 §13.B)。
+UA 解析 = woothee(device/browser/os)。入口:web 詳細「統計」タブ(visx = 初のチャート、期間
+24h/7日/30日)+ `GET /services/{id}/stats`(1 端点 1 応答)+ `tbm service stats`。口径はリクエスト
+(pageview ではない)、M6 内链・private・探活は構造的に不計上。router 名の書式と逆関数は
+`route.rs::{router_name,parse_router_name}` に同居。既存機の初回上線のみ traefik 明示再作成が要る
+(`just ship` は traefik を再作成しない)。品質検証 = 4 simplify + codex ultra で真バグ 10 件を
+出荷前回収。実装級・受容・地雷は **`doc/paas-service-stats-design.md`**。
+
 ## 重要な約束事
 
 - **ドキュメント(md)もコードコメントも日本語で書く**(設計議論の中国語

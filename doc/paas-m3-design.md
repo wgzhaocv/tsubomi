@@ -827,6 +827,8 @@ TSUBOMI_DB_SSLMODE=require
   検証 = ワイルドカード A だけで足り、DNS provider token 不要。§11 決定 G)。:80/:443 公網到達。
 - `.env`:`TSUBOMI_TLS=true` / `TSUBOMI_ACME_EMAIL=<LE メール>` / `TRAEFIK_BIND_ADDR=0.0.0.0`。apex も traefik
   前段にするなら `TSUBOMI_BIND_ADDR=0.0.0.0:9090` + ファイアウォールで :9090 を公網から塞ぐ(公開は :80/:443 だけ)。
+  **アクセス統計の IP ソースも `TSUBOMI_STATS_IP_SOURCE=peer` にする**(既定 cf は CF 配下用。直 VPS で cf の
+  ままだと任意クライアントが Cf-Connecting-Ip を自称して訪客数を投毒できる — stats 設計 §2.1)。
 - 起こす:base + override → `docker compose --env-file .env.production -f compose.prod.yml -f compose.prod.tls.yml up -d`
   (他の overlay も在れば全部 `-f` に — `just ship` は自動で全載せ)。
   traefik が apex / registry / 各 service の LE 証明書を初回アクセス時に取得。
