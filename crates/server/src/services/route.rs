@@ -37,6 +37,12 @@ pub(crate) fn push_tls_block(doc: &mut String, tls: bool) {
     }
 }
 
+/// service の公開ホスト名 `<subdomain>.<domain>`(write の rule と reconcile の drift 期望値の
+/// 単一真源 — 組み立てが二箇所に割れると host drift 判定が永遠に不一致になり得る)。
+pub(crate) fn service_host(state: &AppState, subdomain: &str) -> String {
+    format!("{}.{}", subdomain, state.config.domain)
+}
+
 /// service の動的設定ファイルのパス(`<dir>/svc-<id>.yml`)。
 fn route_path(state: &AppState, service_id: Uuid) -> PathBuf {
     state
@@ -82,7 +88,7 @@ pub fn write(
     ipallow: bool,
 ) -> AppResult<()> {
     let name = format!("svc-{service_id}");
-    let host = format!("{}.{}", subdomain, state.config.domain);
+    let host = service_host(state, subdomain);
     let backend = format!("http://{container_name}:{container_port}");
     // 値はプラットフォーム生成(subdomain は作成時校験・コンテナ名は命名規約)だが、書き込み点でも許可リストで
     // 最終確認する(縦深防御 — 上游が緩んでも YAML 注入にしない)。
@@ -252,13 +258,19 @@ fn ipallow_ref() -> String {
     format!("{}@file", crate::ipblock::TRAEFIK_MIDDLEWARE)
 }
 
-/// `svc-<id>.yml` の現実状態を読む:`(backend コンテナ名, ipallow 有無)`。ファイル無し / 解析不可は None。
-/// reconcile の drift 判定は組で使うので **1 回の読みで両方**返す(二重読みは同一ファイルの別版を
-/// 見得る + 無駄 I/O)。ipallow の不一致検出は public↔company の切替書込が失敗した fail-open
-/// ドリフトを塞ぐ(公開範囲設計 §0-F)。
-pub(crate) fn current(state: &AppState, service_id: Uuid) -> Option<(String, bool)> {
+/// `svc-<id>.yml` の現実状態を読む:`(host, backend コンテナ名, ipallow 有無)`。ファイル無し /
+/// 解析不可は None。reconcile の drift 判定は組で使うので **1 回の読みで全部**返す(二重読みは
+/// 同一ファイルの別版を見得る + 無駄 I/O)。ipallow の不一致検出は public↔company の切替書込が
+/// 失敗した fail-open ドリフトを塞ぎ(公開範囲設計 §0-F)、host の不一致検出は subdomain 変更の
+/// 書込失敗(旧 host のまま = 新 URL が永久に 404)を塞ぐ — どちらも「DB は更新済みなのに現実が
+/// 旧のまま」の同型。
+pub(crate) fn current(state: &AppState, service_id: Uuid) -> Option<(String, String, bool)> {
     let content = std::fs::read_to_string(route_path(state, service_id)).ok()?;
-    Some((parse_backend_container(&content)?, parse_ipallow(&content)))
+    Some((
+        parse_host(&content)?,
+        parse_backend_container(&content)?,
+        parse_ipallow(&content),
+    ))
 }
 
 /// route ファイルが存在するか(private の期望状態 =「不存在」の判定用。読まずに stat だけ)。
@@ -269,6 +281,25 @@ pub(crate) fn exists(state: &AppState, service_id: Uuid) -> bool {
 /// route 内容に ipallow middleware の `@file` 参照があるか(`build_service_doc` の middlewares 行の逆)。
 fn parse_ipallow(content: &str) -> bool {
     content.contains(&ipallow_ref())
+}
+
+/// `rule: "Host(`<host>`)"` 行から `<host>` を取り出す純粋関数(`build_service_doc` の rule 行の逆)。
+/// `write` の出力フォーマットと密結合なので、両者がズレたら下のテストが落ちる。
+fn parse_host(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let Some(rest) = line.trim().strip_prefix("rule:") else {
+            continue;
+        };
+        let host = rest
+            .trim()
+            .trim_matches('"')
+            .strip_prefix("Host(`")?
+            .strip_suffix("`)")?;
+        if !host.is_empty() {
+            return Some(host.to_string());
+        }
+    }
+    None
 }
 
 /// `- url: "http://<name>:<port>"` 行から `<name>` を取り出す純粋関数(`write` の loadBalancer
@@ -310,7 +341,7 @@ fn parse_route_filename(name: &str) -> Option<Uuid> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_catchall_doc, build_service_doc, parse_backend_container, parse_ipallow,
+        build_catchall_doc, build_service_doc, parse_backend_container, parse_host, parse_ipallow,
         parse_route_filename,
     };
     use uuid::Uuid;
@@ -327,10 +358,12 @@ mod tests {
         // 差分は middlewares 行 1 行だけ(entrypoint / rule / backend は不変)。
         let diff: Vec<&str> = company.lines().filter(|l| !public.contains(l)).collect();
         assert_eq!(diff, vec!["      middlewares: [\"tsubomi-ipallow@file\"]"]);
-        // parse_backend_container との往復(write フォーマット密結合の回帰)。
+        // parse_backend_container / parse_host との往復(write フォーマット密結合の回帰)。
         assert_eq!(parse_backend_container(&public).as_deref(), Some("c"));
-        // ipallow.yml など無関係な内容は false。
+        assert_eq!(parse_host(&public).as_deref(), Some("a.example.com"));
+        // ipallow.yml など無関係な内容は false / None。
         assert!(!parse_ipallow("http:\n  middlewares: {}\n"));
+        assert_eq!(parse_host("http:\n  middlewares: {}\n"), None);
     }
 
     #[test]

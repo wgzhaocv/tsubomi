@@ -51,6 +51,7 @@ export default function Services() {
   const [visibility, setVisibility] = useState("auto");
   const [stateful, setStateful] = useState(false);
   const [memory, setMemory] = useState("");
+  const [subdomain, setSubdomain] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
   const submit = () => {
@@ -77,6 +78,7 @@ export default function Services() {
         visibility: visibility === "auto" ? undefined : visibility,
         stateful: stateful || undefined,
         memory_mb: memNum,
+        subdomain: subdomain.trim() || undefined,
       },
       {
         onSuccess: (svc) => {
@@ -86,6 +88,7 @@ export default function Services() {
           setVisibility("auto");
           setStateful(false);
           setMemory("");
+          setSubdomain("");
           setFormError(null);
           setModal({ kind: "setup", result: svc });
         },
@@ -229,7 +232,7 @@ export default function Services() {
               value={name}
               autoFocus
               onChange={(e) => setName(e.target.value)}
-              description="表示名です。GitHub リポジトリ名には自動生成の subdomain を使います。"
+              description="表示名です。GitHub リポジトリ名には subdomain(詳細設定で指定可・省略時は自動生成)を使います。"
             />
             <Button
               type="text"
@@ -279,6 +282,13 @@ export default function Services() {
                   value={memory}
                   onChange={(e) => setMemory(e.target.value)}
                   description="コンテナのメモリ上限(128〜4096、既定 1024)。"
+                />
+                <Input
+                  label="サブドメイン"
+                  placeholder="省略 = 名前から自動生成"
+                  value={subdomain}
+                  onChange={(e) => setSubdomain(e.target.value)}
+                  description="公開 URL のサブドメイン(小文字英数と「-」・英字始まり・「-」終わり不可・50 字以内。www / api / db 等の予約語と tsubomi- 始まりは不可)。GitHub リポジトリ名にもこの値を使います。"
                 />
               </div>
             )}

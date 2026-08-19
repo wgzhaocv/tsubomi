@@ -43,6 +43,8 @@
   入れる。granularity は per-link(A が注入した相手だけ A の網に来る)= 「接続は明示バインディングに従う」
   という tsubomi 全体の作法と一致。
 - **§0-B 別名** = B の subdomain(全局 UNIQUE・DNS 安全・予約語で infra 名と衝突しない)。
+  ※ 2026-08-19 以降 subdomain は**変更可能**になった — 別名の収束は変更端点の
+  `realias_as_callee`(即時)+ reconcile の別名検査(≤30s)。`doc/paas-service-subdomain-design.md`。
 - **§0-C 内部 URL** = `http://<subdomain>:<container_port>`(http 固定。理由は §9)。
 - **§0-D 同一 owner 限定**は**自動で担保**される(`create_injection` の源クエリが既に `user_id=$2`)。
   追加で**自注入禁止**だけ足す。

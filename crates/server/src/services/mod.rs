@@ -41,7 +41,77 @@ use uuid::Uuid;
 
 const MAX_NAME_LEN: usize = 64;
 /// subdomain 生成の予約語(プラットフォーム / インフラのホスト名と衝突させない)。
-const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "api"];
+/// `db` / `cache` は公開 DB / 公開 cache の入口名(`db.<domain>` = pgbouncer 証書の公開名、
+/// `cache.<domain>`)— 取られると traefik の Host router がそれらの个別 DNS と衝突し得る。
+const RESERVED_SUBDOMAINS: &[&str] = &["paas", "registry", "traefik", "www", "api", "db", "cache"];
+/// subdomain の最大長(slugify の切り詰めと同じ値。DNS ラベル上限 63 より短い節度)。
+const MAX_SUBDOMAIN_LEN: usize = 50;
+
+/// subdomain が予約済みか。固定語に加えて **`tsubomi-` 前綴**も予約 — subdomain は M6 リンクで
+/// per-service 私網の docker 網別名になるため、私網に同居する infra / app コンテナ名
+/// (`tsubomi-pgbouncer` / `tsubomi-valkey` / `tsubomi-<uuid>`)と docker DNS で衝突させない。
+fn reserved_subdomain(s: &str) -> bool {
+    RESERVED_SUBDOMAINS.contains(&s) || s.starts_with("tsubomi-")
+}
+
+/// 起動時の残余暗穴チェック:`tsubomi-` 前綴の予約は**新規のみ**を塞ぐ — 旧規則で通った
+/// 既存 subdomain が残っていれば、その M6 別名は今後も私網で infra / app コンテナ名と
+/// DNS 衝突し得るので warn で可視化する(自動改名はしない — 判断は人間。
+/// `log_orphan_tenant_dbs` と同型の起動時一回)。
+pub async fn warn_reserved_subdomains(state: &AppState) {
+    let rows: Vec<(String,)> = match sqlx::query_as(
+        "SELECT s.subdomain FROM service_details s
+           JOIN resources r ON r.id = s.resource_id
+          WHERE r.deleted_at IS NULL AND s.subdomain LIKE 'tsubomi-%'",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = ?e, "予約 subdomain の残余チェックに失敗");
+            return;
+        }
+    };
+    for (sub,) in rows {
+        tracing::warn!(
+            subdomain = %sub,
+            "既存 service の subdomain が予約前綴 `tsubomi-` に該当します(私網の infra/app コンテナ名と DNS 衝突し得る)。`tbm service subdomain` での改名を推奨"
+        );
+    }
+}
+
+/// subdomain 409 の文言(create の明示指定 / 変更端点で共用)。subdomain の UNIQUE は
+/// display_name と違い**ゴミ箱内も占有**する(表級 UNIQUE のまま — 公開 URL の同一性は
+/// 復元で戻るべきもの)ので、一覧に見えない占有者への次の一手を含める。
+fn subdomain_taken_msg(sub: &str) -> String {
+    format!(
+        "subdomain '{sub}' は既に使われています(ゴミ箱内の service も占有します — `tbm trash list` で確認)。別の名前を指定してください"
+    )
+}
+
+/// ユーザ明示指定の subdomain の検証(create / 変更端点で共用)。規則は slugify の出力形と
+/// 一致させる:小文字英数と `-`・英字始まり・`-` 終わり禁止・50 字以内。予約語も弾く。
+/// この集合は `route::ensure_yaml_embeddable` の許可リストの部分集合(YAML 埋め込み安全)。
+fn validate_subdomain(s: &str) -> AppResult<()> {
+    let rule = format!(
+        "subdomain は小文字英数と '-'(英字始まり・'-' 終わり不可)で {MAX_SUBDOMAIN_LEN} 文字以内にしてください"
+    );
+    let ok = !s.is_empty()
+        && s.chars().count() <= MAX_SUBDOMAIN_LEN
+        && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && !s.ends_with('-');
+    if !ok {
+        return Err(AppError::BadRequest(format!("{rule}: {s:?}")));
+    }
+    if reserved_subdomain(s) {
+        return Err(AppError::BadRequest(format!(
+            "subdomain '{s}' は予約されています(プラットフォーム / インフラ名と衝突)。別の名前にしてください"
+        )));
+    }
+    Ok(())
+}
 /// deploy_key の乱数バイト数(base64url で ≈43 字)。HMAC の鍵そのもの。
 const DEPLOY_KEY_BYTES: usize = 32;
 /// プラットフォームの HTTP 契約港(PORT env の既定 = workflow / traefik の想定)。visibility 推導の基準。
@@ -147,6 +217,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/terminal", get(terminal))
         .route("/services/{id}/rollback", post(rollback))
         .route("/services/{id}/visibility", post(set_visibility))
+        .route("/services/{id}/subdomain", post(set_subdomain))
         .route("/services/{id}/limits", post(set_limits))
         .route("/services/{id}/stateful", post(set_stateful))
         .route("/services/{id}/deploys", get(deploys))
@@ -231,6 +302,11 @@ pub async fn get_one(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<ServiceDto>> {
+    fetch_service_dto(&state, auth.user_id, id).await.map(Json)
+}
+
+/// 自分の service 1 件の DTO を引く(get_one / set_subdomain の冪等応答で共用)。
+async fn fetch_service_dto(state: &AppState, user_id: Uuid, id: Uuid) -> AppResult<ServiceDto> {
     let row: Option<ServiceRow> = sqlx::query_as(
         "SELECT r.id, r.display_name, r.anon_seq, r.created_at,
                 s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
@@ -239,18 +315,18 @@ pub async fn get_one(
           WHERE r.id = $1 AND r.user_id = $2 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
     .bind(id)
-    .bind(auth.user_id)
+    .bind(user_id)
     .fetch_optional(&state.db)
     .await?;
     row.map(|r| service_row_to_dto(r, &state.config))
-        .map(Json)
         .ok_or(AppError::NotFound)
 }
 
-/// `PATCH /api/services/:id`:表示名のリネーム。**subdomain は不変** — 公開 URL・
+/// `PATCH /api/services/:id`:表示名のリネーム。**subdomain はここでは動かない** — 公開 URL・
 /// GitHub repo 名・registry repo・route ファイルはすべて subdomain / id に紐づくので
 /// 何も動かない(db rename の「接続文字列は変えない」と同型)。display_name は
 /// 表示と名前→id 解決にだけ効く。同名衝突は稼働中の部分ユニークが 409 に落とす。
+/// subdomain 自体を変えたいときは別端点 `POST /:id/subdomain`(set_subdomain)。
 pub async fn rename(
     auth: AuthCtx,
     State(state): State<AppState>,
@@ -707,6 +783,94 @@ pub async fn set_visibility(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/services/:id/subdomain`:subdomain(= 公開 URL)の変更。set_visibility と同じ
+/// 「DB 先行 → 現実収束(route + M6 網別名)」の型。旧 URL は catch-all → 302 /noservice に
+/// 自然落ち(凍結しない — 受容済み)。GitHub repo 名は旧 subdomain のまま(rename と同型)。
+/// この service を注入している caller の `_URL`/`_HOST` はコンテナ起動時に解決済みの旧値 =
+/// caller の再デプロイまで断線し得る。未反映は list_injections の needs_redeploy
+/// (subdomain_changed_at 参加)が出す — だから同値変更では時刻を動かさない(偽の未反映を
+/// 出さない)。ただし**収束段は同値でも再実行する**:前回の route/別名の反映失敗を、
+/// 同じコマンドの再実行で回収できるようにするため(「再実行も可能」を嘘にしない)。
+pub async fn set_subdomain(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<tsubomi_shared::SetServiceSubdomainReq>,
+) -> AppResult<Json<ServiceDto>> {
+    ensure_owned(&state, auth.user_id, id).await?; // 404 ゲート(lock 外・安価)
+    validate_subdomain(&req.subdomain)?;
+
+    // deploy / start / stop / visibility と同一 lock で直列化(route ファイル・網別名と
+    // コンテナ状態の競合防止。deploy の spec 読取も lock 内なので旧値で走り抜ける心配はない)。
+    let lock = state.deploy_lock(id);
+    let _guard = lock.lock().await;
+
+    // 現値(audit の from + 同値判定)。lock 待ち中に削除が完走したケースはここが 404 を返す。
+    let current = fetch_service_dto(&state, auth.user_id, id).await?;
+    let dto = if current.subdomain == req.subdomain {
+        current // 同値:UPDATE・audit・subdomain_changed_at は動かさない(冪等)
+    } else {
+        // DB 先行(背骨:DB=期望状態)。UNIQUE 違反(他 service が使用中)は 409。
+        let row: Option<ServiceRow> = sqlx::query_as(
+            "UPDATE service_details s SET subdomain = $2, subdomain_changed_at = now()
+               FROM resources r
+              WHERE s.resource_id = $1 AND r.id = s.resource_id AND r.deleted_at IS NULL
+          RETURNING r.id, r.display_name, r.anon_seq, r.created_at,
+                    s.subdomain, s.phase, s.desired_state, s.container_port, s.image_digest, s.last_deploy_at,
+                    s.visibility, s.stateful, s.memory_mb, s.cpu_limit_millis",
+        )
+        .bind(id)
+        .bind(&req.subdomain)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| map_unique(e, subdomain_taken_msg(&req.subdomain)))?;
+        let row = row.ok_or(AppError::NotFound)?;
+
+        // 恒久的な状態変化(DB)の直後に監査 — 後段の収束が失敗しても監査は DB と一致する。
+        audit(
+            &state.db,
+            Some(auth.user_id),
+            "service.subdomain",
+            id,
+            json!({ "from": current.subdomain, "to": req.subdomain }),
+            auth.client_ip.as_deref(),
+        )
+        .await;
+        service_row_to_dto(row, &state.config)
+    };
+
+    // 現実収束(lock 内。同値の再実行でもここは走る)。失敗しても DB は更新済み = reconcile が
+    // ≤30s で収束させる(route は host drift 判定・網別名は attach_callees の別名検査)。
+    let converge_err = |e: AppError| {
+        tracing::error!(error = ?e, %id, "subdomain 変更の反映に失敗");
+        AppError::UnavailableMsg(
+            "subdomain は保存しましたが反映に失敗しました。reconcile が 30 秒以内に収束させます(再実行も可能)".into(),
+        )
+    };
+    if let Some(container) = serving_container(&state, id).await {
+        // route:private は「ファイル無し」が期望状態なので何もしない。company/public は
+        // 新 host で同一ファイル(svc-<id>.yml)を原子上書き — 旧 host の router は消える。
+        if let Some(vis) = Visibility::parse(&dto.visibility)
+            && vis != Visibility::Private
+        {
+            route::write(
+                &state,
+                id,
+                &req.subdomain,
+                &container,
+                dto.container_port,
+                vis.ipallow(),
+            )
+            .map_err(converge_err)?;
+        }
+        // M6 網別名の換血:この service を注入している全 caller 私網で、旧別名の endpoint を
+        // 剥がして新別名で attach し直す(既に正しい網は触らない)。caller コンテナ内の解決済み
+        // env は旧値のまま = caller 再デプロイまでの断線は仕様。needs_redeploy が可視化する。
+        network::realias_as_callee(&state, id, &req.subdomain, &container).await;
+    }
+
+    Ok(Json(dto))
+}
 /// `POST /api/services/:id/limits`:memory / cpus 上限の変更。値は run_digest_inner が
 /// デプロイのたびに DB から読み直すので、**次のデプロイから反映**(実行中コンテナには
 /// 遡及しない — docker の memory / nano_cpus はコンテナ作成時パラメータ)。visibility と
@@ -1122,22 +1286,26 @@ pub async fn list_injections(
 ) -> AppResult<Json<Vec<InjectionDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<InjectionRow> = sqlx::query_as(
-        // 「注入値が今のコンテナと違う」時刻 = 注入の作成時刻と **cache の rotate 時刻**の遅い方。
-        // cache rotate は注入される資格情報そのもの(ACL パスワード)を差し替えるので、実行中の app は
-        // 即座に認証エラーになる = 再デプロイが要る。database の rotate は **human role だけ**を回し
-        // app role(注入される側)は不変なので、あちらは対象にしない(m3 設計 §7.2)。
+        // 「注入値が今のコンテナと違う」時刻 = 注入の作成時刻・**cache の rotate 時刻**・
+        // **注入元 service の subdomain 変更時刻**の一番遅いもの。cache rotate は注入される資格情報
+        // そのもの(ACL パスワード)を、subdomain 変更は `_URL`/`_HOST` の中身を差し替えるので、
+        // 実行中の app は旧値のまま = 再デプロイが要る。database の rotate は **human role だけ**を
+        // 回し app role(注入される側)は不変なので、あちらは対象にしない(m3 設計 §7.2)。
+        // GREATEST は NULL を無視する(cache/service 以外の注入は該当列が NULL)。
         //
         // 値は **両端を有限に丸める**:Postgres の infinity は `DateTime<Utc>` に読み込めず sqlx が
         // panic する(= `panic="abort"` なのでプロセスごと落ちる。2026-07-26 の事故)。
         // 下端だけ塞ぐと `+infinity` が素通りするので `LEAST(GREATEST(…), now())` で挟む。
-        // 書き込み側は CHECK 制約(20260727000001)が拒むので、これは縦深防御。
+        // 書き込み側は CHECK 制約(20260727000001 / 20260819000001)が拒むので、これは縦深防御。
         "SELECT i.id, i.resource_id, r.kind, r.display_name, i.env_var, i.mount_path,
                 (r.deleted_at IS NULL) AS valid,
-                LEAST(GREATEST(GREATEST(i.created_at, cd.rotated_at), 'epoch'::timestamptz), now())
+                LEAST(GREATEST(GREATEST(i.created_at, cd.rotated_at, sd.subdomain_changed_at),
+                               'epoch'::timestamptz), now())
                   AS created_at
            FROM injections i
            JOIN resources r ON r.id = i.resource_id
            LEFT JOIN cache_details cd ON cd.resource_id = i.resource_id
+           LEFT JOIN service_details sd ON sd.resource_id = i.resource_id
           WHERE i.service_id = $1
           ORDER BY i.env_var",
     )
@@ -1677,6 +1845,11 @@ pub async fn create(
     if let Some(cpu) = req.cpu_limit_millis {
         check_cpu_limit_millis(&state, cpu)?;
     }
+    // subdomain の明示指定は任意(None = 従来どおり slug から自動採番)。指定時だけ規則を検証
+    //(副作用 = registry アカウント作成より前に弾く)。
+    if let Some(sub) = req.subdomain.as_deref() {
+        validate_subdomain(sub)?;
+    }
 
     // 同名チェック(UNIQUE が最終ガードだが、先に弾いて分かりやすく)。
     if crate::databases::live_name_exists(&state.db, auth.user_id, "service", &display_name).await? {
@@ -1704,36 +1877,55 @@ pub async fn create(
         cpu_limit_millis: req.cpu_limit_millis,
     };
 
-    // subdomain は display_name の slug を第一候補に、衝突 / 予約語なら乱数語を付けて再試行
-    // (UNIQUE が最終ガード)。slug が空になる名前(記号だけ等)は "app" にフォールバック。
-    let base = {
-        let s = slugify(&display_name);
-        if s.is_empty() { "app".to_string() } else { s }
-    };
-    let mut created: Option<ServiceDto> = None;
-    for attempt in 0..6 {
-        let candidate = if attempt == 0 {
-            base.clone()
-        } else {
-            format!("{base}-{}", rand_suffix())
-        };
-        if RESERVED_SUBDOMAINS.contains(&candidate.as_str()) {
-            continue;
-        }
-        match insert_attempt(&state.db, &state.config, auth.user_id, &candidate, &new).await {
-            Ok(dto) => {
-                created = Some(dto);
-                break;
+    // subdomain:明示指定は **1 回だけ**試す(衝突は 409 — 指定した名前を乱数サフィックスで
+    // 別名に化けさせない)。省略時は display_name の slug を第一候補に、衝突 / 予約語なら
+    // 乱数語を付けて再試行(UNIQUE が最終ガード)。slug が空になる名前(記号だけ等)は
+    // "app" にフォールバック。
+    let dto = if let Some(sub) = req.subdomain.as_deref() {
+        match insert_attempt(&state.db, &state.config, auth.user_id, sub, &new).await {
+            Ok(dto) => dto,
+            Err(InsertErr::SubdomainTaken) => {
+                return Err(AppError::Conflict(subdomain_taken_msg(sub)));
             }
-            Err(InsertErr::SubdomainTaken) => continue,
             Err(InsertErr::App(e)) => return Err(e),
         }
-    }
-    let dto = created.ok_or_else(|| {
-        AppError::Conflict(
-            "subdomain を生成できませんでした。表示名を変えて再試行してください".into(),
-        )
-    })?;
+    } else {
+        let base = {
+            let s = slugify(&display_name);
+            if s.is_empty() { "app".to_string() } else { s }
+        };
+        // `tsubomi-` 前綴の base は乱数サフィックスを付けても前綴が残る = 全試行が予約 skip で
+        // 必ず失敗する。前綴を剥がして救済する(剥がした残りが英字始まりでなければ "app")。
+        let base = match base.strip_prefix("tsubomi-") {
+            Some(rest) if rest.starts_with(|c: char| c.is_ascii_lowercase()) => rest.to_string(),
+            Some(_) => "app".to_string(),
+            None => base,
+        };
+        let mut created: Option<ServiceDto> = None;
+        for attempt in 0..6 {
+            let candidate = if attempt == 0 {
+                base.clone()
+            } else {
+                suffixed_candidate(&base)
+            };
+            if reserved_subdomain(&candidate) {
+                continue;
+            }
+            match insert_attempt(&state.db, &state.config, auth.user_id, &candidate, &new).await {
+                Ok(dto) => {
+                    created = Some(dto);
+                    break;
+                }
+                Err(InsertErr::SubdomainTaken) => continue,
+                Err(InsertErr::App(e)) => return Err(e),
+            }
+        }
+        created.ok_or_else(|| {
+            AppError::Conflict(
+                "subdomain を生成できませんでした。表示名を変えて再試行してください".into(),
+            )
+        })?
+    };
 
     audit(
         &state.db,
@@ -1909,10 +2101,20 @@ fn slugify(name: &str) -> String {
         None => return String::new(),
     };
     s.chars()
-        .take(50)
+        .take(MAX_SUBDOMAIN_LEN)
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+/// 衝突時の乱数語付き候補。**suffix 込みで 50 字上限を守る**(base を詰めてから付ける)—
+/// でないと自動採番の出力(最長 55 字)が validate_subdomain(50 字)を通らず、
+/// 「自動で付いた subdomain を変更端点で再指定できない」round-trip 不全になる。
+/// base は slugify 出力(ASCII)なのでバイト切りで安全。切り詰めで末尾に残った '-' は落とす。
+fn suffixed_candidate(base: &str) -> String {
+    let stem_len = MAX_SUBDOMAIN_LEN - 5; // "-xxxx" の 5 字ぶん
+    let stem = base[..base.len().min(stem_len)].trim_end_matches('-');
+    format!("{stem}-{}", rand_suffix())
 }
 
 /// 衝突回避用の 4 文字英数字サフィックス(DNS ラベル安全)。
@@ -1938,6 +2140,63 @@ mod tests {
         assert_eq!(slugify("123start"), "s123start");
         assert_eq!(slugify("!!!"), "");
         assert_eq!(slugify("日本語app"), "app");
+    }
+
+    /// validate_subdomain の真理値表(明示指定の入口)。
+    #[test]
+    fn validate_subdomain_rules() {
+        for ok in ["myapp", "my-app", "a", "app2", "a-2-b", &"a".repeat(50)] {
+            assert!(validate_subdomain(ok).is_ok(), "{ok:?} は通るべき");
+        }
+        for bad in [
+            "",
+            "My-App",     // 大文字
+            "-app",       // 英字始まりでない
+            "app-",       // '-' 終わり
+            "2app",       // 数字始まり
+            "my.app",     // '.' は不可(DNS ラベル 1 個ぶんだけ)
+            "my app",     // 空白
+            "日本語",     // 非 ASCII
+            &"a".repeat(51),
+        ] {
+            assert!(validate_subdomain(bad).is_err(), "{bad:?} は弾くべき");
+        }
+        // 予約:固定語(公開 DB / cache 入口の db / cache 含む)+ `tsubomi-` 前綴
+        // (私網の infra / app コンテナ名との docker DNS 衝突防止)。
+        for reserved in ["www", "api", "registry", "db", "cache", "tsubomi-valkey", "tsubomi-x"] {
+            assert!(validate_subdomain(reserved).is_err(), "{reserved:?} は予約");
+        }
+    }
+
+    /// slugify の出力(+ 乱数サフィックス形)は validate_subdomain の形式規則を必ず通る
+    /// (予約語は自動採番ループ側が skip するので形式のみ確認)。**上限いっぱいの長名**を
+    /// 含める — suffix 込みの 50 字上限(suffixed_candidate)が破れると、自動採番の出力を
+    /// 変更端点で再指定できない round-trip 不全になる(codex 監査で顕在化した穴)。
+    #[test]
+    fn slugify_output_passes_subdomain_rules() {
+        let long = "a".repeat(60);
+        let hyphen_tail = format!("{}-x", "b".repeat(44)); // 切り詰め位置に '-' が残る形
+        for name in [
+            "My App",
+            "  hello--world  ",
+            "API_v2",
+            "123start",
+            "日本語app x",
+            long.as_str(),
+            hyphen_tail.as_str(),
+        ] {
+            let s = slugify(name);
+            if s.is_empty() {
+                continue; // create は "app" にフォールバック
+            }
+            let suffixed = suffixed_candidate(&s);
+            for candidate in [s, suffixed] {
+                assert!(
+                    validate_subdomain(&candidate).is_ok() || reserved_subdomain(&candidate),
+                    "{candidate:?} が形式規則を通らない"
+                );
+            }
+        }
     }
 
     #[test]

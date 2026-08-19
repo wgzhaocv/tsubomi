@@ -240,23 +240,72 @@ async fn attach_callees(state: &AppState, network: &str, caller_id: Uuid) {
         // DB + docker から解決し **route ファイルに依存しない** — private callee(route 無し)への
         // リンクを成立させるのが要点(公開範囲設計 §5)。in-flight な swap 中も commit 済みの版
         // だけを指すので別名を取り違えない。未稼働(停止 / 未デプロイ / 削除)なら skip。
-        if let Some(container) = super::serving_container(state, callee_id).await
-            && let Err(e) = connect(state, network, &container, std::slice::from_ref(&subdomain)).await
-        {
-            tracing::warn!(error = ?e, %callee_id, alias = %subdomain, "callee の attach に失敗");
+        let Some(container) = super::serving_container(state, callee_id).await else {
+            continue;
+        };
+        match connect(state, network, &container, std::slice::from_ref(&subdomain)).await {
+            // 既接続 = 別名は今回の指定で更新されていない。callee の subdomain 変更後に旧別名が
+            // 残っているかもしれないので検査し、陳腐なら付け替える(変更端点 realias_as_callee の
+            // 取りこぼしをここで ≤30s に収束させる)。検査は**三値**:inspect 失敗(None)は
+            // 「判定不能 = 触らない」— 不明を陳腐扱いすると、健全な稼働リンクを毎 tick
+            // force-disconnect(既存 TCP 切断)する周期瞬断になり得る。
+            Ok(true) => {
+                if endpoint_alias_state(state, &container, network, &subdomain).await
+                    != Some(false)
+                {
+                    continue; // Some(true) = 正しい / None = 判定不能(触らない)
+                }
+                // 陳腐確定。ただしループ冒頭で読んだ `subdomain` は、set_subdomain(callee の
+                // lock 下)の realias と交錯していると**旧値**かもしれない — 動かす直前に
+                // fresh 再読し、付いたばかりの正しい新別名を剥がす巻き戻りを防ぐ(lock 後
+                // fresh 再確認の家風。lock は取らないので ms 級の窓は残る = 次 tick が回収)。
+                let Some(alias) = fresh_subdomain(state, callee_id).await else {
+                    continue; // 削除済み / 取得失敗 → 触らない
+                };
+                if endpoint_has_alias(state, &container, network, &alias).await {
+                    continue; // fresh 値では正しかった(読みが古かっただけ)
+                }
+                match reattach_with_alias(state, network, &container, &alias).await {
+                    Ok(true) => {
+                        tracing::info!(%callee_id, alias = %alias, "callee の網別名を付け替えました")
+                    }
+                    Ok(false) => tracing::warn!(
+                        %callee_id, alias = %alias,
+                        "callee の別名付け替えが確認できません(次の reconcile で再試行)"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(error = ?e, %callee_id, alias = %alias, "callee の別名付け替えに失敗")
+                    }
+                }
+            }
+            Ok(false) => {} // fresh connect = 今回の別名が確定している
+            Err(e) => {
+                tracing::warn!(error = ?e, %callee_id, alias = %subdomain, "callee の attach に失敗");
+            }
         }
     }
 }
 
-/// B(callee)の新コンテナを、**B を注入している caller 群**のプライベートネットワークへ別名=B.subdomain で attach する。
-/// B の deploy(start-first swap)直後に `docker::run` から呼ぶ(旧コンテナ撤去で消えた endpoint を
-/// 即補い、次 reconcile までの A→B 断を塞ぐ)。caller 未デプロイ(網無し)なら skip — その caller の
-/// deploy 時に `attach_callees` が付ける。best-effort(reconcile が漏れを拾う)。
-pub(crate) async fn attach_as_callee(state: &AppState, callee_id: Uuid, subdomain: &str, container: &str) {
-    // caller(i.service_id)が **生存している** service だけを対象にする(soft-delete 済みだが網撤去に
-    // 失敗して網が残っている caller の孤児網へ、B redeploy が客人を入れ直す事故を防ぐ — codex 監査)。
-    let callers: Vec<(Uuid,)> = match sqlx::query_as(
-        "SELECT i.service_id
+/// callee の現在の subdomain を fresh に読む(未削除のみ)。attach_callees の付け替え直前の
+/// 再確認用 — None = 削除済み / 取得失敗 → 呼び出し側は触らない。
+async fn fresh_subdomain(state: &AppState, callee_id: Uuid) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT d.subdomain FROM service_details d
+           JOIN resources r ON r.id = d.resource_id
+          WHERE d.resource_id = $1 AND r.deleted_at IS NULL",
+    )
+    .bind(callee_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or_default()
+}
+
+/// この callee を注入している**生存 caller** の id 一覧(attach_as_callee / realias_as_callee 共用)。
+/// DISTINCT — 同一 caller が同じ callee を複数の env 名で注入していても網操作は 1 回でよい。
+/// soft-delete 済み caller を除くのは、網撤去に失敗して残った孤児網へ客人を入れ直さないため(codex 監査)。
+async fn service_callers(state: &AppState, callee_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT i.service_id
            FROM injections i
            JOIN resources caller ON caller.id = i.service_id
            JOIN resources src    ON src.id = i.resource_id
@@ -266,21 +315,87 @@ pub(crate) async fn attach_as_callee(state: &AppState, callee_id: Uuid, subdomai
     )
     .bind(callee_id)
     .fetch_all(&state.db)
-    .await
-    {
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// disconnect → 別名付き connect → 閉環確認、の 3 手をまとめる(付け替えの唯一のレシピ)。
+/// docker の網別名は**初回 connect でしか確定しない**(既接続 403 は冪等吞み = 別名未更新)ため、
+/// 付け替えは必ずこの形になる(`migrate_pgbouncer_aliases` で実証済み)。戻り値 Ok(true) =
+/// 別名が付いたことを inspect で確認済み。Ok(false) = connect は通ったが別名が確認できない
+/// (disconnect が効かず既接続のままだった等 — 403 吞みの偽成功をここで検出)。
+async fn reattach_with_alias(
+    state: &AppState,
+    network: &str,
+    container: &str,
+    alias: &str,
+) -> AppResult<bool> {
+    disconnect(state, network, container).await;
+    connect(state, network, container, &[alias.to_string()]).await?;
+    Ok(endpoint_has_alias(state, container, network, alias).await)
+}
+
+/// B(callee)の新コンテナを、**B を注入している caller 群**のプライベートネットワークへ別名=B.subdomain で attach する。
+/// B の deploy(start-first swap)直後に `docker::run` から呼ぶ(旧コンテナ撤去で消えた endpoint を
+/// 即補い、次 reconcile までの A→B 断を塞ぐ)。caller 未デプロイ(網無し)なら skip — その caller の
+/// deploy 時に `attach_callees` が付ける。best-effort(reconcile が漏れを拾う)。
+pub(crate) async fn attach_as_callee(state: &AppState, callee_id: Uuid, subdomain: &str, container: &str) {
+    let callers = match service_callers(state, callee_id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = ?e, %callee_id, "caller 一覧の取得に失敗(網リンク)");
             return;
         }
     };
-    for (caller_id,) in callers {
+    for caller_id in callers {
         let net = svc_network_name(state, caller_id);
         if !network_exists(state, &net).await {
             continue; // caller 未デプロイ = その deploy 時に attach される
         }
         if let Err(e) = connect(state, &net, container, &[subdomain.to_string()]).await {
             tracing::warn!(error = ?e, %caller_id, alias = %subdomain, "caller 網への attach に失敗");
+        }
+    }
+}
+
+/// subdomain 変更時の網別名の換血:この service(callee)を注入している全 caller 私網で、
+/// 稼働コンテナの別名を新 subdomain へ付け替える(`reattach_with_alias`)。既に正しい別名なら
+/// 触らない — 同値変更の再実行(収束の再試行)で健全なリンクを無駄に瞬断しないための速路。
+/// best-effort・per-item warn(取りこぼしは reconcile の別名検査(attach_callees)が ≤30s で
+/// 収束させる。caller の deploy とは lock を共有しない = 交錯で旧別名が一時復活し得るが、
+/// 同じく次 tick が回収する — 設計 doc §1)。
+pub(crate) async fn realias_as_callee(
+    state: &AppState,
+    callee_id: Uuid,
+    subdomain: &str,
+    container: &str,
+) {
+    let callers = match service_callers(state, callee_id).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = ?e, %callee_id, "caller 一覧の取得に失敗(別名換血)");
+            return;
+        }
+    };
+    for caller_id in callers {
+        let net = svc_network_name(state, caller_id);
+        if !network_exists(state, &net).await {
+            continue; // caller 未デプロイ = その deploy 時に新別名で attach される
+        }
+        if endpoint_has_alias(state, container, &net, subdomain).await {
+            continue; // 既に正しい(同値再実行 / 直前の reconcile が付け替え済み)
+        }
+        match reattach_with_alias(state, &net, container, subdomain).await {
+            Ok(true) => {
+                tracing::info!(network = %net, alias = %subdomain, "網別名を付け替えました");
+            }
+            Ok(false) => tracing::warn!(
+                network = %net, alias = %subdomain,
+                "connect は成功したが別名が確認できません(reconcile が収束させます)"
+            ),
+            Err(e) => {
+                tracing::warn!(error = ?e, %caller_id, alias = %subdomain, "caller 網への再 attach に失敗");
+            }
         }
     }
 }
@@ -372,10 +487,10 @@ pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
         // よって「別名が実際に付いたか」を inspect で確かめるまでを 1 セットにする(codex 深審)。
         let connected = connect(state, &net, &container, &aliases).await;
         match connected {
-            Ok(()) if endpoint_has_alias(state, &container, &net, &want).await => {
+            Ok(_) if endpoint_has_alias(state, &container, &net, &want).await => {
                 tracing::info!(network = %net, alias = %want, "ネットワーク別名を付け直しました");
             }
-            Ok(()) => tracing::error!(
+            Ok(_) => tracing::error!(
                 network = %net, alias = %want,
                 "ネットワーク別名が付きませんでした(disconnect が効かず既接続のまま = この service の DB 注入は\
                  旧ホスト名でしか引けません)。手で `docker network disconnect` してから再起動してください"
@@ -388,30 +503,50 @@ pub(crate) async fn migrate_pgbouncer_aliases(state: &AppState) {
     }
 }
 
-/// `container` の `network` 上の endpoint が `alias` を持っているか(移行の閉環確認)。
-/// inspect できない = 確認できない → false(成功を騙らない)。
+/// `container` の `network` 上の endpoint が `alias` を持っているか。**三値**:None = inspect
+/// 失敗で判定不能。用途が 2 方向あるため分ける — 付け替えの**トリガー判定**(attach_callees)は
+/// None を「触らない」に倒す(不明を陳腐扱いすると健全リンクを毎 tick 瞬断し得る)。
+async fn endpoint_alias_state(
+    state: &AppState,
+    container: &str,
+    network: &str,
+    alias: &str,
+) -> Option<bool> {
+    let info = state.docker.inspect_container(container, None).await.ok()?;
+    Some(
+        info.network_settings
+            .and_then(|s| s.networks)
+            .and_then(|n| n.get(network).cloned())
+            .and_then(|ep| ep.aliases)
+            .is_some_and(|a| a.iter().any(|x| x == alias)),
+    )
+}
+
+/// `endpoint_alias_state` の bool 版(**閉環確認**用 — realias / migrate)。inspect できない =
+/// 確認できない → false(成功を騙らない)。act の判定には使わないこと(上の三値を使う)。
 async fn endpoint_has_alias(
     state: &AppState,
     container: &str,
     network: &str,
     alias: &str,
 ) -> bool {
-    let Ok(info) = state.docker.inspect_container(container, None).await else {
-        return false;
-    };
-    info.network_settings
-        .and_then(|s| s.networks)
-        .and_then(|n| n.get(network).cloned())
-        .and_then(|ep| ep.aliases)
-        .is_some_and(|a| a.iter().any(|x| x == alias))
+    endpoint_alias_state(state, container, network, alias)
+        .await
+        .unwrap_or(false)
 }
 
 /// コンテナをプライベートネットワークへ接続(既接続=403 は冪等に握り潰す)。`aliases` 非空なら docker ネットワーク別名を付ける
 /// (callee を caller の subdomain で引けるようにする。infra は別名なし `&[]` で呼ぶ)。
-/// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できない。callee は両 attach 経路とも
-/// 最初から別名付きで繋ぐので問題にならないが、pgbouncer は別名導入前から接続済みのプライベートネットワークが在り得るので
-/// 起動時に `migrate_pgbouncer_aliases` が後付けする。
-async fn connect(state: &AppState, network: &str, container: &str, aliases: &[String]) -> AppResult<()> {
+/// 別名は **初回 connect 時にのみ確定** — 既接続(403)は別名更新できない。pgbouncer は別名導入前から
+/// 接続済みのプライベートネットワークが在り得るので起動時に `migrate_pgbouncer_aliases` が後付けし、
+/// callee は subdomain 変更で別名が陳腐化し得るので `attach_callees` が既接続時に検査して付け替える。
+/// 戻り値 = **既接続だったか**(true なら別名は今回の指定で更新されていない — 呼び出し側の検査材料)。
+async fn connect(
+    state: &AppState,
+    network: &str,
+    container: &str,
+    aliases: &[String],
+) -> AppResult<bool> {
     let endpoint_config = (!aliases.is_empty()).then(|| EndpointSettings {
         aliases: Some(aliases.to_vec()),
         ..Default::default()
@@ -421,8 +556,8 @@ async fn connect(state: &AppState, network: &str, container: &str, aliases: &[St
         endpoint_config,
     };
     match state.docker.connect_network(network, req).await {
-        Ok(()) => Ok(()),
-        Err(e) if is_status(&e, 403) => Ok(()), // 既に接続済み(冪等)
+        Ok(()) => Ok(false),
+        Err(e) if is_status(&e, 403) => Ok(true), // 既に接続済み(冪等)
         Err(e) => Err(AppError::Other(anyhow!(
             "網 {network} へ {container} の接続に失敗: {e}"
         ))),

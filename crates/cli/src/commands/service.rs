@@ -47,6 +47,11 @@ pub enum ServiceCmd {
         /// 0.1 以上・ホストのコア数まで)。共有ホストで CPU を食い尽くして隣人を巻き添えにしない保険
         #[arg(long)]
         cpus: Option<f64>,
+        /// 公開 URL のサブドメイン(省略 = 名前から自動生成。小文字英数と `-`(英字始まり・
+        /// `-` 終わり不可)・50 字以内。予約語(`www`/`api`/`db` 等・`tsubomi-` 始まり)は不可。
+        /// 使用中なら 409)。GitHub repo 名にもこの値を使う
+        #[arg(long)]
+        subdomain: Option<String>,
     },
     /// サービス一覧
     List,
@@ -55,12 +60,22 @@ pub enum ServiceCmd {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
     },
-    /// 表示名を変更(subdomain = 公開 URL / GitHub repo は変わらない)
+    /// 表示名を変更(subdomain = 公開 URL / GitHub repo は変わらない。
+    /// subdomain を変えるのは `tbm service subdomain`)
     Rename {
         /// 対象サービスの表示名(`tbm service list` で確認)
         name: String,
         /// 新しい表示名
         new_name: String,
+    },
+    /// subdomain(= 公開 URL)を変更する(**旧 URL は即失効**。GitHub repo 名は変わらない。
+    /// この service を注入している呼び出し側は再デプロイで新値が入る)
+    Subdomain {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+        /// 新しい subdomain(小文字英数と `-`(英字始まり・`-` 終わり不可)・50 字以内。
+        /// 予約語(`www`/`api`/`db` 等・`tsubomi-` 始まり)は不可。使用中なら 409)
+        new_subdomain: String,
     },
     /// メモリ / CPU 上限を変更する(次のデプロイから反映 — 実行中のコンテナには影響しない)
     Limits {
@@ -162,6 +177,7 @@ pub enum ServiceCmd {
         name: String,
         /// GitHub 連携(create の既定)で作った repo(`<gh ユーザ>/<subdomain>`)も連带削除する。
         /// repo の削除は**即時かつ復元不能**(サービス本体のゴミ箱 3 日復元とは別)。
+        /// subdomain を変更した場合は旧名の repo になるため見つけられない(その場合は手動削除)。
         /// gh に delete_repo スコープが要る(無ければ `gh auth refresh -h github.com -s delete_repo`)
         #[arg(long)]
         with_repo: bool,
@@ -258,7 +274,33 @@ pub async fn run(
                 print_json(&svc)?;
             } else {
                 println!("名前を変更しました:{}", svc.display_name);
-                println!("(公開 URL / GitHub repo は subdomain 由来なので変わりません: {})", svc.subdomain);
+                println!(
+                    "(公開 URL / GitHub repo は subdomain 由来なので変わりません: {}。subdomain 自体を変えるなら `tbm service subdomain`)",
+                    svc.subdomain
+                );
+            }
+        }
+        ServiceCmd::Subdomain {
+            name,
+            new_subdomain,
+        } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let svc = api::service_set_subdomain(&c, &server_url, &token, &id, &new_subdomain).await?;
+            if json {
+                print_json(&svc)?;
+            } else {
+                println!("subdomain を変更しました:{}", svc.subdomain);
+                if svc.visibility == VISIBILITY_PRIVATE {
+                    println!("(現在 private のため公開 URL は無効のままです)");
+                } else {
+                    if !svc.url.is_empty() {
+                        println!("新しい URL: {}", svc.url);
+                    }
+                    println!("※ 旧 URL は即座に無効になります(302 /noservice)。GitHub repo 名は変わりません");
+                }
+                println!(
+                    "※ このサービスを注入している呼び出し側は再デプロイで新しい値が入ります(`tbm service status <呼び出し側>` の [未反映:要デプロイ] で確認)"
+                );
             }
         }
         ServiceCmd::Limits { name, memory, cpus } => {
@@ -516,6 +558,7 @@ pub async fn run(
             stateful,
             memory,
             cpus,
+            subdomain,
         } => {
             // CPU 上限はコア数(人間の単位)で受け、wire は millicores(整数)に変換する。
             let cpu_limit_millis = cpus.map(cpus_to_millis).transpose()?;
@@ -540,6 +583,7 @@ pub async fn run(
                 stateful: stateful.then_some(true),
                 memory_mb: memory,
                 cpu_limit_millis,
+                subdomain: subdomain.clone(),
             };
             let resp = api::service_create(&c, &server_url, &token, &req)
                 .await
@@ -558,10 +602,11 @@ pub async fn run(
                 || visibility.is_some_and(|v| svc.visibility != v.as_str())
                 || (stateful && !svc.stateful)
                 || memory.is_some_and(|m| svc.memory_mb != m)
-                || (cpu_limit_millis.is_some() && svc.cpu_limit_millis != cpu_limit_millis);
+                || (cpu_limit_millis.is_some() && svc.cpu_limit_millis != cpu_limit_millis)
+                || subdomain.as_deref().is_some_and(|s| svc.subdomain != s);
             if ignored {
                 bail!(
-                    "サーバがこの作成パラメータ(--port / --visibility / --stateful / --memory / --cpus)に未対応です(サーバの更新が必要)。\
+                    "サーバがこの作成パラメータ(--port / --visibility / --stateful / --memory / --cpus / --subdomain)に未対応です(サーバの更新が必要)。\
                      サービス '{0}' は既定値で作成済みです — `tbm service delete \"{0}\"` で削除し、サーバ更新後に再作成してください",
                     req.name
                 );
@@ -811,7 +856,8 @@ fn print_created_shape(svc: &ServiceDto, visibility_derived: bool) {
     // port だけは作成後に変更できない(§0-D:route/リンクの真源)— その場で気付けるように言う。
     eprintln!(
         "  ※ port は作成後に変更できません(間違えたら作り直し)。visibility / memory / cpus は \
-         `tbm service visibility|limits`、stateful は `tbm service stateful`(false→true のみ)で後から変更できます"
+         `tbm service visibility|limits`、stateful は `tbm service stateful`(false→true のみ)、\
+         subdomain は `tbm service subdomain`(旧 URL は即失効)で後から変更できます"
     );
 }
 
@@ -1021,7 +1067,9 @@ fn delete_github_repo(subdomain: &str, service_id: &str) -> Result<String> {
     let owner = gh_capture(&["api", "user", "-q", ".login"])?;
     let repo = format!("{owner}/{subdomain}");
     if !gh_silent(&["repo", "view", &repo]) {
-        bail!("repo {repo} が見つかりません(既に削除済みか、別名で作られています)");
+        bail!(
+            "repo {repo} が見つかりません(既に削除済み / --no-github で作成 / subdomain を変更した場合は**旧 subdomain 名の repo のまま**です — `gh repo list` で探して `gh repo delete` してください)"
+        );
     }
     let linked = gh_capture(&["variable", "get", "TSUBOMI_SERVICE_ID", "-R", &repo])
         .unwrap_or_default();

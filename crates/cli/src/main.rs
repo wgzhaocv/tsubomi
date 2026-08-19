@@ -56,8 +56,8 @@ enum Cmd {
         #[command(subcommand)]
         action: commands::cache::CacheCmd,
     },
-    /// サービス(create(+GitHub 連携)/ list / status / rename / limits / stateful /
-    /// start / stop / logs / metrics / deploys / exec / cat / verify / open /
+    /// サービス(create(+GitHub 連携)/ list / status / rename / subdomain / limits /
+    /// stateful / start / stop / logs / metrics / deploys / exec / cat / verify / open /
     /// rollback / visibility / delete)
     Service {
         #[command(subcommand)]

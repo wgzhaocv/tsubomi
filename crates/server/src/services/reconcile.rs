@@ -266,7 +266,7 @@ async fn converge_running(state: &AppState) {
             // 競合しない。
             let lock = state.deploy_lock(id);
             let _guard = lock.lock().await;
-            if fresh_visibility(state, id).await == Some(Visibility::Private)
+            if matches!(fresh_route_inputs(state, id).await, Some((Visibility::Private, _)))
                 && route::exists(state, id)
             {
                 match route::remove(state, id) {
@@ -340,24 +340,26 @@ async fn converge_running(state: &AppState) {
             continue;
         }
 
-        //     company/public の期望状態は「backend = 直近成功 deploy のコンテナ かつ ipallow = visibility
-        //     どおり」。ipallow も組に入れるのは、public→company の切替書込だけが失敗すると「DB は
-        //     社内限定・現実は全網公開」の fail-open ドリフトが黙って残るため(公開範囲設計 §0-F)。
+        //     company/public の期望状態は「host = subdomain どおり かつ backend = 直近成功 deploy の
+        //     コンテナ かつ ipallow = visibility どおり」。ipallow も組に入れるのは、public→company の
+        //     切替書込だけが失敗すると「DB は社内限定・現実は全網公開」の fail-open ドリフトが黙って
+        //     残るため(公開範囲設計 §0-F)。host も同型 — subdomain 変更の書込失敗が旧 host のまま
+        //     残ると新 URL が永久に 404 になる。
         //     backend が「走っている任意のコンテナ」でないのは従来どおり(旧片付け失敗時に route を旧版へ
         //     巻き戻さない)。そのコンテナが実際に走っている時だけ直す(走っていなければ存在収束 / 次パスの領分)。
         let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
-        if route_matches(state, id, &expected, vis) {
-            continue; // backend も ipallow も正しい(定常状態の大多数)
+        if route_matches(state, id, &subdomain, &expected, vis) {
+            continue; // host も backend も ipallow も正しい(定常状態の大多数)
         }
-        // ドリフト確定(route 無し / 別コンテナ / ipallow 不一致)。deploy_lock を取り進行中の deploy と
-        // 競合しない。取得後の fresh 再確認は **4 点セット**(visibility / 期望 backend / ファイル存在 /
-        // ipallow)— 取得待ちの間に toggle や deploy が走った可能性があり、どれか一つでも古い値で書くと
-        // 陳腐な flavor の route を書き戻す(codex 監査 2026-07-02)。
+        // ドリフト確定(route 無し / 別 host / 別コンテナ / ipallow 不一致)。deploy_lock を取り進行中の
+        // deploy と競合しない。取得後の fresh 再確認は **5 点セット**(visibility / subdomain / 期望
+        // backend / ファイル存在 / ipallow)— 取得待ちの間に toggle・subdomain 変更・deploy が走った
+        // 可能性があり、どれか一つでも古い値で書くと陳腐な flavor の route を書き戻す(codex 監査 2026-07-02)。
         let lock = state.deploy_lock(id);
         let _guard = lock.lock().await;
-        let Some(vis) = fresh_visibility(state, id).await else {
+        let Some((vis, subdomain)) = fresh_route_inputs(state, id).await else {
             continue; // 削除済み / 取得失敗 → 触らない
         };
         if vis == Visibility::Private {
@@ -370,7 +372,7 @@ async fn converge_running(state: &AppState) {
         let Some(expected) = expected_running_container(state, id, &running).await else {
             continue;
         };
-        if route_matches(state, id, &expected, vis) {
+        if route_matches(state, id, &subdomain, &expected, vis) {
             continue;
         }
         match route::write(state, id, &subdomain, &expected, port, vis.ipallow()) {
@@ -398,19 +400,22 @@ async fn converge_running(state: &AppState) {
     }
 }
 
-/// 現実の route が期望 `(backend, ipallow)` と一致しているか(drift 判定の組 — 公開範囲設計 §0-F)。
-/// pre-lock の粗い判定と post-lock の fresh 再確認が同じ定義を共有する(判定が二箇所で分岐しない)。
-fn route_matches(state: &AppState, id: Uuid, expected: &str, vis: Visibility) -> bool {
-    route::current(state, id).is_some_and(|(backend, ipallow)| {
-        backend == expected && ipallow == vis.ipallow()
+/// 現実の route が期望 `(host, backend, ipallow)` と一致しているか(drift 判定の組 — 公開範囲設計
+/// §0-F + subdomain 変更)。pre-lock の粗い判定と post-lock の fresh 再確認が同じ定義を共有する
+/// (判定が二箇所で分岐しない)。host の期望値は route::service_host(write と同源)。
+fn route_matches(state: &AppState, id: Uuid, subdomain: &str, expected: &str, vis: Visibility) -> bool {
+    let want_host = route::service_host(state, subdomain);
+    route::current(state, id).is_some_and(|(host, backend, ipallow)| {
+        host == want_host && backend == expected && ipallow == vis.ipallow()
     })
 }
 
-/// lock 取得後の fresh visibility(未削除の service のみ)。None = 削除済み / 取得失敗 / 未知値
-/// → 呼び出し側は触らない。drift 修正が「古い visibility で route を書き戻す」のを防ぐ。
-async fn fresh_visibility(state: &AppState, id: Uuid) -> Option<Visibility> {
-    let s: Option<String> = match sqlx::query_scalar(
-        "SELECT s.visibility FROM service_details s
+/// lock 取得後の fresh (visibility, subdomain)(未削除の service のみ)。None = 削除済み / 取得失敗 /
+/// 未知値 → 呼び出し側は触らない。drift 修正が「古い visibility / 旧 subdomain で route を書き戻す」
+/// のを防ぐ(subdomain は lock 待ち中に変更端点が動かし得る)。
+async fn fresh_route_inputs(state: &AppState, id: Uuid) -> Option<(Visibility, String)> {
+    let row: Option<(String, String)> = match sqlx::query_as(
+        "SELECT s.visibility, s.subdomain FROM service_details s
            JOIN resources r ON r.id = s.resource_id
           WHERE s.resource_id = $1 AND r.deleted_at IS NULL",
     )
@@ -420,11 +425,12 @@ async fn fresh_visibility(state: &AppState, id: Uuid) -> Option<Visibility> {
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = ?e, %id, "reconcile: visibility の fresh 取得に失敗");
+            tracing::warn!(error = ?e, %id, "reconcile: visibility/subdomain の fresh 取得に失敗");
             return None;
         }
     };
-    Visibility::parse(&s?)
+    let (vis, subdomain) = row?;
+    Some((Visibility::parse(&vis)?, subdomain))
 }
 
 /// 孤児掃除:

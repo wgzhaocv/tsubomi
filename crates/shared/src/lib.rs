@@ -355,7 +355,8 @@ pub struct RenameVolumeReq {
     pub name: String,
 }
 
-/// `PATCH /api/services/:id`:表示名のリネーム(subdomain = 公開 URL / GitHub repo は不変)。
+/// `PATCH /api/services/:id`:表示名のリネーム(subdomain = 公開 URL / GitHub repo はここでは
+/// 動かない。subdomain の変更は `SetServiceSubdomainReq` の別端点)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenameServiceReq {
     pub name: String,
@@ -514,6 +515,10 @@ pub struct CreateServiceReq {
     /// CPU 上限(millicores、1000 = 1 CPU。省略 = 上限なし)。
     #[serde(default)]
     pub cpu_limit_millis: Option<i32>,
+    /// 公開 URL のサブドメイン(省略 = 名前の slug から自動採番)。指定時は
+    /// 使用中なら 409(乱数サフィックスで別名に化けさせない)。規則の検証はサーバ側。
+    #[serde(default)]
+    pub subdomain: Option<String>,
 }
 
 /// service の registry 資格情報(GitHub Actions が docker login + push に使う)。
@@ -761,6 +766,14 @@ pub struct RollbackReq {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetServiceVisibilityReq {
     pub visibility: String,
+}
+
+/// `POST /api/services/:id/subdomain`:subdomain(= 公開 URL)の変更。旧 URL は即失効
+/// (catch-all → 302 /noservice)。GitHub repo 名は変わらない(rename と同型の受容)。
+/// この service を注入している caller は再デプロイで新値が入る(未反映は needs_redeploy が出す)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetServiceSubdomainReq {
+    pub subdomain: String,
 }
 
 /// `POST /api/services/:id/exec` のリクエスト。稼働中コンテナ内で **1 コマンド**を

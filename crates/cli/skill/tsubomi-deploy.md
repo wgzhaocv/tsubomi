@@ -50,7 +50,9 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 > **create の前に決めるのは `--port` と「listen するか」だけ**。
 > port だけは作成後に変更できない(route / 内部リンクの真源 — 間違えたら作り直し)。
 > それ以外は後から変えられる:`tbm service visibility <名前> <private|company|public>` /
-> `tbm service rename <名前> <新名>`(subdomain = 公開 URL / GitHub repo は不変)/
+> `tbm service rename <名前> <新名>`(表示名のみ)/
+> `tbm service subdomain <名前> <新subdomain>`(公開 URL の変更。**旧 URL は即失効**・GitHub repo 名は不変・
+> この service を注入している呼び出し側は再デプロイで新値)/
 > `tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`(**次のデプロイから反映**)/
 > `tbm service stateful <名前>`(false→true の一方向のみ)。
 > 作成直後の表示に port / visibility / stateful / memory が出るので、port を間違えたらその場で作り直す。
@@ -60,7 +62,8 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
 > 注意点は復元側:同名で作り直した後に古い方を `tbm trash restore` すると稼働中の同名リソースと衝突して 409 になる
 > (先に稼働中の方を rename か delete)。同名がゴミ箱に複数堆積したら `tbm trash list` の id で特定する。
 
-- service:`tbm service create <名前>`(名前が subdomain になる)。**GitHub 連携は既定**
+- service:`tbm service create <名前>`(名前の slug が subdomain になる。
+  `--subdomain <sub>` で明示指定も可 — 使用中なら 409)。**GitHub 連携は既定**
   (repo/secret/variable と workflow 設定までこの 1 回で済む。secret は stdin 直達で
   出力に出ない。§4 参照)。gh が無ければ `setup_commands` が返る(手動 fallback)。連携せず
   resource だけ作るなら `--no-github`(応答に deploy_key / registry pass の**秘密が平文で載る** —
@@ -68,8 +71,9 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
   - 任意フラグ:`--port <PORT>`(listen ポート。既定 8080。**8080 以外を指定すると公開範囲の既定が
     `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(持ち込み DB 等の
     ステートフルコンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータディレクトリを保護)/
-    `--memory <MiB>`(上限。既定 1024)/ `--cpus <N>`。**port 以外は作成後にも変更できる**(上の
-    一覧。OOM なら `tbm service limits <名前> --memory <MiB>` を上げて再デプロイ — 作り直し不要)。
+    `--memory <MiB>`(上限。既定 1024)/ `--cpus <N>` / `--subdomain <sub>`(公開 URL の
+    サブドメイン)。**port 以外は作成後にも変更できる**(上の一覧。OOM なら
+    `tbm service limits <名前> --memory <MiB>` を上げて再デプロイ — 作り直し不要)。
 - database:`tbm db create <名前>`
   - **dev/検証環境用の DB が欲しい → `tbm db fork <元> <新名> [--schema-only]`**(この瞬間の
     構造 + データごと複製。migration 再生や手動データ投入は不要。`--schema-only` = 構造だけ。
@@ -374,6 +378,9 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
 - **`tbm cache rotate` の後は再デプロイが要る**:cache は資格情報が 1 本 = **注入値そのもの**が
   変わるので、実行中の app は古いパスワードを握ったまま即座に認証エラーになる(`status` の
   `未反映` にも出る)。
+- **`tbm service subdomain` の後、その service を注入している呼び出し側は再デプロイが要る**:
+  `_URL`/`_HOST` の中身(= 内部ホスト名)が変わるので、実行中の caller は旧ホスト名を握ったまま
+  断線する(caller 側 `status` の `未反映` にも出る)。
 - **`tbm db rotate` は再デプロイ不要**:回すのは **human role**(外部接続用)だけで、注入されるのは
   **app role** なので実行中の app は切れない(外部 key の rotate が service を切らないための意図した
   設計)。影響するのは、公開接続文字列を**静的 env に置いてしまった**場合だけ(§3 冒頭)。
@@ -414,7 +421,12 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
   (`tbm db rotate` は human role だけなので実行中の app は無影響)。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
 - **`tbm service rename <名前> <新名>`** — 表示名だけ変わる(subdomain = 公開 URL / GitHub repo は
-  不変)。**`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — リソース上限の変更
+  不変)。**`tbm service subdomain <名前> <新subdomain>`** — 公開 URL の変更(**旧 URL は即失効** =
+  302 /noservice。GitHub repo 名は旧名のまま — `delete --with-repo` は現 subdomain 名で探すため
+  **見つからずエラーで止まる**(旧名の repo は `gh repo delete` で手動掃除)。
+  この service を注入している呼び出し側は**再デプロイ**で新しい `_URL`/`_HOST` が入る —
+  それまでは status の [未反映:要デプロイ] が出る)。
+  **`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — リソース上限の変更
   (次のデプロイから反映)。**`tbm service stateful <名前>`** — ステートフル化(false→true のみ。
   次のデプロイから stop-first)。
 - **`tbm service visibility <service名> <private|company|public>`** — 公開範囲の切り替え(**即時反映・
@@ -442,11 +454,11 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | Rust が起動直後 exit(DB 接続) | `NoTls` で `sslmode=require` に繋げない | §3.1(`postgres-native-tls` で TLS コネクタを渡す) |
 | ORM / ライブラリが URL 形を受け取らない | URL 一本で組めないケース | §3.1 の素材 env(`DATABASE_HOST`/`_PORT`/`_USER`/`_PASSWORD`/`_NAME`/`_SSLMODE`) |
 | `code: unauthorized` | 未ログイン | `tbm login` |
-| `code: conflict`(create) | 同名の**稼働中**リソースがある(ゴミ箱は名前を占有しない) | 別名にするか、稼働中の方を rename / delete |
+| `code: conflict`(create) | 同名の**稼働中**リソースがある(ゴミ箱は名前を占有しない)/ `--subdomain` が使用中(こちらは**ゴミ箱内も占有** — `tbm trash list`) | 別名にするか、稼働中の方を rename / delete。subdomain 409 は別の subdomain を指定 |
 | `code: conflict`(trash restore) | 同名で作り直した稼働中と衝突 | 稼働中を rename / delete してから restore。同名堆積は `tbm trash list` の id で特定 |
 | OOM で落ちる(exit=137) | メモリ上限不足 | `tbm service limits <名前> --memory <MiB>` → 再デプロイ |
 | `code: validation` | 入力不正 | メッセージに従う |
-| 注入が効かない / env が無い | 実行中に注入した(値は起動の瞬間に解決)/ cache rotate 後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
+| 注入が効かない / env が無い | 実行中に注入した(値は起動の瞬間に解決)/ cache rotate・注入元 service の subdomain 変更後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
 | プラットフォーム DB に拡張が無い / 特殊なミドルウェアが要る | managed の範囲外 | 持ち込みコンテナ(§3.2:`--port` + `--stateful` + volume) |
 | 持ち込み DB が再デプロイでデータ全損 | データディレクトリを volume にマウントしていない | §3.2(volume 注入 → データ投入し直し) |
 | GitHub CI が回らない(billing/quota) | Actions 額度切れ | `tbm deploy --local` へ(既成イメージ / 無 context Dockerfile なら `--image`・`--dockerfile`) |

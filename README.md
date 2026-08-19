@@ -250,7 +250,7 @@ tbm deploy --image <ref> | --dockerfile <path>   # サーバ側で pull / build(
 tbm deploy --watch                               # push → Actions 追跡 → デプロイ完走 → 検証を一括
 tbm service status|logs|exec|metrics|deploys|verify|rollback <名前>
 tbm service visibility <名前> <private|company|public>  # 公開範囲(即時反映・再デプロイ不要)
-tbm service rename|limits|stateful <名前> …      # 作成後に変えられない のは port だけ
+tbm service rename|subdomain|limits|stateful <名前> …  # 作成後に変えられないのは port だけ
 tbm inject <リソース名> --into <service名>           # 注入(database/volume/cache/service → service)
 ```
 

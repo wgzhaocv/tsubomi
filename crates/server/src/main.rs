@@ -83,7 +83,10 @@ async fn main() -> anyhow::Result<()> {
     // serve をブロックしない(照合クエリがロック待ちでも起動は進む — codex 審査)。
     {
         let state = state.clone();
-        tokio::spawn(async move { databases::log_orphan_tenant_dbs(&state).await });
+        tokio::spawn(async move {
+            databases::log_orphan_tenant_dbs(&state).await;
+            services::warn_reserved_subdomains(&state).await;
+        });
     }
     // M6 egress:テナントコンテナのアウトバウンドを iptables で縛る(宿主 + プライベートネットワーク遮断・インターネット全 TCP 許可)。
     // prod Linux+root のみ実効、dev / 非 root は no-op。best-effort(失敗は次 tick で収束)。

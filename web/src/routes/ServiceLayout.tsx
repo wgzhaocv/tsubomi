@@ -166,7 +166,7 @@ export default function ServiceLayout() {
             value={renameName}
             autoFocus
             onChange={(e) => setRenameName(e.target.value)}
-            description="表示名だけ変わります。公開 URL(subdomain)と GitHub repo はそのままです。"
+            description="表示名だけ変わります。公開 URL(subdomain)と GitHub repo はそのままです。subdomain は概要タブの「サブドメイン」から変更できます。"
           />
           {rename.error && (
             <p className="text-sm font-semibold text-[#e05a5a]">{rename.error.message}</p>

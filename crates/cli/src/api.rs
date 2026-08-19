@@ -985,6 +985,28 @@ pub async fn service_set_visibility(
     Ok(())
 }
 
+/// subdomain の変更(POST /services/{id}/subdomain)。値の検証はサーバ側(不正は 400、
+/// 使用中は 409)。更新後の ServiceDto(新 URL 込み)が返る。
+pub async fn service_set_subdomain(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+    subdomain: &str,
+) -> Result<ServiceDto> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services/{id}/subdomain"))
+            .bearer_auth(token)
+            .json(&tsubomi_shared::SetServiceSubdomainReq {
+                subdomain: subdomain.to_string(),
+            }),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse subdomain response")
+}
+
 // ============ M3 注入 / 静的 env ============
 
 pub async fn inject_list(

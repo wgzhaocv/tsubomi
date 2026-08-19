@@ -177,8 +177,9 @@ export default function ServiceEnv() {
                   <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-xs font-bold text-accent-foreground">
                     注入
                   </span>
-                  {/* 値は起動の瞬間に解決されるので、今動いているコンテナより後に作られた注入は
-                      まだ効いていない。症状(env が無い)が原因を指さないのでここで明示する。 */}
+                  {/* 値は起動の瞬間に解決されるので、今動いているコンテナ起動より後に作られた /
+                      値が変わった(cache rotate・注入元 service の subdomain 変更)注入は
+                      まだ効いていない。症状(env が無い / 断線)が原因を指さないのでここで明示する。 */}
                   {inj.needs_redeploy && (
                     <span className="shrink-0 rounded-full bg-[#f5e6c8] px-2 py-0.5 text-xs font-bold text-[#8a6d1f]">
                       未反映(要デプロイ)

@@ -1,5 +1,15 @@
 import { useState } from "react";
-import { Check, Copy, ExternalLink, EyeOff, Globe, Play, Square, Trash2 } from "lucide-react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  EyeOff,
+  Globe,
+  Pencil,
+  Play,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { useNavigate, useParams } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +31,7 @@ import {
   useServiceMetrics,
   useSetServiceLimits,
   useSetServiceVisibility,
+  useSetSubdomain,
   useStartService,
   useStopService,
   VISIBILITY_OPTIONS,
@@ -38,9 +49,19 @@ export default function ServiceOverview() {
   const stop = useStopService(id);
   const del = useDeleteService(id);
   const setVis = useSetServiceVisibility(id);
+  const setSub = useSetSubdomain(id);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
+  // subdomain 編集 modal(rename modal と同型)。Outlet は id で key されるので
+  // ここでは id 変化時の強制クローズは不要(遷移でコンポーネントごと作り直される)。
+  const [subOpen, setSubOpen] = useState(false);
+  const [subValue, setSubValue] = useState("");
+  const submitSubdomain = () => {
+    const trimmed = subValue.trim();
+    if (!trimmed || setSub.isPending) return; // 二重送信を防ぐ
+    setSub.mutate(trimmed, { onSuccess: () => setSubOpen(false) });
+  };
   const { copied, copy } = useCopied();
   // url を局所定数に取り出して narrow する(onClick クロージャ内でも string 確定にする)。
   const url = svc?.url;
@@ -121,7 +142,24 @@ export default function ServiceOverview() {
           <Stat label="現在の状態">{svc ? phaseLabel(svc.phase) : "…"}</Stat>
           <Stat label="希望状態">{svc ? desiredLabel(svc.desired_state) : "…"}</Stat>
           <Stat label="ポート">{svc?.container_port ?? "…"}</Stat>
-          <Stat label="サブドメイン">{svc?.subdomain ?? "…"}</Stat>
+          <Stat label="サブドメイン">
+            <span className="flex items-center gap-1">
+              <span className="truncate">{svc?.subdomain ?? "…"}</span>
+              {/* 編集 = 公開 URL が変わる操作なので modal で警告を添える(下の Modal)。 */}
+              <Button
+                type="text"
+                size="small"
+                aria-label="サブドメインを変更"
+                icon={<Pencil className="size-3.5" />}
+                disabled={!svc}
+                onClick={() => {
+                  setSubValue(svc?.subdomain ?? "");
+                  setSub.reset();
+                  setSubOpen(true);
+                }}
+              />
+            </span>
+          </Stat>
           <Stat label="イメージ">
             {svc?.image_digest ? shortDigest(svc.image_digest) : "未デプロイ"}
           </Stat>
@@ -266,6 +304,53 @@ export default function ServiceOverview() {
           />
           {del.error && <p className="text-sm font-semibold text-[#e05a5a]">{del.error.message}</p>}
         </div>
+      </Modal>
+
+      {/* subdomain 変更(rename modal と同型)。公開 URL が変わる操作なので影響を明記する。 */}
+      <Modal
+        open={subOpen}
+        title="サブドメインを変更"
+        typewriter={false}
+        width={460}
+        onClose={() => setSubOpen(false)}
+        footer={
+          <>
+            <Button type="text" onClick={() => setSubOpen(false)}>
+              キャンセル
+            </Button>
+            <Button
+              type="primary"
+              loading={setSub.isPending}
+              disabled={!subValue.trim() || subValue.trim() === svc?.subdomain}
+              onClick={submitSubdomain}
+            >
+              変更
+            </Button>
+          </>
+        }
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitSubdomain();
+          }}
+          className="flex w-full flex-col gap-3"
+        >
+          <Input
+            label="サブドメイン"
+            value={subValue}
+            autoFocus
+            onChange={(e) => setSubValue(e.target.value)}
+            description="小文字英数と「-」・英字始まり・「-」終わり不可・50 字以内(予約語と tsubomi- 始まりは不可)。公開 URL が新しいサブドメインに変わります。"
+          />
+          <p className="text-sm font-medium text-muted-foreground">
+            旧 URL は即座に無効になります。GitHub
+            リポジトリ名は変わりません。このサービスを注入している他のサービスは再デプロイで新しい値が入ります(それまで環境変数タブに「未反映」が出ます)。
+          </p>
+          {setSub.error && (
+            <p className="text-sm font-semibold text-[#e05a5a]">{setSub.error.message}</p>
+          )}
+        </form>
       </Modal>
     </div>
   );

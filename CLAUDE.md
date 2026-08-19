@@ -332,6 +332,27 @@ service 詳細 / `tbm service metrics` は「天井にどれだけ近いか」�
 なることは原理上ない)。メモリの上限範囲は**方針値**なので固定のまま(docker は物理超えを拒否しない)。
 実装級は **`doc/paas-m4-design.md` §3.3** の分母表。
 
+**subdomain の作成時指定 + 作成後変更(2026-08-19、server v59 / tbm 1.1.1)**:slugify 自動採番
+しか無かった subdomain を、①create で任意指定(`--subdomain` / web 詳細設定。指定時は 1 回だけ
+insert・使用中 409 = 乱数サフィックスで化けさせない)②作成後変更(`tbm service subdomain` /
+web 概要の編集 modal、`POST /services/{id}/subdomain`)の両方に開けた(migration 1 本 =
+`subdomain_changed_at`)。検証 `validate_subdomain` は slugify の出力形と一致(性質テストで機械封じ)
++ 予約語に **`tsubomi-` 前綴 + db/cache**を追加(M6 別名が私網の infra/app コンテナ名と docker DNS
+衝突する既存の暗穴も同時に塞ぐ — 自動採番ループの skip も同条件・`tsubomi-` base は前綴剥がしで救済・
+既存行は起動時 warn。suffix 込み 50 字上限 = 自動採番の出力も validate を通る round-trip)。変更は set_visibility と同じ
+「deploy_lock 内 DB 先行 → 現実収束」:route は新 host で `svc-<id>.yml` 原子上書き(旧 URL は
+catch-all → 302。**凍結しない** = 解放即再利用可は受容)、M6 別名は `realias_as_callee`
+(disconnect → 新別名 connect → `endpoint_has_alias` 閉環確認 = migrate_pgbouncer_aliases のレシピ)。
+取りこぼしは reconcile が直す:drift 判定を **(host, backend, ipallow) 三組**に拡張(host を見ないと
+変更の書込失敗で新 URL が永久 404)+ `attach_callees` が既接続時に別名検査(**三値** — inspect 失敗 =
+触らない、付け替え直前に fresh 再読 = realias との交錯で新別名を剥がす巻き戻り防止)→ 付け替え。
+同値変更は冪等(時刻不動)だが**収束段は再実行**(「再実行も可能」を嘘にしない)。caller の
+`_URL`/`_HOST` は起動時解決の旧値のまま = **caller 再デプロイまで断線**し得るのは背骨どおりで、
+`list_injections` の GREATEST に `subdomain_changed_at` を足し(cache rotate と同型)未反映バッジが
+零改修で点く(同値変更は時刻を動かさない = 偽未反映なし)。受容:GitHub repo 名は旧名のまま
+(`--with-repo` は現 subdomain 名で探すため見つからずエラー — `TSUBOMI_SERVICE_ID` 照合で誤削除はしない)・既存注入の
+env 名は不変(値だけ新しくなる)。実装級・受容表は **`doc/paas-service-subdomain-design.md`**。
+
 **AI フィードバック第 4 弾(2026-07-26、server v53 / tbm 1.0.32):`sslmode` の駆動系差を仕組みで消す**。
 発端は「注入された `DATABASE_URL` が Go では繋がるのに Node で落ちる」。**`sslmode=require` の意味が
 駆動系で割れている**(libpq = 暗号化するが証書を検証しない / node-postgres = **厳格に検証**)ため、

@@ -189,6 +189,7 @@ export type CreateServiceInput = {
   visibility?: string;
   stateful?: boolean;
   memory_mb?: number;
+  subdomain?: string;
 };
 
 export function useCreateService() {
@@ -207,7 +208,27 @@ export function useCreateService() {
   });
 }
 
-// リネーム(表示名のみ。subdomain = 公開 URL / GitHub repo は不変)。一覧 + 詳細を無効化。
+// subdomain(= 公開 URL)の変更。旧 URL は即失効、GitHub repo 名は不変。
+// この service を注入している呼び出し側は再デプロイで新値が入る(未反映バッジは注入一覧に出る)。
+// 一覧 + 詳細を無効化(URL バナー / サブドメイン Stat が新値に更新される)。
+export function useSetSubdomain(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (subdomain: string): Promise<Service> => {
+      const res = await fetch(`/api/services/${id}/subdomain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subdomain }),
+      });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as Service;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.all }),
+  });
+}
+
+// リネーム(表示名のみ。subdomain = 公開 URL / GitHub repo は不変 — subdomain の変更は
+// useSetSubdomain の別端点)。一覧 + 詳細を無効化。
 export function useRenameService(id: string) {
   const qc = useQueryClient();
   return useMutation({
