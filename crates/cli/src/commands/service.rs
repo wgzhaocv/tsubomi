@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 
 use crate::api;
 use crate::commands::{
-    OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_token_from,
+    OutputFormat, print_json, resolve_server_from, resolve_service_id, resolve_service_row,
+    resolve_token_from,
 };
 use crate::config;
 use tsubomi_shared::{
@@ -42,8 +43,8 @@ pub enum ServiceCmd {
         /// メモリ上限 MiB(省略 = 1024。範囲 128〜4096)
         #[arg(long)]
         memory: Option<i32>,
-        /// CPU 上限(コア数。例 0.5 / 2。省略 = 上限なし = 相対的な重み付けのみ。範囲 0.1〜16)。
-        /// 共有ホストで CPU を食い尽くして隣人を巻き添えにしない保険
+        /// CPU 上限(コア数。例 0.5 / 2。省略 = 上限なし = 相対的な重み付けのみ。
+        /// 0.1 以上・ホストのコア数まで)。共有ホストで CPU を食い尽くして隣人を巻き添えにしない保険
         #[arg(long)]
         cpus: Option<f64>,
     },
@@ -68,7 +69,7 @@ pub enum ServiceCmd {
         /// メモリ上限 MiB(範囲 128〜4096)
         #[arg(long)]
         memory: Option<i32>,
-        /// CPU 上限(コア数。例 0.5 / 2。範囲 0.1〜16)。`none` で上限を解除
+        /// CPU 上限(コア数。例 0.5 / 2。0.1 以上・ホストのコア数まで)。`none` で上限を解除
         #[arg(long)]
         cpus: Option<String>,
     },
@@ -363,12 +364,14 @@ pub async fn run(
             }
         }
         ServiceCmd::Metrics { name } => {
-            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
-            let m = api::service_metrics(&c, &server_url, &token, &id).await?;
+            // 行ごと解決する(id 解決と同じ 1 リクエスト)。使用量だけでは「多い / 少ない」が
+            // 判断できないので、設定上限(memory_mb / cpu_limit_millis)を分母として併せて出す。
+            let svc = resolve_service_row(&c, &server_url, &token, &name).await?;
+            let m = api::service_metrics(&c, &server_url, &token, &svc.id.to_string()).await?;
             if json {
                 print_json(&m)?;
             } else {
-                print_metrics(&name, &m);
+                print_metrics(&name, &m, &svc);
             }
         }
         ServiceCmd::Deploys { name } => {
@@ -710,12 +713,17 @@ fn print_status(
     }
 }
 
-/// コア数(人間の単位)→ millicores(wire)。範囲検証込みの単一真源(create / limits 共用。
-/// サーバ側 CPU_LIMIT_MILLIS_RANGE = 100..=16000 と対で、こちらはコア数で 0.1〜16)。
+/// コア数(人間の単位)→ millicores(wire)。create / limits 共用。
+/// **上界はここでは判定しない** — 実際の上限はホストのコア数(docker daemon が
+/// コア数超えの NanoCPUs を拒否する)であり、CLI はそれを知らない。知らない数字を
+/// 焼き込むと嘘になるので、上界はサーバの 400(実コア数入りの文案)に委ねる。
+/// ここで見るのは形だけ(下限 0.1・有限値・millicores が i32 に収まること)。
 fn cpus_to_millis(c: f64) -> Result<i32> {
-    if !(0.1..=16.0).contains(&c) {
-        bail!("--cpus は 0.1〜16 の範囲で指定してください(例: --cpus 0.5)");
+    if !c.is_finite() || c < 0.1 {
+        bail!("--cpus は 0.1 以上のコア数で指定してください(例: --cpus 0.5)");
     }
+    // `as i32` は飽和するので上限の自前判定は不要 — 大きすぎる値は i32::MAX として送られ、
+    // サーバが実コア数入りの 400 で返す(それがここで委ねたい文案そのもの)。
     Ok((c * 1000.0).round() as i32)
 }
 
@@ -1193,7 +1201,7 @@ async fn follow_logs(
 }
 
 /// metrics の text 表示(json は DTO 素通し)。
-fn print_metrics(name: &str, m: &ServiceMetricsDto) {
+fn print_metrics(name: &str, m: &ServiceMetricsDto, svc: &ServiceDto) {
     if !m.running {
         println!("{name}: 停止中(running=false)");
         if let Some(rc) = m.restart_count {
@@ -1204,24 +1212,61 @@ fn print_metrics(name: &str, m: &ServiceMetricsDto) {
         }
         return;
     }
-    let cpu = m
-        .cpu_pct
-        .map(|v| format!("{v:.1}%"))
-        .unwrap_or_else(|| "—".into());
-    // メモリは MiB + 上限比(%)で。
+    // docker の CPU% は **100% = 1 コア**。生値のままだと 8 コア機の 400% を「使いすぎ」と
+    // 誤読する(実際は全体の半分)。コア数に直し、**天井に対する割合**を主に据える(絶対値は括弧)。
+    // 天井は「今のコンテナに適用されている上限」があればそれ、無ければホスト全体 = どちらの
+    // 状態でも百分率が出る。DB の設定値ではなく適用済みの値を使うのが要点(下の未反映行を参照)。
+    let cpu = match m.cpu_pct.map(|v| v / 100.0) {
+        None => "—".into(),
+        Some(used) => {
+            if let Some(limit) = m.cpu_limit_millis.map(|c| c as f64 / 1000.0) {
+                format!("上限の {:.0}%({used:.2} / {limit} コア)", used / limit * 100.0)
+            } else if let Some(cores) = m.host_cores {
+                format!(
+                    "全体の {:.0}%({used:.2} / {cores} コア・個別上限なし)",
+                    used / cores as f64 * 100.0
+                )
+            } else {
+                format!("{used:.2} コア相当")
+            }
+        }
+    };
+    // メモリも同じ形(割合を主・絶対値を括弧)。分母は docker stats の実上限。
     let mem = match (m.mem_bytes, m.mem_limit_bytes) {
         (Some(u), Some(l)) if l > 0 => format!(
-            "{:.0} MiB / {:.0} MiB ({:.0}%)",
-            u as f64 / 1_048_576.0,
-            l as f64 / 1_048_576.0,
-            u as f64 / l as f64 * 100.0
+            "上限の {:.0}%({:.0} / {:.0} MiB)",
+            u as f64 / l as f64 * 100.0,
+            u as f64 / MIB,
+            l as f64 / MIB
         ),
-        (Some(u), _) => format!("{:.0} MiB", u as f64 / 1_048_576.0),
+        (Some(u), _) => format!("{:.0} MiB", u as f64 / MIB),
         _ => "—".into(),
     };
     println!("{name}: 稼働中");
     println!("  CPU:      {cpu}");
     println!("  メモリ:   {mem}");
+    // 設定値(DB = 期望)と適用値(コンテナ = 現実)のズレ = 「上限を変えたがまだデプロイして
+    // いない」。上限変更は次のデプロイから効くので、ここで言わないと「変えたのに効かない」に
+    // 見える。メモリと CPU の両方を同じ形で見る(片方だけだと非対称に嘘をつく)。
+    // 判定はサーバ(頭打ち規則を持つ側)。ここは「どの値へ変えたのか」を言うだけ。
+    let mem_pending = m.mem_limit_pending == Some(true);
+    let cpu_pending = m.cpu_limit_pending == Some(true);
+    if mem_pending || cpu_pending {
+        let mut parts: Vec<String> = Vec::new();
+        if mem_pending {
+            parts.push(format!("メモリ {} MiB", svc.memory_mb));
+        }
+        if cpu_pending {
+            parts.push(match svc.cpu_limit_millis {
+                Some(c) => format!("CPU {} コア", c as f64 / 1000.0),
+                None => "CPU 上限なし".to_string(),
+            });
+        }
+        println!(
+            "  ※ 設定は {} です(次のデプロイから反映 — 上の割合は今動いている値が分母)",
+            parts.join(" / ")
+        );
+    }
     if let Some(secs) = m.uptime_secs {
         println!("  稼働時間: {}", fmt_uptime(secs));
     }
@@ -1235,6 +1280,9 @@ fn print_metrics(name: &str, m: &ServiceMetricsDto) {
         );
     }
 }
+
+/// バイト → MiB の除数。metrics 表示で 4 回出るので名前を付ける。
+const MIB: f64 = 1_048_576.0;
 
 /// 秒を人間可読な稼働時間に(d/h/m)。
 fn fmt_uptime(secs: i64) -> String {

@@ -727,6 +727,27 @@ pub struct ServiceMetricsDto {
     /// 直近の終了が OOM だったか(inspect の State.OOMKilled)。
     #[serde(default)]
     pub oom_killed: Option<bool>,
+    /// ホスト(docker daemon)の CPU コア数。`cpu_pct` は docker 由来で **100% = 1 コア**
+    /// なので、これが無いと「多い / 少ない」を判断できない(8 コア機の 400% は全体の半分)。
+    /// `cpu_limit_millis` が無いときの百分率の分母 = 天井は常に存在する(個別上限が無ければ
+    /// 天井はホスト全体)。取得不能は None。古いクライアント互換で `serde(default)`。
+    #[serde(default)]
+    pub host_cores: Option<i32>,
+    /// **今動いているコンテナに適用されている** CPU 上限(millicores)。None = 上限なし。
+    /// `mem_limit_bytes` と対称に「実行時の真値」(inspect の HostConfig.NanoCpus)を載せる —
+    /// DB の設定値は次のデプロイ用の期望値なので、それを分母にすると「上限を 2 CPU に変えた
+    /// 直後(未デプロイ)、実際は 1 CPU の 100% なのに『上限の 50%』」と嘘をつく。設定値との
+    /// ズレは「未反映」として別に出す。古いクライアント互換で `serde(default)`。
+    #[serde(default)]
+    pub cpu_limit_millis: Option<i32>,
+    /// 設定値(DB = 次のデプロイ用の期望)が、動いているコンテナにまだ反映されていないか。
+    /// **判定はサーバ側**:CPU はホストのコア数で頭打ちにしてから比べる必要があり
+    /// (`docker::effective_cpu_millis`)、その規則を客側に写すと二箇所に増える。None =
+    /// 判定不能(停止中 / 旧サーバ)。どの値へ変えたのかは客側が自分の service 行から言う。
+    #[serde(default)]
+    pub mem_limit_pending: Option<bool>,
+    #[serde(default)]
+    pub cpu_limit_pending: Option<bool>,
 }
 
 /// `POST /api/services/:id/rollback` のリクエスト。`deploys` 履歴の戻し先。

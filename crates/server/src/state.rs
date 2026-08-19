@@ -26,6 +26,22 @@ pub struct AppStateInner {
     /// docker.sock の async クライアント(M3)。コンテナの pull / 起動 / 停止 /
     /// 一覧(後の reconcile)が使う。プラットフォームはホスト直走りで docker.sock を保持。
     pub docker: bollard::Docker,
+    /// docker daemon が見ている CPU コア数(`info().ncpu`)。二役ある。
+    ///
+    /// 一つは `--cpus`(NanoCPUs)の**実際の上界** — daemon はコア数を超える指定でコンテナ
+    /// 作成自体を拒否する。ここを知らずに固定値で許すと「保存は 200、次のデプロイで失敗」に
+    /// なり、設定から遠く離れた場所で壊れる。
+    ///
+    /// もう一つは使用量の百分率の分母(個別上限が無いときの天井 = ホスト全体)。
+    ///
+    /// 単機運用なので起動時に一度引けば足りる(取得不能 = None は上界チェックを緩め、
+    /// 百分率は出さない = 嘘をつかない側に倒す)。
+    ///
+    /// 受容:server を動かしたまま daemon 側のコア数が変わると陳腐化する。本番では daemon が
+    /// 再起動すれば server コンテナも一緒に再起動するので実質 dev(OrbStack の VM 再構成)限定。
+    /// 陳腐でも実害は「入口の上界が実機とずれる」までで、施加点の頭打ち(`docker::clamped_nano_cpus`)
+    /// が最終防壁になる。
+    pub host_cores: Option<i32>,
     /// service 単位のデプロイ直列化ロック(単一ホスト運用なのでインメモリで足りる)。
     /// 同一 service への同時 deploy(hook / `--local`)はここで順番待ちし、コンテナ /
     /// route / 状態への競合を防ぐ。S7/S8 の start/stop/reconcile も同 service を触る時は
@@ -95,9 +111,24 @@ impl AppState {
         // docker 無しでは service フェーズは機能しないので、ここで早期に失敗させる。
         let docker =
             bollard::Docker::connect_with_local_defaults().context("docker.sock への接続に失敗")?;
-        docker.ping().await.context(
+        // ping(疎通確認・失敗は致命)と info(コア数・失敗は非致命)は独立なので同時に投げる。
+        // info は plugin / driver 列挙まで含む重い呼び出しで、直列にすると起動が 2 往復ぶん遅く
+        // なる(`just ship` の server 単換の速さは無瞬断の一部)。
+        let (ping, info) = tokio::join!(docker.ping(), docker.info());
+        ping.context(
             "docker daemon に ping できない(docker は起動しているか / DOCKER_HOST を確認)",
         )?;
+        let host_cores = info
+            .ok()
+            .and_then(|i| i.ncpu)
+            .and_then(|n| i32::try_from(n).ok())
+            .filter(|&n| n > 0);
+        match host_cores {
+            Some(n) => tracing::info!(cores = n, "ホストの CPU コア数を検出"),
+            None => tracing::warn!(
+                "ホストの CPU コア数を取得できません(docker info)。CPU 上限の上界チェックと使用量の百分率が緩みます"
+            ),
+        }
 
         // ホスト指標の broadcast。初期受信者は即捨てる(閲覧者が WS 接続時に subscribe する)。
         // 容量は小さくてよい(5s 周期・遅い client は Lagged で最新へ追従するだけ)。
@@ -141,6 +172,7 @@ impl AppState {
             crypto,
             http,
             docker,
+            host_cores,
             deploy_locks: Mutex::new(HashMap::new()),
             metrics_tx,
             metrics_running: Arc::new(tokio::sync::Mutex::new(false)),

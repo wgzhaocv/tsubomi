@@ -19,7 +19,8 @@ export function UsageBar({ pct }: { pct: number | null }) {
 /**
  * ラベル + 右寄せの数値 + バーの 1 行。loading 中は Skeleton に差し替える。
  * `pct` は null = 取得不能(0 幅バー)、**undefined = 分母が無いのでバー自体を出さない**
- * (上限なしの CPU など。0 幅バーだと「使っていない」に見えるため)。
+ * (0 幅バーだと「使っていない」に見えるため)。service の CPU は個別上限が無くても
+ * ホスト全体を天井にするので分母は基本ある — undefined になるのはコア数が取れない時だけ。
  */
 export function MetricRow({
   label,

@@ -51,11 +51,29 @@ const CONTAINER_PORT_RANGE: std::ops::RangeInclusive<i32> = 1..=65535;
 /// メモリ上限の既定 / 範囲(MiB)。既定 **1024** = migration 20260620 が OOM 対策で
 /// 512→1024 へ引き上げた DDL DEFAULT と一致させる(512 に戻すと是正の逆行)。
 /// 下限は最小級の app、上限は 16GB 共有ホストの節度。
+///
+/// CPU の上界(下)はホストの事実に置き換えたのに、こちらが固定値のままなのは意図的:
+/// 4096 は「共有ホストで 1 app が取り過ぎない」という**方針値**で、物理量ではない。
+/// docker は物理メモリ超えの `--memory` を(コア数超えの NanoCPUs と違って)拒否しないので、
+/// 「入口は通るのにデプロイで失敗する」という CPU 側の病がそもそも起きない。
 const DEFAULT_MEMORY_MB: i32 = 1024;
 const MEMORY_MB_RANGE: std::ops::RangeInclusive<i32> = 128..=4096;
-/// CPU 上限の許容範囲(millicores)。下限 100 = 0.1 CPU(それ未満は実用にならない)、
-/// 上限 16000 = 16 CPU(単一ホストの物理上限を超えた指定は docker がエラーにするだけなので緩く)。
-const CPU_LIMIT_MILLIS_RANGE: std::ops::RangeInclusive<i32> = 100..=16000;
+/// CPU 上限の下限(millicores)。100 = 0.1 CPU(それ未満は実用にならない)。
+/// **上界は固定値ではなくホストのコア数**(`AppState::host_cores`)— docker daemon は
+/// コア数を超える NanoCPUs でコンテナ作成そのものを拒否する。以前はここを 16000 固定にし
+/// 「超過は docker がエラーにするだけ」としていたが、上限の変更は**次のデプロイから反映**
+/// されるので、その拒否は設定操作から遠く離れた時点で「デプロイ失敗」として現れる
+/// (原因に辿り着けない)。入口で弾くのが正しい。コア数が取れない環境では下の
+/// フォールバックを使う(緩めるだけ = 従来の挙動)。
+const CPU_LIMIT_MILLIS_MIN: i32 = 100;
+const CPU_LIMIT_MILLIS_MAX_FALLBACK: i32 = 16000;
+
+/// このホストで許される CPU 上限の上界(millicores)。コア数不明なら従来の固定値。
+fn cpu_limit_millis_max(state: &AppState) -> i32 {
+    state
+        .host_cores
+        .map_or(CPU_LIMIT_MILLIS_MAX_FALLBACK, |n| n.saturating_mul(1000))
+}
 
 /// 公開範囲(`service_details.visibility`)。DB の CHECK と対を成す単一真源 —
 /// API 入力検証(不正値は 400)と route 分岐(ipallow 有無)をここに集約する。
@@ -289,13 +307,20 @@ fn check_memory_mb(m: i32) -> AppResult<()> {
     Ok(())
 }
 
-/// cpu_limit_millis の範囲検証(create / limits 共有)。
-fn check_cpu_limit_millis(cpu: i32) -> AppResult<()> {
-    if !CPU_LIMIT_MILLIS_RANGE.contains(&cpu) {
+/// cpu_limit_millis の範囲検証(create / limits 共有)。上界はホストのコア数由来
+/// (`cpu_limit_millis_max`)なので、機体を移せば自動で追従する。
+fn check_cpu_limit_millis(state: &AppState, cpu: i32) -> AppResult<()> {
+    let max = cpu_limit_millis_max(state);
+    if !(CPU_LIMIT_MILLIS_MIN..=max).contains(&cpu) {
+        // 上界そのものが「このホストのコア数 × 1000」なので、コア数が分かるときは数字を繰り返さない。
+        // 分からないときだけ、その上界が暫定値であることを言う。
+        let note = if state.host_cores.is_none() {
+            "(このホストのコア数は不明です)"
+        } else {
+            ""
+        };
         return Err(AppError::BadRequest(format!(
-            "cpu_limit_millis は {}〜{}(millicores、1000 = 1 CPU)にしてください",
-            CPU_LIMIT_MILLIS_RANGE.start(),
-            CPU_LIMIT_MILLIS_RANGE.end()
+            "cpu_limit_millis は {CPU_LIMIT_MILLIS_MIN}〜{max}(millicores、1000 = 1 CPU)にしてください{note}"
         )));
     }
     Ok(())
@@ -705,7 +730,7 @@ pub async fn set_limits(
         check_memory_mb(m)?;
     }
     if let Some(cpu) = req.cpu_limit_millis {
-        check_cpu_limit_millis(cpu)?;
+        check_cpu_limit_millis(&state, cpu)?;
     }
 
     let row: Option<(i32, Option<i32>)> = sqlx::query_as(
@@ -1645,7 +1670,7 @@ pub async fn create(
     let stateful = req.stateful.unwrap_or(false);
     // CPU 上限は任意(None = 従来どおりソフトな重み付けのみ)。指定時だけ範囲を検証。
     if let Some(cpu) = req.cpu_limit_millis {
-        check_cpu_limit_millis(cpu)?;
+        check_cpu_limit_millis(&state, cpu)?;
     }
 
     // 同名チェック(UNIQUE が最終ガードだが、先に弾いて分かりやすく)。

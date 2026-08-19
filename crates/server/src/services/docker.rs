@@ -51,6 +51,31 @@ pub struct RunSpec {
     pub binds: Vec<String>,
 }
 
+/// 設定値の CPU 上限(millicores)→ **実際にコンテナへ適用される値**(ホストのコア数で頭打ち。
+/// 理由は上の host_config のコメント)。この規則の唯一の家 — 施加(下)と「未反映」判定
+/// (`service_metrics`)の両方がここを引くので、期待値と現実が定義上ずれない。
+fn effective_cpu_millis(state: &AppState, desired_millis: Option<i32>) -> Option<i32> {
+    let millis = desired_millis?;
+    match state.host_cores.and_then(|n| n.checked_mul(1000)) {
+        Some(max) if millis > max => Some(max),
+        _ => Some(millis),
+    }
+}
+
+/// `--cpus` を NanoCpus に直す(頭打ちは `effective_cpu_millis`)。
+fn clamped_nano_cpus(state: &AppState, spec: &RunSpec) -> Option<i64> {
+    let applied = effective_cpu_millis(state, spec.cpu_limit_millis)?;
+    if Some(applied) != spec.cpu_limit_millis {
+        tracing::warn!(
+            service_id = %spec.service_id,
+            requested_millis = spec.cpu_limit_millis,
+            applied_millis = applied,
+            "CPU 上限がホストのコア数を超えているため頭打ちにした(そのまま渡すと docker がコンテナ作成を拒否する)"
+        );
+    }
+    Some((applied as i64) * 1_000_000)
+}
+
 /// digest 指定で registry から pull する(決定 #3:tag ではなく内容アドレス)。
 /// 戻り値は `create_container` に渡す digest ピン留め参照 `<repo>@<digest>`。
 pub async fn pull(state: &AppState, service_id: Uuid, image_digest: &str) -> AppResult<String> {
@@ -313,7 +338,15 @@ pub async fn run(state: &AppState, spec: &RunSpec, image_ref: &str) -> AppResult
         cpu_shares: Some(spec.cpu_shares as i64),
         // 任意の CPU 上限(`--cpus` 相当。NanoCpus = millicores × 10^6。AI 審査 R4):
         // ソフトな重み付けは競合時にしか効かず、単一ホストで CPU を独占する service が隣人を巻き添えにするため。
-        nano_cpus: spec.cpu_limit_millis.map(|m| (m as i64) * 1_000_000),
+        // **ホストのコア数で頭打ちにする** — daemon はコア数超えの NanoCpus でコンテナ作成そのものを
+        // 拒否する。入口(check_cpu_limit_millis)は今後の write を塞ぐだけなので、機体を移した後
+        // (CLAUDE.md:将来 x86_64 へ)や旧版で保存済みの値がここに残る。ここで弾く選択もあるが、
+        // それは **健全に動いている app を deploy/start/reconcile 復活の全経路で永久停止**させる
+        // (v48 の「reconcile 復活が探測で failed 化 → 健全 app の永久静默停止」と同じ穴)。
+        // 一方この頭打ちは物理最大へ寄せる方向しかないので、要求より少ない CPU を与えることは
+        // 原理上ない(8 コア機で「16 コアまで」= 元々上限として無意味)。黙ってはやらず warn に残し、
+        // 利用者側にも「適用済みの上限」として metrics に出る(= 設定値とのズレが見える)。
+        nano_cpus: clamped_nano_cpus(state, spec),
         // コンテナ強化(背骨「隔離は仕組みで守る」。memory 上限の隣に並べるホスト保護):
         //  - pids_limit:tasks(プロセス+スレッド)上限。fork 爆弾でホストの PID を食い潰させない。
         //    512 は単一 app には潤沢、かつ暴走を確実に頭打ちにする(memory 既定は 1024MB — migration 20260620)。
@@ -1369,6 +1402,10 @@ pub async fn service_metrics(state: &AppState, service_id: Uuid) -> ServiceMetri
         started_at: None,
         uptime_secs: None,
         oom_killed: None,
+        host_cores: state.host_cores,
+        cpu_limit_millis: None,
+        mem_limit_pending: None,
+        cpu_limit_pending: None,
     };
     let Some(name) = any_container_name(state, service_id).await.ok().flatten() else {
         return empty; // 未デプロイ / 実体削除済み。
@@ -1397,15 +1434,55 @@ pub async fn service_metrics(state: &AppState, service_id: Uuid) -> ServiceMetri
     } else {
         None
     };
+    // 適用値(コンテナの実物)。メモリは stats、CPU は inspect の HostConfig から。
+    let applied_mem = sample.as_ref().and_then(|s| s.mem_limit).map(|l| l as i64);
+    let applied_cpu = info
+        .host_config
+        .as_ref()
+        .and_then(|h| h.nano_cpus)
+        .filter(|&n| n > 0)
+        .map(|n| (n / 1_000_000) as i32);
+    // 設定値(DB = 次のデプロイ用の期望)。読めなければ未反映判定は諦める(false)。
+    let desired: Option<(i32, Option<i32>)> = if running {
+        sqlx::query_as("SELECT memory_mb, cpu_limit_millis FROM service_details WHERE resource_id = $1")
+            .bind(service_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     ServiceMetricsDto {
         running,
         cpu_pct: sample.as_ref().and_then(|s| s.cpu_pct),
         mem_bytes: sample.as_ref().map(|s| s.mem_bytes as i64),
-        mem_limit_bytes: sample.as_ref().and_then(|s| s.mem_limit).map(|l| l as i64),
+        mem_limit_bytes: applied_mem,
         restart_count: info.restart_count,
         started_at,
         uptime_secs,
         oom_killed: st.and_then(|s| s.oom_killed),
+        // コア数は稼働状態に依らないプラットフォームの定数。停止中でも返す(上限入力欄の
+        // 換算・上界表示が「起動していないと出ない」のを避ける)。
+        host_cores: state.host_cores,
+        // 適用済みの CPU 上限。inspect の HostConfig.NanoCpus(0 / 不在 = 上限なし)を
+        // millicores に戻す。メモリの mem_limit_bytes と同じ「実行時の真値」の立場。
+        cpu_limit_millis: applied_cpu,
+        // 未反映判定(running のときだけ意味がある)。**期望値をそのまま比べてはいけない** —
+        // CPU は頭打ちされるので、旧版が保存した過大な値は再デプロイしても一致せず「永遠に
+        // 未反映」と誤報する。期待値は effective_cpu_millis を通した値。
+        mem_limit_pending: running.then(|| {
+            desired
+                .map(|(mem_mb, _)| {
+                    applied_mem.is_some_and(|l| l != (mem_mb as i64) * 1024 * 1024)
+                })
+                .unwrap_or(false)
+        }),
+        cpu_limit_pending: running.then(|| {
+            desired
+                .map(|(_, cpu)| effective_cpu_millis(state, cpu) != applied_cpu)
+                .unwrap_or(false)
+        }),
     }
 }
 

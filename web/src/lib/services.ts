@@ -130,6 +130,15 @@ export type ServiceMetrics = {
   restart_count?: number | null;
   started_at?: string | null;
   oom_killed?: boolean | null;
+  // ホストの CPU コア数。cpu_pct は docker 由来で 100% = 1 コアなので、これが無いと
+  // 「多い / 少ない」が言えない。個別上限が無いときの百分率の分母 + 上限入力の上界。
+  host_cores?: number | null;
+  // **今のコンテナに適用されている** CPU 上限(millicores)。null = 上限なし。DB の設定値
+  // (`Service.cpu_limit_millis` = 次のデプロイ用の期望値)とは別物。
+  cpu_limit_millis?: number | null;
+  // 設定値がまだコンテナに反映されていないか(判定はサーバ — CPU は頭打ち規則が絡む)。
+  mem_limit_pending?: boolean | null;
+  cpu_limit_pending?: boolean | null;
 };
 
 // 注入のバインディング(InjectionDto 鏡)。valid=false は失効(注入元が削除済み)。
@@ -273,11 +282,15 @@ export function useServiceLogs(id: string, poll = true) {
 // 共有ホストの Pi)ので、ログ(5 秒)より粗くする。画面を離れている間は取りに行かない
 // (TanStack の既定 = background では refetchInterval が止まる)。取得失敗は
 // 補助情報なので黙って諦める(概要の他の部分を赤字で汚さない)。
-export function useServiceMetrics(id: string, poll = true) {
+// 追従の判断をフック内に閉じる:止まっているコンテナの使用量は変化しないので輪詢しない。
+// **呼び出し側にオプションを持たせない**のが要点 — 同じ query key を別オプションで複数箇所から
+// 呼ぶと、輪詢するかどうかが「最後にマウントされた側」に依存して揺れる。判断が中にあれば、
+// どの画面から何箇所呼んでも 1 本の query・1 本のタイマーに収束する。
+export function useServiceMetrics(id: string) {
   return useQuery({
     queryKey: serviceKeys.metrics(id),
     queryFn: () => getJson<ServiceMetrics>(`/api/services/${id}/metrics`),
-    refetchInterval: poll ? 20_000 : false,
+    refetchInterval: (q) => (q.state.data?.running ? 20_000 : false),
     retry: false,
   });
 }

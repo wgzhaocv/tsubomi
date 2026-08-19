@@ -12,7 +12,6 @@ import { formatBytesPair, formatRelative } from "@/lib/format";
 import {
   desiredLabel,
   phaseLabel,
-  type Service,
   type ServiceMetrics,
   serviceVisibility,
   type SetLimitsInput,
@@ -286,9 +285,9 @@ function Stat({ label, children }: { label: string; children: React.ReactNode })
 // 「95% まで来ている / OOM で落ちた」を見てから上限を触る、という順序にするため。
 // docker の CPU% は 100% = 1 コアなので、`--cpus` と同じ **コア数**に直して見せる
 // (単位が揃っていないと入力欄の値と突き合わせられない)。
-function CurrentUsage({ svc, id }: { svc: Service; id: string }) {
-  const running = svc.phase === "running";
-  const { data: m, isLoading, isError } = useServiceMetrics(id, running);
+function CurrentUsage({ id }: { id: string }) {
+  // 輪詢の判断はフックの中(lib/services.ts)。同じ key を親も呼ぶが query は 1 本に収束する。
+  const { data: m, isLoading, isError } = useServiceMetrics(id);
   // 補助情報なので、取得できない環境(未対応サーバ等)では黙って出さない。
   if (isError) return null;
   if (!isLoading && m && !m.running) {
@@ -303,34 +302,40 @@ function CurrentUsage({ svc, id }: { svc: Service; id: string }) {
     m?.mem_bytes != null && m.mem_limit_bytes != null
       ? (m.mem_bytes / m.mem_limit_bytes) * 100
       : null;
-  // docker の CPU% は 100% = 1 コア。上限(millicores)があれば占有率も出せる。
+  // docker の CPU% は **100% = 1 コア**。コア数の生値は「多いのか少ないのか」を語らない
+  // (8 コア機の 4 コアは全体の半分)ので、**天井に対する割合**を主に据え、絶対値は括弧に落とす。
+  // 天井は「今のコンテナに適用されている上限」があればそれ、無ければホスト全体 —— どちらの
+  // 状態でも必ず百分率が出る(以前は個別上限が無いとき分母が無く、既定では棒も % も出ていなかった)。
+  // 分母に DB の設定値を使ってはいけない:上限を変えて未デプロイのとき、実際は適用済み上限の
+  // 100% なのに「上限の 50%」と嘘をつく(未反映は下の pendingNote が別に言う)。
   const cores = m?.cpu_pct != null ? m.cpu_pct / 100 : null;
-  const cpuLimitCores = svc.cpu_limit_millis != null ? svc.cpu_limit_millis / 1000 : null;
-  const cpuPct = cores != null && cpuLimitCores ? (cores / cpuLimitCores) * 100 : null;
+  const cpuLimitCores = m?.cpu_limit_millis != null ? m.cpu_limit_millis / 1000 : null;
+  const hostCores = m?.host_cores ?? null;
+  const cpuCeil = cpuLimitCores ?? hostCores;
+  const cpuPct = cores != null && cpuCeil ? (cores / cpuCeil) * 100 : null;
   const facts = usageFacts(m);
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card/40 p-4">
+    <div className="flex flex-col gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card p-4">
       <MetricRow
         label="メモリ使用量"
-        pct={memPct}
+        pct={memPct ?? undefined}
         detail={
           memPct != null
-            ? `${formatBytesPair(m?.mem_bytes, m?.mem_limit_bytes)}(${Math.round(memPct)}%)`
+            ? `上限の ${Math.round(memPct)}%(${formatBytesPair(m?.mem_bytes, m?.mem_limit_bytes)})`
             : "—"
         }
         loading={isLoading}
       />
       <MetricRow
         label="CPU 使用量"
-        // 上限が無いときは分母が無いのでバーを出さない(0 幅バーは「使っていない」に見える)。
-        pct={cpuLimitCores ? cpuPct : undefined}
+        pct={cpuPct ?? undefined}
         detail={
           cores == null
             ? "—"
-            : cpuLimitCores
-              ? `${cores.toFixed(2)} / ${cpuLimitCores} CPU(${Math.round(cpuPct ?? 0)}%)`
-              : `${cores.toFixed(2)} CPU 相当`
+            : cpuCeil
+              ? `${cpuLimitCores ? "上限" : "全体"}の ${Math.round(cpuPct ?? 0)}%(${cores.toFixed(2)} / ${cpuCeil} コア${cpuLimitCores ? "" : "・個別上限なし"})`
+              : `${cores.toFixed(2)} コア相当`
         }
         loading={isLoading}
       />
@@ -349,6 +354,20 @@ function usageFacts(m?: ServiceMetrics): string {
   return parts.join(" · ");
 }
 
+// CPU 上限の入力欄に添える一行。コア数だけでは「機械のどれくらいか」が分からないので、
+// 入力値をホスト全体に対する割合へ換算して見せる(空欄 = 上限なしの意味も明示)。
+// **保存されるのは常にコア数(絶対値)**で、この % は表示だけ — 割合を保存すると
+// 別のコア数のホストへ移した瞬間に同じ設定が別の意味になる。
+function cpuHint(cpus: string, hostCores: number | null): string {
+  const t = cpus.trim();
+  if (t === "") return "空欄 = 上限なし(他の app と相対的に分け合う)";
+  const c = Number(t);
+  // 不正値は保存時の検証が言う。コア数が取れないときは換算できない。どちらも黙る
+  // (代わりに何か喋ると、入力の反響か無関係な豆知識になる)。
+  if (!Number.isFinite(c) || c <= 0 || !hostCores) return "";
+  return `${c} コア = このホスト(${hostCores} コア)全体の ${Math.round((c / hostCores) * 100)}%`;
+}
+
 // リソース上限の変更(memory / cpus)。値は次のデプロイから反映 — 実行中のコンテナには影響しない
 // (server の run_digest がデプロイのたびに DB から読み直す)。cpus 欄は空 = 上限なし。
 function LimitsSection({
@@ -359,6 +378,12 @@ function LimitsSection({
   id: string;
 }) {
   const setLimits = useSetServiceLimits(id);
+  // 同じ query key を CurrentUsage も呼ぶが、オプションはフック側が持つので query は 1 本。
+  const metrics = useServiceMetrics(id);
+  // CPU の実際の上界はホストのコア数(docker はコア数超えの指定でコンテナ作成を拒否する)。
+  // **取れないときは客側で上界を作らない** — 知らない数字を焼くと嘘になる(CLI の cpus_to_millis
+  // と同じ方針)。サーバが実コア数入りの 400 を返し、それが下の error 行に出る。
+  const hostCores = metrics.data?.host_cores ?? null;
   // 親が svc 確定後にだけレンダーするので、初期化子で現値を seed できる(初期化子は
   // 再実行されない = mutation 後の refetch が編集中の値を上書きしない)。
   // **差分判定はこの seed スナップショットに対して行う**(最新の svc と比べると、polling が他所の変更を
@@ -371,6 +396,19 @@ function LimitsSection({
   const [memory, setMemory] = useState(seed.memory);
   const [cpus, setCpus] = useState(seed.cpus);
   const [inputErr, setInputErr] = useState<string | null>(null);
+
+  // 未反映の**判定はサーバ**(CPU はホストのコア数で頭打ちされるので、期待値の計算規則を
+  // 客側に写すと二箇所に増える)。ここは「どの値へ変えたのか」を自分の service 行から言うだけ。
+  const pending = [
+    metrics.data?.mem_limit_pending && svc.memory_mb != null ? `メモリ ${svc.memory_mb} MiB` : null,
+    metrics.data?.cpu_limit_pending
+      ? svc.cpu_limit_millis != null
+        ? `CPU ${svc.cpu_limit_millis / 1000} コア`
+        : "CPU 上限なし"
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" / ");
 
   const submit = () => {
     if (setLimits.isPending) return;
@@ -391,8 +429,12 @@ function LimitsSection({
         body.clear_cpu_limit = true;
       } else {
         const c = Number(cpus.trim());
-        if (!Number.isFinite(c) || c < 0.1 || c > 16) {
-          setInputErr("CPU 上限は 0.1〜16(コア数)で指定してください(空欄 = 上限なし)");
+        if (!Number.isFinite(c) || c < 0.1 || (hostCores != null && c > hostCores)) {
+          setInputErr(
+            hostCores != null
+              ? `CPU 上限は 0.1〜${hostCores}(コア数)で指定してください(空欄 = 上限なし)`
+              : "CPU 上限は 0.1 以上のコア数で指定してください(空欄 = 上限なし)",
+          );
           return;
         }
         body.cpu_limit_millis = Math.round(c * 1000);
@@ -405,7 +447,16 @@ function LimitsSection({
   return (
     <section className="flex flex-col gap-3">
       <h2 className="text-lg font-bold text-foreground">リソース上限</h2>
-      <CurrentUsage svc={svc} id={id} />
+      <CurrentUsage id={id} />
+      {/* 設定値(DB)と適用値(動いているコンテナ)のズレ = 「変えたがまだデプロイしていない」。
+          静的な「次のデプロイから反映されます」だけでは、今どちらの状態なのかが分からない
+          (注入の needs_redeploy と同じ考え方)。 */}
+      {pending && (
+        <p className="text-sm font-semibold text-[#c98a2b]">
+          設定は {pending} です。動いているコンテナにはまだ反映されていません(再デプロイで反映 —
+          上の割合は今動いている値が分母)。
+        </p>
+      )}
       <p className="text-sm font-medium text-muted-foreground">
         変更は<strong>次のデプロイから</strong>反映されます(実行中のコンテナには影響しません)。CPU
         欄を空にすると上限なし(相対的な重み付けのみ)に戻ります。
@@ -419,15 +470,20 @@ function LimitsSection({
           onChange={(e) => setMemory(e.target.value)}
           className="w-44"
         />
-        <Input
-          label="CPU 上限(コア数、0.1〜16)"
-          value={cpus}
-          inputMode="decimal"
-          placeholder="なし"
-          disabled={setLimits.isPending}
-          onChange={(e) => setCpus(e.target.value)}
-          className="w-44"
-        />
+        {/* 上界は固定値ではなくホストのコア数。数字を焼き込まず、取れた値を出す。
+            「0.1 コア」だけでは何割なのか伝わらないので、入力に対する全体比を即時に添える。 */}
+        <div className="flex flex-col gap-1">
+          <Input
+            label={hostCores ? `CPU 上限(コア数、0.1〜${hostCores})` : "CPU 上限(コア数)"}
+            value={cpus}
+            inputMode="decimal"
+            placeholder="なし"
+            disabled={setLimits.isPending}
+            onChange={(e) => setCpus(e.target.value)}
+            className="w-44"
+          />
+          <p className="text-xs font-medium text-muted-foreground">{cpuHint(cpus, hostCores)}</p>
+        </div>
         <Button type="primary" loading={setLimits.isPending} onClick={submit}>
           保存
         </Button>

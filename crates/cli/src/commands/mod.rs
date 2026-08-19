@@ -117,14 +117,28 @@ pub async fn resolve_service_id(
     token: &str,
     name: &str,
 ) -> Result<String> {
+    resolve_service_row(c, server_url, token, name)
+        .await
+        .map(|s| s.id.to_string())
+}
+
+/// 表示名 → service の行そのもの。id だけでなく **形**(memory_mb / cpu_limit_millis 等)も
+/// 要る呼び出し(`service metrics` の未反映判定)向け。一覧を引くコストは id 解決と同じ
+/// (resolve_service_id も内部でこれを呼ぶ)なので、追加のリクエストは発生しない。
+/// 名前は `_row` 付き:`deploy.rs` に別戻り値の私有 `resolve_service` が既にある。
+pub async fn resolve_service_row(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    name: &str,
+) -> Result<tsubomi_shared::ServiceDto> {
     // 表示名の完全一致 **のみ**。UUID 直通は敢えて入れない — 表示名は UUID 形式を禁止して
     // いないため、「B の表示名 = A の id」のとき A へ誤配送し得る(codex 審査 2026-08-13)。
     // 長時間処理(deploy --watch)の rename 耐性は、解決済み id を関数引数で持ち回ることで
     // 実現する(run_verify / wait_deploy_only が id を直接受ける)。
     let svcs = api::service_list(c, server_url, token).await?;
-    svcs.iter()
+    svcs.into_iter()
         .find(|s| s.display_name == name)
-        .map(|s| s.id.to_string())
         .ok_or_else(|| {
             api::ApiError {
                 code: "not_found",
