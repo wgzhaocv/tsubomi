@@ -391,6 +391,22 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
   env が resolved には在るのにコンテナに無い = この順序問題。再デプロイで直る。
 - 逆順にしないコツ:**`tbm service create` → 注入を全部済ませる → 最初の `tbm deploy`**。
 
+### 注入元の subdomain を変えたとき — 呼び出し側は自動では直らない
+
+`tbm service subdomain B <新名>` は **B を注入している A の内部リンクをその瞬間に切る**:A の
+コンテナ内の `B_URL`/`B_HOST` は起動時に凍結された旧 subdomain のままなのに、docker 網別名は
+新 subdomain へ付け替わるため、A からは `bad address` になる。
+
+- **改名の前に** `tbm service callers B` — 誰が影響を受けるか(0 件なら何も気にしなくていい)。
+- **改名の後に** `tbm service subdomain B <新名> --redeploy-callers`(1 コマンド)か
+  `tbm service redeploy-callers B`(後から / 失敗の回収。改名と独立に何度でも実行できる)。
+- **自動対象外**:停止中(起こさない — 次の起動で新しい値が入る)/ 未デプロイ / デプロイ進行中 /
+  stateful(実停機を伴うので手動)。理由は `skip_reason` に出るので**それを読んで次の一手を決める**。
+  自分で `desired_state` から判定し直さないこと(サーバの判定と食い違う)。
+- 応答は **202 = 計画**であって完了ではない。結果は `tbm service callers B` を引き直して
+  各行の直近デプロイ状態を見る(`[直近デプロイ失敗]` とエラー先頭が出る)。
+- 同時に走れるのは 1 バッチだけ(`conflict` = 進行中。完了を待って再実行)。
+
 ### 起動直後にクラッシュする(deploy failed)— 当てずっぽうで再デプロイしない
 
 コンテナが起動即 exit した失敗デプロイは、**エラーに終了要因(exit code / OOM —
@@ -427,7 +443,9 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
   302 /noservice。GitHub repo 名は旧名のまま — `delete --with-repo` は現 subdomain 名で探すため
   **見つからずエラーで止まる**(旧名の repo は `gh repo delete` で手動掃除)。
   この service を注入している呼び出し側は**再デプロイ**で新しい `_URL`/`_HOST` が入る —
-  それまでは status の [未反映:要デプロイ] が出る)。
+  それまでは status の [未反映:要デプロイ] が出る。**改名の前に `tbm service callers <名前>` で
+  影響範囲を確認**し、改名後は `--redeploy-callers`(または `tbm service redeploy-callers <名前>`)で
+  呼び出し側をまとめて追従させられる)。
   **`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — リソース上限の変更
   (次のデプロイから反映)。**`tbm service stateful <名前>`** — ステートフル化(false→true のみ。
   次のデプロイから stop-first)。
