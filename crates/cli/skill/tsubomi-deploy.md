@@ -360,6 +360,10 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
      (rollback の戻し先 id 選び)。**アクセス統計**は `tbm service stats <名前> [--days N]`
      (リクエスト数 / 訪問者 / デバイス / ブラウザ / Top パス / 国 / リファラ。口径はリクエスト単位 —
      pageview ではない。訪問者は bot 除外。private や M6 内部リンクの流量は公開入口を通らないので載らない)。
+   - **自分が起こしていないデプロイが履歴に居るとき**は `trigger` を見る(`deploys` の json /
+     text のラベル):`reconcile` = コンテナ消失からの自動復活 / `caller_relink` = この service を
+     注入している相手が改名されたので平台が追従させた / 無印(`user`)= 誰かが明示的に起こした。
+     **同じ commit 件名の行が並ぶのは正常**(再デプロイは同じ版を起こし直すため)。
 3. DB / volume / cache を使うなら、実際に「書き込み → 読み戻し」で永続と隔離を確かめる。DB 側の
    読み戻しは **`tbm db query <db名> "<SQL>" --tsv`** が速い(psql 不要。`--tsv` = 行だけの
    タブ区切り・列名なし・NULL は空 — スカラーなら `$(…)` で一発捕获。表計算向けにヘッダ付き CSV は
@@ -476,6 +480,8 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict`(create) | 同名の**稼働中**リソースがある(ゴミ箱は名前を占有しない)/ `--subdomain` が使用中(こちらは**ゴミ箱内も占有** — `tbm trash list`) | 別名にするか、稼働中の方を rename / delete。subdomain 409 は別の subdomain を指定 |
 | `code: conflict`(trash restore) | 同名で作り直した稼働中と衝突 | 稼働中を rename / delete してから restore。同名堆積は `tbm trash list` の id で特定 |
+| `code: conflict`(`deploy --image` / `--dockerfile`) | その service に**進行中のデプロイ**がある(1 service = 同時 1 デプロイ)| `tbm service deploys <名前>` で完了を待つ。**いつまでも 409 のまま**なら、server がデプロイ中に落ちて宙吊りの行が残っている可能性 — 平台の再起動で自動的に閉じられるので owner に連絡 |
+| `code: conflict`(`redeploy-callers`) | 連帯再デプロイは**この platform で同時 1 バッチ**| 完了を待って再実行(`tbm service callers <名前>` で各行の直近デプロイ状態が見える)|
 | OOM で落ちる(exit=137) | メモリ上限不足 | `tbm service limits <名前> --memory <MiB>` → 再デプロイ |
 | `code: validation` | 入力不正 | メッセージに従う |
 | 注入が効かない / env が無い | 実行中に注入した(値は起動の瞬間に解決)/ cache rotate・注入元 service の subdomain 変更後に再デプロイしていない | `tbm service status` の注入一覧で `未反映` を確認 → `tbm deploy`。§「順序:注入 → デプロイ」 |
