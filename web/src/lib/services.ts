@@ -106,6 +106,15 @@ export function desiredLabel(state: string): string {
 export function deployStatusLabel(status: string): string {
   return DEPLOY_STATUS_LABEL[status] ?? status;
 }
+// デプロイの契機(provenance)。**user は空文字**を返す — 大半の行がそれなので、
+// 出すと全行に同じラベルが並んで情報量がゼロになる。未知値も空(前方互換)。
+const DEPLOY_TRIGGER_LABEL: Record<string, string> = {
+  reconcile: "自動:復活",
+  caller_relink: "自動:注入元の改名に追従",
+};
+export function deployTriggerLabel(trigger?: string): string {
+  return (trigger && DEPLOY_TRIGGER_LABEL[trigger]) || "";
+}
 
 // deploys 履歴の 1 行(DeployDto 鏡)。
 export type Deploy = {
@@ -118,6 +127,9 @@ export type Deploy = {
   error: string | null;
   created_at: string;
   finished_at: string | null;
+  /** 契機:user / reconcile / caller_relink(旧サーバは欠ける)。平台が自動で起こした行を
+   *  ユーザ自身の再デプロイと区別するための provenance。 */
+  trigger?: string;
 };
 
 // 稼働中コンテナの 1 発メトリクス(ServiceMetricsDto 鏡)。停止中でも 200 で
@@ -192,6 +204,12 @@ export type ServiceCaller = {
   desired_state: string;
   last_deploy_status?: string | null;
   last_deploy_error?: string | null;
+  stateful?: boolean;
+  /** 連帯再デプロイが実際に動かすか。**サーバの純関数の出力をそのまま読む** —
+   *  desired_state 等から再導出すると実行側の判定と食い違う。 */
+  will_redeploy?: boolean;
+  /** 対象外の理由(will_redeploy=false のときだけ)。 */
+  skip_reason?: string | null;
 };
 
 // detail(id) = ["services", id] は deploys/injections/env/logs の prefix なので、
@@ -329,6 +347,28 @@ export function useServiceCallers(id: string) {
   return useQuery({
     queryKey: serviceKeys.callers(id),
     queryFn: () => getJson<ServiceCaller[]>(`/api/services/${id}/callers`),
+  });
+}
+
+// 連帯再デプロイ(202 即返し)。応答は要求時点の計画で約束ではないので、成功後は
+// callers を落として「直近デプロイの状態」を取り直させる。
+export type RedeployCallersPlan = {
+  /** 呼び出し側の全件。対象かどうかは各要素の will_redeploy。 */
+  planned: ServiceCaller[];
+};
+export function useRedeployCallers(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<RedeployCallersPlan> => {
+      const res = await fetch(`/api/services/${id}/redeploy-callers`, { method: "POST" });
+      if (!res.ok) return failBody(res);
+      return (await res.json()) as RedeployCallersPlan;
+    },
+    // **callers だけを落とす**。このページには `useServiceMetrics` が居て、それは 1〜2 秒の
+    // docker stats を叩く(hook のコメント参照)— 「別の service を再デプロイした」ことと
+    // このサービスの CPU / メモリは無関係なので、serviceKeys.all で巻き込むと改名 1 回で
+    // 香橙派の docker daemon を数秒無駄に回す(審査で実測された)。
+    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.callers(id) }),
   });
 }
 

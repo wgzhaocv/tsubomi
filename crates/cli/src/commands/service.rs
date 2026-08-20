@@ -76,6 +76,18 @@ pub enum ServiceCmd {
         /// 新しい subdomain(小文字英数と `-`(英字始まり・`-` 終わり不可)・50 字以内。
         /// 予約語(`www`/`api`/`db` 等・`tsubomi-` 始まり)は不可。使用中なら 409)
         new_subdomain: String,
+        /// 改名後、この service を注入している呼び出し側を**今の版のまま再デプロイ**して
+        /// 新しい接続先を注入し直す(内部リンクの断線を自分で直さなくてよくなる)。
+        /// 停止中 / 未デプロイ / デプロイ進行中 / stateful は自動対象外(理由付きで一覧される)
+        #[arg(long)]
+        redeploy_callers: bool,
+    },
+    /// この service を注入している呼び出し側を、今の版のまま再デプロイして新しい接続先を
+    /// 注入し直す(改名と**独立に実行できる** — 改名時に忘れた / 失敗した分の回収用)。
+    /// 202 即返しなので、結果は `tbm service callers` を引き直して確認する
+    RedeployCallers {
+        /// 対象サービスの表示名(**改名した側** = 注入されている service)
+        name: String,
     },
     /// この service を注入している別の service(呼び出し側)を一覧する。
     /// **改名する前に影響範囲を確かめる**のが主用途 — 改名した瞬間、呼び出し側のコンテナ内に
@@ -298,6 +310,7 @@ pub async fn run(
         ServiceCmd::Subdomain {
             name,
             new_subdomain,
+            redeploy_callers,
         } => {
             // 行そのものを引く(id 解決と同じ 1 リクエスト)。**改名前の subdomain** が要る —
             // 同値の再実行では影響警告を出さないため(サーバも時刻を動かさず別名も剥がさない
@@ -306,8 +319,25 @@ pub async fn run(
             let id = before.id.to_string();
             let changed = before.subdomain != new_subdomain;
             let svc = api::service_set_subdomain(&c, &server_url, &token, &id, &new_subdomain).await?;
+            // 連帯再デプロイは**改名が変化を伴ったときだけ**(同値なら注入値も変わらない)。
+            // json モードでも実行する(`--redeploy-callers` は明示的な意思表示なので)。
+            // 同値の再実行では注入値も変わらないので連帯再デプロイは走らせない(サーバも
+            // `subdomain_changed_at` を動かさず realias もしない)。ただし **黙って無視しない** —
+            // ユーザは `--redeploy-callers` を明示している(旧サーバの静默無視をエラー化したのと
+            // 同じ約束。審査指摘)。
+            let plan = if redeploy_callers && changed {
+                Some(api::service_redeploy_callers(&c, &server_url, &token, &id).await?)
+            } else {
+                None
+            };
+            let unchanged_note = redeploy_callers && !changed;
             if json {
-                print_json(&svc)?;
+                // **1 コマンド 1 JSON** の契約を守る:2 つの DTO を続けて出すと jq / JSON.parse が
+                // 単一値として読めない。多段の出力は `service status` と同じ包み方に揃える。
+                match &plan {
+                    Some(p) => print_json(&json!({ "service": svc, "relink": p }))?,
+                    None => print_json(&svc)?,
+                }
             } else {
                 println!("subdomain を変更しました:{}", svc.subdomain);
                 if svc.visibility == VISIBILITY_PRIVATE {
@@ -321,7 +351,9 @@ pub async fn run(
                 // 影響範囲は**実際の呼び出し側**を引いてから言う(無条件の脅し文をやめる)。
                 // 改名自体は既に成功しているので、ここの取得失敗でコマンドを失敗させない。
                 // 同値の再実行(changed=false)では何も変わっていないので影響も言わない。
-                if changed {
+                // **plan があるならそれを使う** — 202 の応答が既に全 caller を含むので、
+                // `GET /callers` をもう一度引くのは 1 往復 + docker 呼び出しの無駄(審査指摘)。
+                if changed && plan.is_none() {
                     match api::service_callers(&c, &server_url, &token, &id).await {
                         Ok(callers) if !callers.is_empty() => {
                             // 断定は**稼働中の相手だけ**に絞る:停止中 / 未デプロイの呼び出し側には
@@ -351,6 +383,22 @@ pub async fn run(
                         ),
                     }
                 }
+                if let Some(p) = &plan {
+                    print_relink_plan(p, &name);
+                } else if unchanged_note {
+                    println!(
+                        "※ サブドメインは変わっていないため、呼び出し側の再デプロイは不要です(注入値も同じままです)"
+                    );
+                }
+            }
+        }
+        ServiceCmd::RedeployCallers { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let plan = api::service_redeploy_callers(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&plan)?;
+            } else {
+                print_relink_plan(&plan, &name);
             }
         }
         ServiceCmd::Callers { name } => {
@@ -748,6 +796,29 @@ fn emit_exec_result(result: &tsubomi_shared::ExecResult, json: bool) -> Result<(
     std::process::exit(code);
 }
 
+/// 連帯再デプロイの計画(202 の応答)の text 表示。**計画は約束ではない** — サーバは実行の
+/// 直前に判定を取り直すので、結果は `tbm service callers` を引き直して確認する。
+fn print_relink_plan(plan: &tsubomi_shared::RedeployCallersResp, name: &str) {
+    if plan.planned.is_empty() {
+        println!("呼び出し側がないため、再デプロイするものはありません");
+        return;
+    }
+    let (go, skip): (Vec<_>, Vec<_>) = plan
+        .planned
+        .iter()
+        .cloned()
+        .partition(|c| c.will_redeploy);
+    if !go.is_empty() {
+        println!("再デプロイを開始しました({} 件。完了は非同期):", go.len());
+        print_callers(&go);
+    }
+    if !skip.is_empty() {
+        println!("対象外({} 件):", skip.len());
+        print_callers(&skip);
+    }
+    println!("※ 結果は `tbm service callers {name}` で確認してください(直近デプロイの状態が出ます)");
+}
+
 /// 呼び出し側名単の text 表示(`service callers` と `service subdomain` の回显が共有)。
 /// 1 行 1 caller — env 名は集約済み(同一 caller が複数名で注入していても 1 行)。
 /// マーカーと エラー行の形は `print_status` のデプロイ履歴と揃える。
@@ -769,6 +840,11 @@ fn print_callers(callers: &[tsubomi_shared::ServiceCallerDto]) {
             cl.display_name,
             cl.env_vars.join(", ")
         );
+        // 自動再デプロイの対象外なら理由(次の一手を含む文案をサーバが持つ)。web の
+        // CallerItem と同じ内容を出す = 2 つ目の行フォーマットを作らない。
+        if let Some(why) = &cl.skip_reason {
+            println!("    → 自動再デプロイの対象外:{why}");
+        }
         if let Some(err) = &cl.last_deploy_error {
             println!("    — {err}");
         }
@@ -844,8 +920,16 @@ fn print_status(
             .as_deref()
             .map(|m| format!("  {m}"))
             .unwrap_or_default();
+        // 平台が自動で起こした行は、`redeploy` が再生する版の commit_message をそのまま
+        // 書くのでユーザ自身の再デプロイと同じ見た目になる。契機を出して区別できるようにする
+        // (旧サーバは空文字 = 何も出さない)。
+        let by = match d.trigger.as_str() {
+            "reconcile" => "  [自動:復活]",
+            "caller_relink" => "  [自動:注入元の改名に追従]",
+            _ => "",
+        };
         println!(
-            "    {}  {:<9} {}{}  id={}{}",
+            "    {}  {:<9} {}{}{by}  id={}{}",
             d.created_at,
             d.status,
             short_sha(&d.git_sha),

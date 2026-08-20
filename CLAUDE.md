@@ -353,7 +353,7 @@ catch-all → 302。**凍結しない** = 解放即再利用可は受容)、M6 �
 (`--with-repo` は現 subdomain 名で探すため見つからずエラー — `TSUBOMI_SERVICE_ID` 照合で誤削除はしない)・既存注入の
 env 名は不変(値だけ新しくなる)。実装級・受容表は **`doc/paas-service-subdomain-design.md`**。
 
-**subdomain 後の追加(マイルストーン外):改名の影響名単(2026-08-20、server v61 / tbm 1.1.3)**。
+**subdomain 後の追加(マイルストーン外):改名の影響名単(2026-08-20、tbm 1.1.4。server は次版 — **まだ ship していない**)**。
 改名の案内が「caller が 1 件も無くても無条件に脅し文を出し、居るときも誰なのか言わない」形だった
 のを、実際の呼び出し側を出すようにした(読み取りのみ・migration なし)。`GET /services/{id}/callers`。
 **逆引きの述語の家は `inject.rs`**(`injections` の正向解決の対偶)で、`network::service_callers`
@@ -387,6 +387,41 @@ env も生きたリンクも無く、そこで再デプロイを促すと `commi
 `resolve_service_row` で改名前の値を持って何も言わない)④`env_vars` は `injections.env_var` の
 **保存名だけ**で派生 `_HOST`/`_PORT` は含まない(文言は「注入名」)。実装級は
 **`doc/paas-service-subdomain-design.md` §6**。
+
+**影響名単の次(同日):連帯再デプロイ(tbm 1.1.4、migration 1 本。server は次版 — **まだ ship していない**)**。名単を出す
+だけでなく、**その相手を今の版のまま再デプロイして注入値を追従させる** opt-in の一発
+(`POST /services/{id}/redeploy-callers` + `tbm service redeploy-callers` + `service subdomain
+--redeploy-callers` + web modal の既定チェック済み checkbox)。背骨は不変(値は起動の瞬間に解決)、
+変えるのは「その再デプロイを誰が押すか」だけ。**静默の自動連鎖にはしない**。
+**前提として既存バグを 1 本潰した**:`redeploy` は deploys 行を `received` で作ってから
+deploy_lock を待つので、その窓でプロセスが落ちた行は永久に残り(phase はまだ 'deploying' でないので
+`recover_interrupted` の候補集に入らず、gc は terminal 行しか消さない)**`deploy_source` の入場門が
+永久 409** = `tbm deploy --image` が使えなくなっていた ⇒ 起動時に非 terminal 行を全部閉じる
+(起動直後の非 terminal は定義上すべて孤児)。**新契機 `DeployTrigger::CallerRelink`** は
+4 つの次元を `impl DeployTrigger` の**具名述語**に集めた(呼び出し点に `trigger ==` を散らすと、
+契機を足した日に「なぜ Reconcile は phase を落とすのか」が**答えではなく遺漏**として残る):
+再確認する(停止済み caller を叩き起こさない — `commit_success` が desired を running に戻すので
+ここが唯一の防壁)/ 探測しない・失敗で phase を落とさない(対象は元々健全な service。failed に
+すると `converge_running` の候補集から外れ**自愈網から除名** = v48 と同型)/ 現役 digest 必須
+(ロック待ち中に caller が新版を出していたら静默ロールバックしない)。**「failed にしない」だけでは
+足りない**のが実測の発見 — `run_digest` が開始時に書いた `'deploying'` で**固着**して同じ害になる
+ので、失敗時は**門で読んだ phase の値**へ戻す(リテラルを書かない)。しかもその UPDATE は
+`phase='deploying'` だけでは**自分が書いていない marker を消す**(`deploy_source` は取得開始時に
+**deploy_lock の外で** phase を立てる)⇒ 自分以外の非 terminal 行が無いことを条件に足す。
+**入場制限は実行枠そのもの**を handler で `try_lock_owned`(取れなければ 409、guard は spawn へ
+move して Drop 解放)— 当初の「per-callee 集合 + spawn 内で枠 acquire」は**枠待ちのバッチに
+202「開始しました」を返す = 応答が嘘**になっていた(審査 3 本の共通指摘)。対象ゼロなら spawn
+しない(幽霊 409 と空 audit を作らない)。`deploy_lock` の流用は却下(fan-out は分単位で、その間
+stop/delete/visibility/改名が固まる)。**旧債の返済**:`deploys.trigger`(migration。回填値 =
+新規行の DEFAULT `'user'`、既存行の読み戻しまで検証)— `redeploy` は再生する版の commit_message を
+そのまま書くので、平台が自動で起こした行がユーザ自身の再デプロイと**見分けが付かなかった**
+(同 digest の行が全部「稼働中」に見えた 2026-07-26 の web 事故と同じ根)。CLI 履歴と web が
+`reconcile` / `caller_relink` にだけラベルを出す。**教訓の一般形**:①**無条件の警告を条件付きに
+すると、条件が「未知」のときに旧実装より弱くなる** ②**「失敗しても壊さない」は「状態を変えない」
+ではなく「入口の状態へ戻す」** ③**lock の外で書かれる状態は、lock 内からでも所有権を持たない**
+④判定はサーバの純関数を単一真源にし**クライアントで再導出しない**。品質検証 = 設計時の対抗審査
+P0 4 件 + 実装後 4 simplify + codex ultra(codex は額度切れで最終報告前に停止 —
+**再走が未完なので次に触るときに一度通す**)。実装級は **§7**。
 
 **AI フィードバック第 4 弾(2026-07-26、server v53 / tbm 1.0.32):`sslmode` の駆動系差を仕組みで消す**。
 発端は「注入された `DATABASE_URL` が Go では繋がるのに Node で落ちる」。**`sslmode=require` の意味が

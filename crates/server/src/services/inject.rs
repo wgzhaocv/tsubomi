@@ -172,6 +172,14 @@ pub(crate) struct CallerRow {
     pub desired_state: String,
     pub last_deploy_status: Option<String>,
     pub last_deploy_error: Option<String>,
+    pub stateful: bool,
+    /// 成功 deploy がある(= 再デプロイできる版がある)。
+    pub deployed: bool,
+    /// 非 terminal な deploy 行がある(= 進行中)。述語は**否定の閉集合**
+    /// (`NOT IN ('succeeded','failed')`)= 家の多数形(deploy.rs / reconcile.rs / registry.rs)。
+    /// 肯定形の列挙で書くと、段階を 1 つ足した日に否定形の側は動き続けて**ここだけ黙って
+    /// false になる** = プレビューが最も要る場面で嘘をつく(simplify 審査)。
+    pub deploy_in_flight: bool,
 }
 
 /// この callee を注入している**生存 caller** の一覧(`network::service_callers` と
@@ -198,8 +206,13 @@ pub(crate) async fn service_caller_rows(
                 ARRAY(SELECT i.env_var FROM injections i
                        WHERE i.service_id = caller.id AND i.resource_id = $1
                        ORDER BY i.env_var) AS env_vars,
-                cs.desired_state,
-                ld.status AS last_deploy_status, ld.error AS last_deploy_error
+                cs.desired_state, cs.stateful,
+                ld.status AS last_deploy_status, ld.error AS last_deploy_error,
+                EXISTS(SELECT 1 FROM deploys d
+                        WHERE d.service_id = caller.id AND d.status = 'succeeded') AS deployed,
+                EXISTS(SELECT 1 FROM deploys d
+                        WHERE d.service_id = caller.id
+                          AND d.status NOT IN ('succeeded','failed')) AS deploy_in_flight
            FROM resources caller
            JOIN service_details cs ON cs.resource_id = caller.id
            LEFT JOIN LATERAL (

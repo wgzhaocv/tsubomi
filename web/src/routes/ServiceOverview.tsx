@@ -14,6 +14,7 @@ import { Link, useNavigate, useParams } from "react-router";
 
 import { Badge } from "@/components/phase-badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
@@ -31,6 +32,7 @@ import {
   shortDigest,
   useDeleteService,
   useService,
+  useRedeployCallers,
   useServiceCallers,
   useServiceMetrics,
   useSetServiceLimits,
@@ -54,6 +56,7 @@ export default function ServiceOverview() {
   const del = useDeleteService(id);
   const setVis = useSetServiceVisibility(id);
   const setSub = useSetSubdomain(id);
+  const relink = useRedeployCallers(id);
   // 「誰が私を注入しているか」= 改名の影響範囲。常設セクションと変更 modal が同じ配列を読む。
   // **未知(取得前 / 失敗)を 0 件と同一視しない** — 改名 modal は影響範囲を言えないまま
   // 通してはいけないので、状態も持つ(codex 審査)。
@@ -66,6 +69,11 @@ export default function ServiceOverview() {
   // 稼働中の呼び出し側だけが「今の値が凍結されている」= 改名で内部リンクが切れる相手。
   // 停止中 / 未デプロイは凍結 env も生きたリンクも無いので、次の起動で新しい値が入るだけ。
   const runningCallers = callers?.filter((c) => c.desired_state === "running").length ?? 0;
+  // 連帯再デプロイの対象数。判定は**サーバの純関数**の出力(will_redeploy)をそのまま読む —
+  // ここで desired_state 等から再導出すると、実行側の判定と食い違う。
+  const relinkTargets = callers?.filter((c) => c.will_redeploy).length ?? 0;
+  // 既定チェック済み:ユーザは自分で破壊的変更をしていて、その場に居る。
+  const [autoRelink, setAutoRelink] = useState(true);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
@@ -78,8 +86,18 @@ export default function ServiceOverview() {
     // 二重送信を防ぐ + **影響範囲の取得中は待つ**(名単を出せないまま改名させない)。
     // 取得**失敗**は塞がない — 補助的な読みの不調で主操作を止めるのは行き過ぎなので、
     // 代わりに modal で「確認できなかった」と明示する(下の警告文)。
-    if (!trimmed || setSub.isPending || callersFetching) return;
-    setSub.mutate(trimmed, { onSuccess: () => setSubOpen(false) });
+    if (!trimmed || setSub.isPending || callersFetching || relink.isPending) return;
+    setSub.mutate(trimmed, {
+      onSuccess: () => {
+        // 改名は成功した。連帯再デプロイは**別リクエスト**なので、ここで失敗しても改名の
+        // 成否と混ざらない — modal は閉じず専用の文案 + 再試行ボタンを出す(半完成の可視化)。
+        if (!autoRelink || relinkTargets === 0) {
+          setSubOpen(false);
+          return;
+        }
+        relink.mutate(undefined, { onSuccess: () => setSubOpen(false) });
+      },
+    });
   };
   const { copied, copy } = useCopied();
   // url を局所定数に取り出して narrow する(onClick クロージャ内でも string 確定にする)。
@@ -174,6 +192,9 @@ export default function ServiceOverview() {
                 onClick={() => {
                   setSubValue(svc?.subdomain ?? "");
                   setSub.reset();
+                  // 前回の失敗バナー(「サブドメインは変更されました…」)が、まだ何も
+                  // していない次のセッションに残るのを防ぐ(審査指摘)。
+                  relink.reset();
                   // 影響範囲は**開いた瞬間に取り直す**:別タブ / CLI で注入された分を
                   // 取りこぼした古い名単のまま改名させない(codex 審査)。
                   void refetchCallers();
@@ -416,17 +437,54 @@ export default function ServiceOverview() {
                 ))}
               </ul>
               {/* 断定を稼働中の相手だけに絞る:停止中 / 未デプロイの呼び出し側には凍結された
-                  接続先も生きたリンクも無いので「切れる」は嘘になる(codex 審査)。 */}
+                  接続先も生きたリンクも無いので「切れる」は嘘になる(codex 審査)。
+                  件数の内訳(誰が自動対象で誰がそうでないか)は各行の skip_reason が言うので、
+                  ここでは重ねて数えない(同じ問いをクライアントで再導出しない — 審査指摘)。 */}
               <p className="text-xs font-medium text-muted-foreground">
                 {runningCallers > 0
-                  ? `稼働中の ${runningCallers} 件は、再デプロイするまで旧サブドメインを参照し続けます(内部リンクが切れます)。停止中の呼び出し側は次に起動したときに新しい値が入ります。`
+                  ? "稼働中の呼び出し側は、再デプロイするまで旧サブドメインを参照し続けます(内部リンクが切れます)。停止中の呼び出し側は次に起動したときに新しい値が入ります。"
                   : "いずれも稼働していないので、次に起動したときに新しい値が入ります。"}
               </p>
             </div>
           ) : null}
+          {/* 対象が 1 件も無いなら checkbox ごと出さない(押せない選択肢は雑音)。 */}
+          {relinkTargets > 0 && (
+            <Checkbox
+              aria-label="変更後に呼び出し側を自動で再デプロイする"
+              value={autoRelink ? ["relink"] : []}
+              disabled={setSub.isPending || relink.isPending}
+              options={[
+                {
+                  label: `変更後、対象の呼び出し側 ${relinkTargets} 件を自動で再デプロイする`,
+                  value: "relink",
+                },
+              ]}
+              onChange={(v) => setAutoRelink(v.includes("relink"))}
+            />
+          )}
           {setSub.error && (
             <p className="text-sm font-semibold text-[#e05a5a]">{setSub.error.message}</p>
           )}
+          {/* 半完成:改名は成功したが fan-out の起動に失敗した(401 / 5xx / 409)。 */}
+          {relink.error && (
+            <div className="flex flex-col items-start gap-2">
+              <p className="text-sm font-semibold text-[#e05a5a]">
+                サブドメインは変更されました。呼び出し側の再デプロイは開始できませんでした:
+                {relink.error.message}
+              </p>
+              <Button
+                type="default"
+                size="small"
+                loading={relink.isPending}
+                onClick={() => relink.mutate()}
+              >
+                再デプロイをやり直す
+              </Button>
+            </div>
+          )}
+          {/* Modal の footer は form の外なので、入力欄が 2 個になると Enter の暗黙送信が
+              効かなくなる(ServiceEnv と同じイディオムで隠し submit を置く)。 */}
+          <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
         </form>
       </Modal>
     </div>
@@ -464,6 +522,13 @@ function CallerItem({ caller }: { caller: ServiceCaller }) {
           </Badge>
         )}
       </div>
+      {/* 自動再デプロイの対象外なら理由を出す(次の一手を含む文案をサーバが持っている)。
+          停止中 / 未デプロイのバッジと重なる場合もあるが、理由の方が行動に繋がる。 */}
+      {caller.skip_reason && (
+        <span className="text-xs font-medium text-muted-foreground">
+          自動再デプロイの対象外:{caller.skip_reason}
+        </span>
+      )}
       {caller.last_deploy_error && (
         <span className="text-xs font-semibold text-[#e05a5a]">{caller.last_deploy_error}</span>
       )}

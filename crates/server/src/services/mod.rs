@@ -31,7 +31,9 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use futures_util::FutureExt;
 use sqlx::PgPool;
+use std::panic::AssertUnwindSafe;
 use tsubomi_shared::{
     CreateInjectionReq, CreateServiceReq, CreateServiceResp, DeployConfig, DeployDto, ExecReq,
     ExecResult, InjectionDto, LogsResp, ResolvedEnvDto, RollbackReq, ServiceDto,
@@ -225,6 +227,10 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/deploy-config", get(deploy_config))
         .route("/services/{id}/deploy-source", post(source::deploy_source))
         .route("/services/{id}/callers", get(list_callers))
+        .route(
+            "/services/{id}/redeploy-callers",
+            post(redeploy_callers),
+        )
         .route(
             "/services/{id}/injections",
             get(list_injections).post(create_injection),
@@ -432,6 +438,7 @@ type DeployRow = (
     DateTime<Utc>,
     Option<DateTime<Utc>>,
     Option<String>,
+    String,
 );
 
 fn deploy_row_to_dto(r: DeployRow) -> DeployDto {
@@ -444,6 +451,7 @@ fn deploy_row_to_dto(r: DeployRow) -> DeployDto {
         created_at: r.5,
         finished_at: r.6,
         commit_message: r.7,
+        trigger: r.8,
     }
 }
 
@@ -455,7 +463,8 @@ pub async fn deploys(
 ) -> AppResult<Json<Vec<DeployDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
     let rows: Vec<DeployRow> = sqlx::query_as(
-        "SELECT id, git_sha, image_digest, status, error, created_at, finished_at, commit_message
+        "SELECT id, git_sha, image_digest, status, error, created_at, finished_at, commit_message,
+                trigger
            FROM deploys WHERE service_id = $1 ORDER BY created_at DESC LIMIT 50",
     )
     .bind(id)
@@ -596,14 +605,17 @@ pub(crate) async fn redeploy(
     commit_message: Option<&str>,
     trigger: deploy::DeployTrigger,
 ) -> AppResult<()> {
+    // trigger を行に焼く:これが無いと reconcile の復活と caller 再リンクが、部署履歴で
+    // ユーザ自身の再デプロイと区別できない(同じ commit 件名の行が並ぶ)。
     let deploy_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO deploys (service_id, git_sha, image_digest, status, commit_message)
-              VALUES ($1, $2, $3, 'received', $4) RETURNING id",
+        "INSERT INTO deploys (service_id, git_sha, image_digest, status, commit_message, trigger)
+              VALUES ($1, $2, $3, 'received', $4, $5) RETURNING id",
     )
     .bind(service_id)
     .bind(git_sha)
     .bind(image_digest)
     .bind(commit_message)
+    .bind(trigger.as_db())
     .fetch_one(&state.db)
     .await?;
     deploy::run_digest(state, deploy_id, service_id, image_digest, git_sha, trigger).await
@@ -1280,30 +1292,249 @@ fn injection_row_to_dto(r: InjectionRow, serving_since: Option<DateTime<Utc>>) -
     }
 }
 
+/// 連帯再デプロイ(caller 再リンク)の対象判定。**`GET /callers` のプレビューと
+/// `POST /redeploy-callers` の実行が同じ関数を引く**単一真源 — 別々に書くとプレビューが嘘になる。
+/// 入力は純データ(DB / docker を触らない)なので真理値表で機械封じできる。
+/// Err の文言はそのまま `skip_reason` として web / CLI に出るので**次の一手を含める**。
+///
+/// 順序は「より根本的な理由を先に」— 未デプロイの停止中 service には「まだデプロイされていない」
+/// を出す(「停止中」より情報量が多い)。
+///
+/// **これは唯一の防壁ではない**:停止済みを起こさない規則は `deploy::run_digest` のロック後
+/// 再確認門(非 user 契機)にも在り、そちらが最終防壁(プレビューと実行の間に stop が
+/// 割り込むケースを拾えるのはロックの中だけ)。ここは「名単の見え方」を決める側。
+fn caller_relink_verdict(r: &inject::CallerRow, callee_serving: bool) -> Result<(), &'static str> {
+    // callee 自身が serving していないと `set_subdomain` の realias 段がそもそも走らない
+    // (`serving_container` ガード)。網に新別名が無い状態で caller を回すのは純 churn。
+    if !callee_serving {
+        return Err("このサービス自身が稼働していないため対象外(起動してから再実行してください)");
+    }
+    if !r.deployed {
+        return Err("まだデプロイされていないため対象外(先に一度デプロイしてください)");
+    }
+    // 停止中を起こさないのは**仕様**:`commit_success` が desired_state を running に戻すので、
+    // ここで弾かないと「ユーザが止めた意図」を改名の副作用で消してしまう。
+    if r.desired_state != "running" {
+        return Err("停止中のため対象外(自動では起こしません。起動すると新しい値が入ります)");
+    }
+    // 進行中の deploy にキューで積むと、こちらが解決した digest が陳腐化し得るし swap も重なる。
+    // なお改名**前**に starting へ入っていた caller は旧値で env が凍結され得る = 未反映バッジが
+    // 立つので、完了後の再実行で回収できる。
+    if r.deploy_in_flight {
+        return Err("デプロイ進行中のため対象外(完了後にもう一度実行してください)");
+    }
+    // stateful は stop-first(実停機を伴う)。データを持つ service を止める時機はユーザが選ぶ。
+    if r.stateful {
+        return Err(
+            "データを持つ(stateful)ため自動対象外(停止を伴うので手動で再デプロイしてください)",
+        );
+    }
+    Ok(())
+}
+
+fn caller_row_to_dto(
+    r: inject::CallerRow,
+    callee_serving: bool,
+) -> tsubomi_shared::ServiceCallerDto {
+    let verdict = caller_relink_verdict(&r, callee_serving);
+    tsubomi_shared::ServiceCallerDto {
+        id: r.id,
+        display_name: r.display_name,
+        env_vars: r.env_vars,
+        desired_state: r.desired_state,
+        last_deploy_status: r.last_deploy_status,
+        last_deploy_error: r.last_deploy_error,
+        stateful: r.stateful,
+        will_redeploy: verdict.is_ok(),
+        skip_reason: verdict.err().map(str::to_owned),
+    }
+}
+
+/// 名単 + 判定を作る(GET のプレビューと POST の実行計画が共有)。callee 自身が serving して
+/// いるかは 1 度だけ解決する(caller が居なければ docker を叩かない)。
+async fn caller_plan(
+    state: &AppState,
+    callee_id: Uuid,
+) -> AppResult<Vec<tsubomi_shared::ServiceCallerDto>> {
+    let rows = inject::service_caller_rows(state, callee_id).await?;
+    let callee_serving = !rows.is_empty() && serving_container(state, callee_id).await.is_some();
+    Ok(rows
+        .into_iter()
+        .map(|r| caller_row_to_dto(r, callee_serving))
+        .collect())
+}
+
 /// `GET /api/services/:id/callers`:**この service を注入している別の service** の一覧。
 /// 改名(`set_subdomain`)の影響範囲を出す入口 — 改名した瞬間、caller のコンテナ内に凍結された
 /// `_URL`/`_HOST` は旧 subdomain のままなので内部リンクが切れる。逆引きの述語は
 /// `inject::service_caller_rows` = 網操作(realias)と同一なので、「名単に出た集合」と
-/// 「実際に触られる集合」がドリフトしない。
+/// 「実際に触られる集合」がドリフトしない。連帯再デプロイの **dry-run** も兼ねる
+/// (`will_redeploy` / `skip_reason` は `POST /redeploy-callers` と同じ純関数の出力)。
 pub async fn list_callers(
     auth: AuthCtx,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Vec<tsubomi_shared::ServiceCallerDto>>> {
     ensure_owned(&state, auth.user_id, id).await?;
-    let rows = inject::service_caller_rows(&state, id).await?;
-    Ok(Json(
-        rows.into_iter()
-            .map(|r| tsubomi_shared::ServiceCallerDto {
-                id: r.id,
-                display_name: r.display_name,
-                env_vars: r.env_vars,
-                desired_state: r.desired_state,
-                last_deploy_status: r.last_deploy_status,
-                last_deploy_error: r.last_deploy_error,
-            })
-            .collect(),
+    Ok(Json(caller_plan(&state, id).await?))
+}
+
+/// `POST /api/services/:id/redeploy-callers`:この service を注入している呼び出し側を
+/// **今の版のまま**再デプロイし、注入値(`_URL`/`_HOST`)を新しい subdomain へ追従させる。
+///
+/// 背骨は変えない — 値はコンテナ起動の瞬間に解決される。変えるのは「その再デプロイを誰が
+/// 押すか」だけなので、**opt-in の一発**(静默の自動連鎖にはしない)。
+///
+/// **202 即返し**:N 件の deploy は分単位になり得る(CF Tunnel の ~100s 切断対策 = deploy-source
+/// と同型)。応答は要求時点のスナップショットで約束ではない — 実行の直前に判定を取り直す。
+///
+/// 改名と**独立に再実行できる**(web の 2 リクエストが半完成したときの再試行 / 後から思い出して
+/// 実行するケース)。
+pub async fn redeploy_callers(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<(StatusCode, Json<tsubomi_shared::RedeployCallersResp>)> {
+    ensure_owned(&state, auth.user_id, id).await?;
+
+    // 入場制限は**実行枠そのもの**で行う(ハンドラで試す)。取れないまま 202 を返すと
+    // 「開始しました」が嘘になる(枠待ちで何も始まっていない)。guard は spawn へ move し
+    // Drop で解放(panic 経路も拾う)。`deploy_lock` は流用しない — fan-out は分単位で、
+    // 同じ錠を取る stop / delete / visibility / 改名がその間固まるため。
+    let Ok(slot) = state.relink_slot.clone().try_lock_owned() else {
+        return Err(AppError::Conflict(
+            "連帯再デプロイが進行中です(この platform では同時に 1 バッチ)。完了を待ってから再実行してください".into(),
+        ));
+    };
+
+    let planned = caller_plan(&state, id).await?;
+    let targets: Vec<Uuid> = planned
+        .iter()
+        .filter(|c| c.will_redeploy)
+        .map(|c| c.id)
+        .collect();
+
+    // 対象ゼロなら **spawn しない**:何もしない task が枠を占め、その間この callee への
+    // 再実行が 409 になり、空の完走 audit まで残る(審査指摘)。
+    if targets.is_empty() {
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(tsubomi_shared::RedeployCallersResp { planned }),
+        ));
+    }
+
+    // 永続的な意図を先に監査(後段の spawn が失敗しても記録は残る)。
+    audit(
+        &state.db,
+        Some(auth.user_id),
+        "service.redeploy_callers",
+        id,
+        json!({ "targets": targets }),
+        auth.client_ip.as_deref(),
+    )
+    .await;
+
+    let state2 = state.clone();
+    let targets2 = targets.clone();
+    tokio::spawn(async move {
+        let _slot = slot; // task の生存期間だけ枠を保持する(Drop で解放)
+        // `CatchPanicLayer` はハンドラだけを守り、spawn した task は守らない(source.rs と同型)。
+        let outcome =
+            AssertUnwindSafe(relink_callers(&state2, id, &targets2, auth.user_id)).catch_unwind();
+        if outcome.await.is_err() {
+            tracing::error!(callee_id = %id, "連帯再デプロイの task が panic");
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(tsubomi_shared::RedeployCallersResp { planned }),
     ))
+}
+
+/// caller 群を**直列**に再デプロイする(spawn の中身)。実行枠(`relink_slot`)はハンドラが
+/// 取得して move してきている = プロセス全体で同時 1 バッチ。バッチ内も逐次(reconcile と
+/// 同じ家風)— 単一ホストの共有機なので並行度をクリック回数に比例させない。
+///
+/// 1 件の失敗は他を止めない(`continue` + warn)。判定は**実行の直前に取り直す**(プレビューと
+/// 実行の間に stop / 削除 / 新デプロイが割り込み得る)。最終防壁は `run_digest` のロック後
+/// 再確認門なので、ここで漏れても停止済み service は起きない。
+async fn relink_callers(state: &AppState, callee_id: Uuid, targets: &[Uuid], actor: Uuid) {
+    let mut results = Vec::with_capacity(targets.len());
+    for &caller_id in targets {
+        // 実行直前の再判定(同じ純関数)。callee 側の serving も含めて取り直す。
+        match caller_plan(state, callee_id).await {
+            Ok(plan) => match plan.iter().find(|c| c.id == caller_id) {
+                Some(c) if c.will_redeploy => {}
+                Some(c) => {
+                    let why = c.skip_reason.clone().unwrap_or_default();
+                    tracing::info!(%caller_id, why = %why, "連帯再デプロイ: 実行直前に対象外へ変化 — スキップ");
+                    results.push(json!({ "id": caller_id, "result": "skipped", "reason": why }));
+                    continue;
+                }
+                None => {
+                    tracing::info!(%caller_id, "連帯再デプロイ: 呼び出し側でなくなった — スキップ");
+                    results.push(json!({ "id": caller_id, "result": "skipped", "reason": "eject" }));
+                    continue;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = ?e, %caller_id, "連帯再デプロイ: 再判定に失敗 — スキップ");
+                results.push(json!({ "id": caller_id, "result": "skipped", "reason": "recheck_failed" }));
+                continue;
+            }
+        }
+        // digest は caller ごとに**この瞬間**解決する(バッチ先頭でスナップショットすると、
+        // その間に自分で新版をデプロイした caller を旧版へ巻き戻す — 設計時審査 P0-4)。
+        // ロック待ちの間に陳腐化する残余は run_digest の no-downgrade 門が精密に塞ぐ。
+        let latest = match latest_succeeded_deploy(state, caller_id).await {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                results.push(json!({ "id": caller_id, "result": "skipped", "reason": "no_deploy" }));
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, %caller_id, "連帯再デプロイ: 直近成功 deploy の取得に失敗");
+                results.push(json!({ "id": caller_id, "result": "failed", "reason": "digest_lookup" }));
+                continue;
+            }
+        };
+        let (digest, git_sha, msg) = latest;
+        match redeploy(
+            state,
+            caller_id,
+            &digest,
+            &git_sha,
+            msg.as_deref(),
+            deploy::DeployTrigger::CallerRelink,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(%caller_id, %callee_id, "連帯再デプロイ: 完了");
+                results.push(json!({ "id": caller_id, "result": "ok" }));
+            }
+            Err(e) => {
+                // 失敗しても phase は落ちない(CallerRelink 契機)。start-first なので旧コンテナは
+                // 無傷 = この caller は元の版で走り続ける。記録は deploys 行に残る。
+                tracing::warn!(error = ?e, %caller_id, %callee_id, "連帯再デプロイ: 失敗(旧版で継続)");
+                results.push(json!({
+                    "id": caller_id, "result": "failed",
+                    "reason": e.to_string().chars().take(200).collect::<String>()
+                }));
+            }
+        }
+    }
+    // 完走の記録。owner の追跡用(一般ユーザ向けの結果表示は `GET /callers` の last_deploy_status)。
+    audit(
+        &state.db,
+        Some(actor),
+        "service.redeploy_callers.completed",
+        callee_id,
+        json!({ "results": results }),
+        None,
+    )
+    .await;
 }
 
 /// `GET /api/services/:id/injections`:注入一覧(失効 = valid:false も含む)。
@@ -2159,6 +2390,85 @@ fn rand_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 判定の入力だけを差し替えるための素の行(表示用の列は判定に影響しない)。
+    fn caller_row(
+        stateful: bool,
+        desired: &str,
+        deployed: bool,
+        in_flight: bool,
+    ) -> inject::CallerRow {
+        inject::CallerRow {
+            id: Uuid::nil(),
+            display_name: "a".into(),
+            env_vars: vec!["B_URL".into()],
+            desired_state: desired.into(),
+            last_deploy_status: None,
+            last_deploy_error: None,
+            stateful,
+            deployed,
+            deploy_in_flight: in_flight,
+        }
+    }
+
+    /// `caller_relink_verdict` の真理値表。**プレビュー(GET)と実行(POST)が引く唯一の判定**
+    /// なので、ここが崩れると「名単では対象と言ったのに動かない(or 動いてはいけないのに動く)」
+    /// になる。理由の**優先順位**も固定する(文言が変わる = 利用者の次の一手が変わる)。
+    #[test]
+    fn caller_relink_verdict_table() {
+        let ok = caller_row(false, "running", true, false);
+        assert!(
+            caller_relink_verdict(&ok, true).is_ok(),
+            "健全な stateless caller は対象"
+        );
+
+        // callee 自身が停止 → 他の入力に関わらず対象外(realias が走らないので回しても純 churn)。
+        // 判定の 1 行目で返るので全組合せを回す必要はない — 「健全な行でも弾く」の 1 本で足りる。
+        assert!(
+            caller_relink_verdict(&ok, false).is_err(),
+            "callee 未稼働なら健全な caller でも対象外"
+        );
+
+        // 個別の対象外。
+        assert!(caller_relink_verdict(&caller_row(false, "running", false, false), true).is_err());
+        assert!(caller_relink_verdict(&caller_row(false, "stopped", true, false), true).is_err());
+        assert!(caller_relink_verdict(&caller_row(false, "running", true, true), true).is_err());
+        assert!(caller_relink_verdict(&caller_row(true, "running", true, false), true).is_err());
+
+        // 優先順位:未デプロイ > 停止中 > 進行中 > stateful。
+        assert!(
+            caller_relink_verdict(&caller_row(true, "stopped", false, true), true)
+                .unwrap_err()
+                .contains("まだデプロイされていない"),
+            "未デプロイが最優先の理由"
+        );
+        assert!(
+            caller_relink_verdict(&caller_row(true, "stopped", true, true), true)
+                .unwrap_err()
+                .contains("停止中"),
+            "停止中は進行中 / stateful より優先"
+        );
+        assert!(
+            caller_relink_verdict(&caller_row(true, "running", true, true), true)
+                .unwrap_err()
+                .contains("デプロイ進行中"),
+            "進行中は stateful より優先"
+        );
+    }
+
+    /// **停止中の caller は決して対象にならない**(単独で釘付け)。`commit_success` が
+    /// desired_state を running に戻すので、ここが破れると「ユーザが止めた service を
+    /// 改名の副作用で叩き起こす」= 意図の消失になる。最終防壁は `run_digest` のロック後
+    /// 再確認門(非 user 契機)だが、名単が嘘をつかないこともここで担保する。
+    #[test]
+    fn stopped_caller_is_never_redeployed() {
+        for stateful in [false, true] {
+            for in_flight in [false, true] {
+                let r = caller_row(stateful, "stopped", true, in_flight);
+                assert!(caller_relink_verdict(&r, true).is_err());
+            }
+        }
+    }
 
     #[test]
     fn slugify_basic() {

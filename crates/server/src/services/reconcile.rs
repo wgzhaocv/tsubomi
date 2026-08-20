@@ -229,7 +229,7 @@ async fn reconcile_pass(state: &AppState) {
 /// **永久に残る**:その時点の `phase` はまだ `'deploying'` ではない(phase を書くのはロック取得後)
 /// ので、下の `recover_interrupted` の候補集(`phase='deploying'`)に入らず、
 /// `gc::sweep_old_deploys` は terminal 行しか消さない。結果:
-///   - `deploy_source` の入場門(`status IN ('received','pulling','starting')` の EXISTS)が
+///   - `deploy_source` の入場門(非 terminal な deploy 行の EXISTS)が
 ///     **その service に対して永久 409** = `tbm deploy --image/--dockerfile` が使えなくなる。
 ///   - registry GC がその digest を永久 in-flight 扱いして回収しない。
 ///

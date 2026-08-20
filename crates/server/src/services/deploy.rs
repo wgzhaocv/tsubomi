@@ -31,13 +31,60 @@ const SIGNATURE_HEADER: &str = "x-tsubomi-signature";
 /// ts の許容ずれ(リプレイ防御の片割れ。もう片方は nonce 一意)。
 const MAX_SKEW_SECS: i64 = 300;
 
-/// run_digest を起こす契機。reconcile はロック取得後に「まだ走るべき(desired=running かつ
+/// run_digest を起こす契機。**`User` 以外**はロック取得後に「まだ走るべき(desired=running かつ
 /// phase=running)」かを再確認する — 候補取得とロック取得の間に stop が割り込むと停止済みの
-/// service を蘇らせてしまうため。user 操作(hook / start / rollback)は明示的意図なので再確認しない。
+/// service を蘇らせてしまうため。user 操作(hook / start / rollback / deploy-source)は明示的
+/// 意図なので再確認しない。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DeployTrigger {
     User,
     Reconcile,
+    /// 別 service の subdomain 変更に追従するための再デプロイ(`POST /redeploy-callers`)。
+    /// **ユーザの明示的意図は「B を改名する」までで、A を動かすことそのものではない**ので、
+    /// 挙動は Reconcile 側に寄せる(4 つの次元は `impl DeployTrigger` の表を見ること)。
+    /// 帰属は user 操作(audit の actor は改名したユーザ)。
+    CallerRelink,
+}
+
+/// 契機ごとの振る舞い。**4 つの次元をここに集めるのが要点** — 呼び出し点に `trigger == …` を
+/// 散らすと、契機を足した日にどれかの門だけ更新を忘れる(そして「なぜ Reconcile は伤 phase
+/// するのか」のような問いが、答えではなく**遺漏**として残る)。
+impl DeployTrigger {
+    /// ロック取得後に「まだ走るべきか(desired=running かつ phase=running)」を再確認するか。
+    /// user 操作は明示的意図なので不要。それ以外は候補取得とロック取得の間に stop が割り込む。
+    fn rechecks_state(self) -> bool {
+        !matches!(self, Self::User)
+    }
+    /// commit 前に readiness(container_port の listen)を探測するか。
+    /// **user 契機のみ**:reconcile の復活と caller 再リンクの対象は一度 succeeded した版で、
+    /// readiness は初回デプロイで検証済み。ここで failed にすると phase=failed で
+    /// converge_running の候補から永久に外れる(健全な app のサイレント停止 = v48 の穴)。
+    fn probes_readiness(self) -> bool {
+        matches!(self, Self::User)
+    }
+    /// 失敗時に `service_details.phase` を failed へ落とすか。
+    /// caller 再リンクは**元々健全に走っている** service を相手にするので落とさない
+    /// (start-first なので旧コンテナは無傷 = 実態は running)。
+    /// **Reconcile は従来どおり落とす** — 上の `probes_readiness` と同じ理由が効くはずだが、
+    /// 既存挙動(reconcile.rs の「復活に失敗(phase=failed。次パスでは対象外)」)を変えるのは
+    /// この変更の射程外。次に触る人がここで気付けるよう、格子として明示しておく。
+    fn damages_phase_on_failure(self) -> bool {
+        !matches!(self, Self::CallerRelink)
+    }
+    /// `deploys.trigger` に残す wire 値(migration の CHECK と対。表示・追跡の単一真源)。
+    pub(crate) fn as_db(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Reconcile => "reconcile",
+            Self::CallerRelink => "caller_relink",
+        }
+    }
+    /// 渡された digest が現役(`service_details.image_digest`)であることを要求するか。
+    /// 再リンクは「今 serving している版をそのまま起こし直す」だけなので、ロック待ちの間に
+    /// caller 自身が新版をデプロイし終えていたら**何もしない**(旧版への静默ロールバック防止)。
+    fn requires_current_digest(self) -> bool {
+        matches!(self, Self::CallerRelink)
+    }
 }
 
 /// hook body。**生バイトで HMAC 検証してから** serde で読む(serde 経由で受けて
@@ -231,28 +278,39 @@ pub async fn run_digest(
 
     // ロック取得待ちの間に状態が変わった可能性(delete / stop / 別 deploy と競合)。行が無い =
     // 削除済み → 起動しない(削除済み service に孤児コンテナ / route を作らない)。
-    let cur: Option<(String, String)> = sqlx::query_as(
-        "SELECT s.desired_state, s.phase FROM service_details s
+    // desired / phase / 現役 digest を**1 往復**で読む(no-downgrade 門のために別途 SELECT すると、
+    // 同じ行を 2 回読むうえに kind / deleted_at ガードを落とした弱いコピーになる — 審査指摘)。
+    let cur: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT s.desired_state, s.phase, s.image_digest FROM service_details s
            JOIN resources r ON r.id = s.resource_id
           WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some((desired, phase)) = cur else {
+    let Some((desired, phase, current_digest)) = cur else {
         tracing::warn!(%service_id, %deploy_id, "deploy 対象が削除済み — スキップ(孤児防止)");
         abort_deploy(state, deploy_id, "service は削除済みです").await;
         return Ok(());
     };
-    // reconcile の復活は「まだ走るべき」時だけ:候補取得とロック取得の間に stop が割り込んで
-    // desired/phase が running でなくなっていたら停止済み service を蘇らせない(決定 #5)。
-    // commit_success が desired=running に戻してしまうので、ここで弾くのが唯一の防壁。
-    if trigger == DeployTrigger::Reconcile && (desired != "running" || phase != "running") {
-        tracing::info!(%service_id, %deploy_id, desired, phase, "reconcile: 復活直前に状態が変化 — スキップ");
+    // 非 user 契機(reconcile の復活 / caller 再リンク)は「まだ走るべき」時だけ:候補取得と
+    // ロック取得の間に stop が割り込んで desired/phase が running でなくなっていたら停止済み
+    // service を蘇らせない(決定 #5)。commit_success が desired=running に戻してしまうので、
+    // ここで弾くのが唯一の防壁。
+    if trigger.rechecks_state() && (desired != "running" || phase != "running") {
+        tracing::info!(%service_id, %deploy_id, desired, phase, "非 user 契機: 起動直前に状態が変化 — スキップ");
+        abort_deploy(state, deploy_id, "起動前に状態が変化したためスキップ").await;
+        return Ok(());
+    }
+    // caller 再リンクは「今 serving している版をそのまま起こし直す」だけなので、渡された digest が
+    // 現役でなくなっていたら**何もしない**。ロック待ちの間に caller 自身が新版をデプロイし終えた
+    // ケースで、旧版へ静默ロールバックさせないため(設計時審査 P0-4)。
+    if trigger.requires_current_digest() && current_digest.as_deref() != Some(image_digest) {
+        tracing::info!(%service_id, %deploy_id, "caller 再リンク: この間に新しいデプロイが完了 — スキップ");
         abort_deploy(
             state,
             deploy_id,
-            "reconcile: 復活前に状態が変化したためスキップ",
+            "この間に新しいデプロイが完了したためスキップしました",
         )
         .await;
         return Ok(());
@@ -267,10 +325,48 @@ pub async fn run_digest(
 
     let outcome =
         run_digest_inner(state, deploy_id, service_id, image_digest, git_sha, trigger).await;
-    if let Err(e) = &outcome
-        && let Err(e2) = mark_failed(state, deploy_id, service_id, &e.to_string()).await
-    {
-        tracing::error!(error = ?e2, %deploy_id, "deploy 失敗の記録に失敗");
+    if let Err(e) = &outcome {
+        // **caller 再リンクの失敗では phase を落とさない**:対象は元々健全に走っている service で、
+        // 失敗しても start-first なので旧コンテナは無傷。phase=failed にすると
+        // converge_running の候補集(desired=running AND phase=running)から外れ、**自愈網から
+        // 除名**される(v48 で塞いだ「健全な app の永久停止」と同型 — 設計時審査 P0-2)。
+        // 記録は deploys 行に残す(`GET /services/{id}/callers` の last_deploy_status で見える)。
+        let rec = if !trigger.damages_phase_on_failure() {
+            abort_deploy(state, deploy_id, &e.to_string()).await;
+            // **入口で見た phase へ戻す**。`run_digest` は開始時に phase='deploying' を書くので、
+            // 「failed にしない」だけでは 'deploying' で固着し、結局 converge_running の候補集
+            // (desired=running AND phase=running)から外れる = 塞ぎたかった穴と同じ害になる
+            // (web も永遠に「デプロイ中」を出し 4s 輪詢を続ける)。この契機はロック後の
+            // 再確認門で phase='running' を確認済み、かつ start-first なので旧コンテナは無傷 =
+            // 実態はその値のまま。**リテラルの 'running' を書かない**のが要点 — 40 行上の門で
+            // 読んで検証した値がスコープに在るのに再度ハードコードすると、同じ事実が 2 つになる
+            // (審査指摘)。**`phase='deploying'` 条件付き**にするのは、この間に割り込んだ
+            // stop / 新デプロイの状態を踏み潰さないため(source.rs::fail_acquire と同じ作法)。
+            //
+            // **`phase='deploying'` だけでは足りない**:`deploy_source` は取得(分単位)の開始時に
+            // **deploy_lock の外で** phase='deploying' を立てる(source.rs の「最初に立てる」)。
+            // つまりこの UPDATE は、我々のロック保持中に始まった別経路の marker を消し得る =
+            // 自分が書いていない値を書き戻す所有権違反(codex 審査)。**自分以外の非 terminal な
+            // deploy 行が無いこと**を条件に足して、戻すのは自分の書き込みだけにする。
+            let _ = sqlx::query(
+                "UPDATE service_details SET phase=$2, phase_detail=NULL
+                  WHERE resource_id=$1 AND phase='deploying'
+                    AND NOT EXISTS (SELECT 1 FROM deploys d
+                                     WHERE d.service_id = $1 AND d.id <> $3
+                                       AND d.status NOT IN ('succeeded','failed'))",
+            )
+            .bind(service_id)
+            .bind(&phase)
+            .bind(deploy_id)
+            .execute(&state.db)
+            .await;
+            Ok(())
+        } else {
+            mark_failed(state, deploy_id, service_id, &e.to_string()).await
+        };
+        if let Err(e2) = rec {
+            tracing::error!(error = ?e2, %deploy_id, "deploy 失敗の記録に失敗");
+        }
     }
     outcome
 }
@@ -360,7 +456,7 @@ async fn run_digest_inner(
     //    素の private は listen しない純 worker を許容する契約なので門を掛けないが、誰かに注入
     //    されている private は内部リンク先 = listen する契約なので、監听錯 port のまま succeeded →
     //    attach_as_callee が呼び出し元を不達の新コンテナへ切り替える穴をここで塞ぐ。
-    let probe = trigger == DeployTrigger::User
+    let probe = trigger.probes_readiness()
         && (visibility != Visibility::Private || is_linked_callee(state, service_id).await);
     let staged = async {
         start_container(state, &spec, &image_ref, probe).await?;

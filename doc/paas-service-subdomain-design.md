@@ -8,6 +8,7 @@
 > (`tbm service subdomain` / web 概要の編集)の両方を開ける。
 >
 > 対象:server v59 / tbm 1.1.1。migration 1 本(`20260819000001`)。
+> §6・§7 は追加スライス(tbm 1.1.4。server は次版 — **本番 ship は未実施**)。
 
 ---
 
@@ -225,3 +226,148 @@ DTO コメントと UI/CLI の文言を「注入名」に揃えた。
 - dev 実機:端点 200 / `[]` / 401 / 404、**同一 caller の 2 env 名が 1 行に集約**、CLI text/json、
   改名回显が 0 件で消えて 1 件で名単を出すこと。検証用データは全て元の状態へ戻した
   (soft-delete の時刻は audit_log から復元)。
+
+---
+
+## 7. 連帯再デプロイ(`POST /services/{id}/redeploy-callers`)
+
+§6 は「誰が切れるか」を言うところまで。ここは**その相手を今の版のまま再デプロイして注入値を
+追従させる** opt-in の一発。背骨は変えない — 値はコンテナ起動の瞬間に解決されるという不変式は
+そのままで、変えるのは「その再デプロイを誰が押すか」だけ。**静默の自動連鎖にはしない**
+(再デプロイは無害ではない)。migration 1 本(`20260820000001_deploys_trigger.sql`)。
+
+### 7.1 前提の修理:僵屍 `received` 行(既存バグ)
+
+`redeploy` は deploys 行を `received` で INSERT してから deploy_lock を待つ。この窓でプロセスが
+落ちた行は**永久に残る**:その時点の phase はまだ `'deploying'` ではない(phase を書くのは
+ロック取得後)ので `recover_interrupted` の候補集に入らず、`gc::sweep_old_deploys` は terminal 行
+しか消さない。結果 `deploy_source` の入場門が**その service に対して永久 409** になり
+`tbm deploy --image/--dockerfile` が使えなくなる(registry GC もその digest を永久 in-flight 扱い)。
+
+起動直後は非 terminal 行を所有していた task がプロセスごと消えているので、残っているものは
+**定義上すべて孤児**。`close_orphan_deploys` が起動時に一度だけ全部 failed で閉じる
+(phase は触らない)。この機能は 1 回で N 本の行を作るので、先に塞いだ。
+
+### 7.2 `DeployTrigger::CallerRelink` — 4 つの次元を 1 か所に集める
+
+契機ごとの振る舞いは `impl DeployTrigger` の**具名述語**にした(`rechecks_state` /
+`probes_readiness` / `damages_phase_on_failure` / `requires_current_digest`)。
+呼び出し点に `trigger == …` を散らすと、契機を足した日にどれかの門だけ更新を忘れ、
+「なぜ Reconcile は phase を落とすのか」が**答えではなく遺漏**として残る(altitude 審査)。
+
+| 契機 | ロック後の再確認 | readiness 探測 | 失敗で phase=failed | 現役 digest 必須 |
+|---|---|---|---|---|
+| `User` | しない(明示的意図) | する | する | しない |
+| `Reconcile` | する | しない | **する**(既存挙動。射程外だが格子として明示) | しない |
+| `CallerRelink` | する | しない | しない | する |
+
+それぞれの理由:
+
+- **再確認**(P0-1):`commit_success` が無条件に `desired_state='running'` を書くので、
+  プレビューと実行の間に stop された caller をここで弾かないと**ユーザが止めた意図が消える**。
+- **非探測 + 失敗で phase を落とさない**(P0-2):対象は**元々健全に走っている** service。
+  探測失敗や pull 失敗で `phase='failed'` にすると `converge_running` の候補集
+  (`desired='running' AND phase='running'`)から外れ、**自愈網から除名**される
+  (v48 で塞いだ「健全な app の永久停止」と同型)。
+- **失敗時は phase を入口の値へ戻す**:「failed にしない」だけでは `run_digest` が開始時に
+  書いた `'deploying'` で**固着**し、結局同じ害になる(dev の失敗路径検証で発見)。戻す値は
+  リテラルではなく**門で読んで検証した `phase`** を使う(同じ事実を 2 つ持たない)。
+  条件は `phase='deploying'` **かつ自分以外の非 terminal な deploy 行が無いこと** —
+  `deploy_source` は取得開始時に **deploy_lock の外で** phase='deploying' を立てるので、
+  条件が緩いと自分が書いていない marker を消す所有権違反になる(codex 審査)。
+- **現役 digest 必須**(P0-4):ロック待ちの間に caller 自身が新版をデプロイし終えていたら
+  **何もしない**(旧版への静默ロールバック防止)。判定に使う digest は、門で読む
+  `desired/phase` と**同じ 1 往復**で取る(別 SELECT すると弱いコピーになる)。
+
+### 7.3 入場制限は「実行枠」そのもの
+
+`relink_slot: Arc<Mutex<()>>` を**ハンドラで** `try_lock_owned` する。取れなければ 409、
+取れたら guard を spawn へ move(Drop で解放 = panic 経路も拾う)。
+
+当初は per-callee の in-flight 集合(409)+ 別の Semaphore(実行枠、spawn 内で acquire)の
+2 段だったが、それだと**枠待ちのバッチに 202「開始しました」を返す = 応答が嘘になる**
+(審査 3 本の共通指摘)。1 本にすると 409 ⇔ 実際に何かが走っている、が成立する。
+対象ゼロなら **spawn しない**(何もしない task が枠を占め、その間 409 になり、空の完走 audit
+まで残る)。
+
+**`deploy_lock` は流用しない**:fan-out は分単位なので、同じ錠を取る `stop` / `delete` /
+`visibility` / 改名がその間ずっと固まる。進程内で足りるのは、ship で中断されたバッチが
+DB に永久 409 を残さないため(再起動で枠が空くのが正しい)。
+
+### 7.4 実行(`relink_callers`)
+
+バッチ内は**直列**(reconcile と同じ家風。単一ホストの共有機なので並行度をクリック回数に
+比例させない)。caller ごとに ①判定を**取り直す** ②digest を**その瞬間**解決
+(先頭でスナップショットすると、その間に新版を出した caller を巻き戻す)
+③`redeploy(..., CallerRelink)`。1 件の失敗は `continue` + warn。
+完走後に `service.redeploy_callers.completed` audit。
+
+判定の単一真源は `caller_relink_verdict`(純関数 = 真理値表で機械封じ)。
+`GET /callers` の `will_redeploy` / `skip_reason` は**同じ関数の出力**なので、プレビューと
+実行がずれない。**クライアントは自分で再導出しない**(`desired_state` 等から独自に判定すると
+食い違う)。判定順は「より根本的な理由を先に」:callee 未稼働 → 未デプロイ → 停止中 →
+デプロイ進行中 → stateful。
+
+`deploy_in_flight` の述語は**否定の閉集合**(`NOT IN ('succeeded','failed')`)。肯定形で段階を
+列挙すると、段階を 1 つ足した日にこの判定だけ黙って false になる = プレビューが最も要る場面で
+嘘をつく。同じ理由で `source.rs` の入場門も否定形へ統一した(同じ問いの 2 通りの綴りを残さない)。
+
+### 7.5 provenance:`deploys.trigger`
+
+`redeploy` は再生する版の commit_message をそのまま新しい行へ書くので、**平台が自動で起こした
+行はユーザ自身の再デプロイと見分けが付かない**(同じ commit 件名の行が並ぶ。同 digest の行が
+複数できて全部「稼働中」に見えた 2026-07-26 の web 事故と同じ根)。`DeployTrigger` は既に
+メモリ上に在るのに表に残していなかった旧債で、この機能が「ユーザが 1 回押すと平台が量産する」
+側に回ったことで利用者に見える形になった(altitude 審査)。
+
+migration で `deploys.trigger TEXT NOT NULL DEFAULT 'user'` + CHECK。回填値は**新規行の DEFAULT と
+同一**(センチネルを使わない = 2026-07-26 の `-infinity` decode panic の約束)。`DeployDto` に載せ、
+CLI の履歴と web の Deploys タブが `reconcile` / `caller_relink` にだけラベルを出す
+(`user` は大半の行なので出すと情報量がゼロになる)。
+**検証は既存行の読み戻しまで**やった(4 行が `'user'` で `GET /deploys` が 200)。
+
+### 7.6 入口
+
+- **web**:変更 modal に既定チェック済みの Checkbox(対象 0 件なら出さない)。改名成功後に
+  第 2 リクエスト。**半完成**(改名は成功・fan-out の起動が失敗)は modal を閉じず専用文案 +
+  再試行ボタン。modal を開くとき `relink.reset()` も呼ぶ(前回の失敗バナーが、まだ何もして
+  いない次のセッションに残るのを防ぐ)。invalidate は **`serviceKeys.callers(id)` だけ** —
+  `serviceKeys.all` にすると同じページの `useServiceMetrics`(1〜2 秒の docker stats)を
+  巻き込み、改名 1 回で香橙派の docker を数秒無駄に回す(効率審査で実測)。
+- **CLI**:`tbm service redeploy-callers <名前>`(**改名と独立に再実行できる** — web の半完成の
+  回収 / 後から思い出した場合)+ `service subdomain … --redeploy-callers`。
+  json は **1 コマンド 1 ドキュメント**を守る(`{"service":…,"relink":…}` の包み。2 つの DTO を
+  続けて出すと jq / JSON.parse が単一値として読めない)。同値改名では走らせないが
+  **黙って無視しない**(ユーザは明示している)。
+
+### 7.7 受容した差異
+
+| 差異 | 理由 |
+|---|---|
+| 202 は約束ではない(実行直前に判定を取り直す) | 応答は要求時点のスナップショット。真の結果は `GET /callers` の `last_deploy_status` と `deploys.trigger` で見る。 |
+| 複数バッチを区別する id は持たない | `trigger='caller_relink'` + 時刻 + 完走 audit で足りる。バッチ id は追跡の粒度を上げるだけで、行動を変えない。 |
+| stateful な caller は手動(強制上書きの入口を作らない) | stop-first の実停機を伴うので時機はユーザが選ぶ。次の一手はその service 自身の deploy として既に存在する。 |
+| `Reconcile` は失敗で phase を落とし続ける | `probes_readiness` を免除した理由がこちらにも効くはずだが、既存挙動の変更はこの射程外。述語の表に格子として明示した。 |
+| 再帰しない(A↔B 相互注入でも連鎖しない) | B の deploy は `attach_as_callee` で connect するだけで A の再デプロイを誘発しない。**明示的決定**として書き残す(後で「順手で」足さないため)。 |
+| 逆引きの富行が網ホットパスにも乗る(`deployed` / `deploy_in_flight` / `stateful` を `service_callers` が捨てる) | 述語を 1 本に保つ対価。呼び出しは deploy の切替時と改名時の one-shot で、直後の docker 往復より 4 桁小さい(実測)。 |
+| 未反映バッジの反転(停止中 caller は `serving_since=None` で「反映済み」に見える) | 既存バグ。この機能では発火しない(停止中は判定で skip)が、`InjectionDto` の三態化が要るので別スライス。 |
+
+### 7.8 品質検証
+
+- **設計時**:対抗審査で P0 4 件(§6.5 の 4 件)。うち 2 件は既存バグ。
+- **実装後 1 巡目**:4 simplify agents + codex ultra。最大の収穫は
+  「**202「開始しました」が枠待ちで嘘になる**」(3 本が独立に指摘)→ 入場制限を 1 本に統合。
+  ほか:応答の 2 配列を 1 配列へ / 空 targets の早期 return / 4 次元の具名述語化 /
+  phase 復元をリテラルから読み値へ / 重複 SELECT の統合 / in-flight 述語の統一 /
+  web の invalidate 縮小と `relink.reset()` / CLI の二重フェッチ廃止と行フォーマット統一 /
+  同値改名の静默をやめる / `deploys.trigger` の旧債返済。
+  codex は**額度切れで最終報告前に停止**したが、途中で
+  「`deploy_source` が lock 外で phase='deploying' を書くので補償が所有権を壊す」を指摘 →
+  所有権条件を追加(§7.2)。**codex の再走は未完 = 次に触るときに一度通すこと**。
+- **dev e2e**:注入 → 改名で実際に断線(凍結 env は旧名・網別名は新名を実測)→ 連帯再デプロイで
+  新 env に追従 → traefik から新別名で実到達。**停止中 caller が叩き起こされない**(desired/phase が
+  stopped のまま = P0-1 回帰)。callee 停止で一括 skip。409 が「実際に走っている」ことを意味する。
+  対象ゼロで幽霊 409 が出ない。**registry を止めて pull を失敗させ、phase が入口の値のまま
+  保たれ旧コンテナが無傷**(= P0-2 回帰。この検証で「'deploying' で固着」バグを発見)。
+  provenance が `caller_relink` で焼かれ CLI 履歴にラベルが出る。migration の**既存行読み戻し**。
+  検証用に作った service は全て削除 + purge し、網・コンテナ・token の残留ゼロを確認。

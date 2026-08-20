@@ -8,7 +8,8 @@ use tsubomi_shared::{
     DeployConfig, DeployDto, ExecReq, ExecResult, ForkDatabaseReq, Health, InjectionDto,
     ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameServiceReq,
-    RenameVolumeReq, RollbackReq, ServiceCallerDto, ServiceDto, SetEnvReq, SetEnvResp,
+    RedeployCallersResp, RenameVolumeReq, RollbackReq, ServiceCallerDto, ServiceDto, SetEnvReq,
+    SetEnvResp,
     SetServiceLimitsReq, SetServiceVisibilityReq, TrashItemDto, VolumeDto,
 };
 
@@ -1041,6 +1042,25 @@ pub async fn service_callers(
     )
     .await?;
     resp.json().await.context("failed to parse callers response")
+}
+
+/// この service を注入している呼び出し側を、今の版のまま再デプロイする
+/// (POST /services/{id}/redeploy-callers)。**202 即返し** — 応答は要求時点の計画で
+/// 約束ではない(実行の直前に判定を取り直す)。結果は `service_callers` を引き直して見る。
+pub async fn service_redeploy_callers(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<RedeployCallersResp> {
+    let resp = send_ok(
+        c.post(format!("{server_url}/api/services/{id}/redeploy-callers"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json()
+        .await
+        .context("failed to parse redeploy-callers response")
 }
 
 // ============ M3 注入 / 静的 env ============

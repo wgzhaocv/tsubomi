@@ -309,9 +309,12 @@ pub async fn deploy_source(
     // 取得は分単位になり得るので、無制限に並行 spawn すると Pi が飽和する + 同 tag への
     // 並行 push が競合する(codex/efficiency 指摘)。1 service = 同時 1 デプロイに制限する。
     let mut tx = state.db.begin().await?;
+    // 述語は**否定の閉集合**(`NOT IN ('succeeded','failed')`)。肯定形で段階を列挙すると、
+    // 段階を 1 つ足した日にこの門だけ素通りになる(他の全箇所 — deploy.rs / reconcile.rs /
+    // registry.rs / inject.rs — は否定形。審査で「同じ問いの 2 通りの綴り」として指摘された)。
     let inflight: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM deploys
-           WHERE service_id = $1 AND status IN ('received','pulling','starting'))",
+           WHERE service_id = $1 AND status NOT IN ('succeeded','failed'))",
     )
     .bind(id)
     .fetch_one(&mut *tx)

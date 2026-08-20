@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import {
   type Deploy,
   deployStatusLabel,
+  deployTriggerLabel,
   shortDigest,
   useRollbackService,
   useService,
@@ -69,6 +70,10 @@ export default function ServiceDeploys() {
                 <span className="truncate text-xs font-medium text-muted-foreground">
                   {new Date(d.created_at).toLocaleString("ja-JP")} · {d.git_sha} ·{" "}
                   {shortDigest(d.image_digest)}
+                  {/* 平台が自動で起こした行は、再生する版の commit 件名をそのまま持つので
+                      ユーザ自身の再デプロイと同じ見た目になる。契機を添えて区別できるように
+                      する(旧サーバはフィールドが欠ける = 何も出さない)。 */}
+                  {deployTriggerLabel(d.trigger) && ` · ${deployTriggerLabel(d.trigger)}`}
                 </span>
                 {d.error && <span className="text-xs font-semibold text-[#e05a5a]">{d.error}</span>}
               </div>

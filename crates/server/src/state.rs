@@ -56,6 +56,20 @@ pub struct AppStateInner {
     /// サンプラ task が稼働中か。WS 接続時の「起動判定」とサンプラの「停止(受信者ゼロ)」を
     /// このロックで直列化する(無人 / 二重起動の防止。詳細は metrics::spawn_sampler)。
     pub metrics_running: Arc<tokio::sync::Mutex<bool>>,
+    /// 連帯再デプロイ(`POST /services/{id}/redeploy-callers`)の実行枠。**プロセス全体で 1 本**
+    /// (単一ホストの共有機なので、並行度がクリック回数に比例すると部署風暴になる。reconcile も
+    /// 直列なのでそれに揃える)。
+    ///
+    /// **入場判定も本人が兼ねる**:`try_lock_owned` を**ハンドラで**試し、取れなければ 409。
+    /// 別に per-callee の集合を持つ形にすると、「202 を返したのに実際は枠待ちで何も始まって
+    /// いない」= 応答が嘘になる(審査 3 本の共通指摘)。guard は spawn した task へ move し、
+    /// **Drop で解放**する(正常終了でも `catch_unwind` の panic 経路でも確実に抜ける)。
+    ///
+    /// **`deploy_lock` は流用しない**:fan-out は N 件の deploy をまたいで分単位で走るので、
+    /// 同じ錠を取る `stop` / `delete` / `visibility` / 改名がその間ずっと固まる。
+    /// 進程内で足りるのは、ship で中断されたバッチが DB に永久 409 を残さないため
+    /// (再起動で枠が空くのが正しい)。
+    pub relink_slot: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -176,6 +190,7 @@ impl AppState {
             deploy_locks: Mutex::new(HashMap::new()),
             metrics_tx,
             metrics_running: Arc::new(tokio::sync::Mutex::new(false)),
+            relink_slot: Arc::new(tokio::sync::Mutex::new(())),
         })))
     }
 

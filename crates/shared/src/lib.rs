@@ -584,6 +584,13 @@ pub struct DeployDto {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub finished_at: Option<DateTime<Utc>>,
+    /// この deploy を起こした契機:`user`(hook / start / rollback / deploy-source)/
+    /// `reconcile`(コンテナ消失からの復活)/ `caller_relink`(注入元の改名に追従した自動再デプロイ)。
+    /// 平台が自動で起こした行をユーザ自身の再デプロイと**区別できる**ようにするための provenance
+    /// (`redeploy` は再生する版の commit_message をそのまま書くので、これが無いと同じ件名の行が並ぶ)。
+    /// 旧サーバ相手は default(空文字)= 不明。
+    #[serde(default)]
+    pub trigger: String,
 }
 
 /// `GET /api/services/:id/deploy-config` のレスポンス。`tbm deploy --local` が
@@ -696,6 +703,27 @@ pub struct ServiceCallerDto {
     /// 直近 deploy のエラー(失敗時のみ値が入る列なので、そのまま載せる)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_deploy_error: Option<String>,
+    /// true = ステートフル(deploy が stop-first = 実停機を伴う)。連帯再デプロイの自動対象外。
+    #[serde(default)]
+    pub stateful: bool,
+    /// 連帯再デプロイ(`POST /redeploy-callers`)が実際に動かすか。判定は**サーバ側の純関数**で、
+    /// この端点(dry-run)と実行が同じ関数を引く — 別々に判定するとプレビューが嘘になる。
+    /// **クライアントは自分で判定し直さないこと**(desired_state 等から再導出すると食い違う)。
+    #[serde(default)]
+    pub will_redeploy: bool,
+    /// 対象外の理由(`will_redeploy=false` のときだけ載る。**次の一手を含む**)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+/// `POST /api/services/:id/redeploy-callers` の 202 応答。**要求時点のスナップショット**で
+/// 約束ではない(実行の直前に判定を取り直すので、その間の状態変化で結果は変わり得る)。
+/// 真の結果は `GET /services/:id/callers` を引き直して `last_deploy_status` で見る。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedeployCallersResp {
+    /// 呼び出し側の全件。**対象かどうかは各要素の `will_redeploy`** で分かれる
+    /// (対象 / 対象外を別々の配列にすると同じ事実の 2 つ目の表現になり、整合を保つ手間が増える)。
+    pub planned: Vec<ServiceCallerDto>,
 }
 
 /// `POST /api/services/:id/injections` のリクエスト。env_var / mount_path 省略時は kind 既定。
