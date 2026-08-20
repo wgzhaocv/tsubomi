@@ -17,11 +17,15 @@
 | `8d2ad8a` | **既存バグ修正**:孤児の進行中 `deploys` 行で `deploy-source` が永久 409 になる穴(起動時に非 terminal 行を閉じる) |
 | `90e9f24` | **連帯再デプロイ** `POST /services/{id}/redeploy-callers`(+ `DeployTrigger::CallerRelink` / 実行枠の入場制限 / `deploys.trigger` migration / CLI 双入口 / web の checkbox と半完成エラー) |
 | `eb4aee5` `8389586` `3abf4ca` | skill(AI 面)の追記と、外部審査で出た**事実誤り・矛盾**の修正 |
+| `b4323ef` | この NEXT.md + CLAUDE.md からのポインタ |
+| `72d6c60` | **codex 深審の真バグ 7 件を修正(未 ship)** — 詳細は (A) |
 
 **出荷済み**:
 
 - **server `tsubomi:v62`**(本番 = 香橙派)。`HOST=opi TAG=v62 just ship` で展開。
-  **v62 のサーバコード = 現 HEAD**(ship 後の 3 commit は skill / CLAUDE.md だけ)。
+  **⚠ v62 は `90e9f24` 時点のサーバコード**。`72d6c60`(codex 修正 7 件)は**まだ本番に無い** —
+  次は `HOST=opi TAG=v63 just ship`。CLI 側の変更も含むので `just release-cli-publish` の前に
+  `crates/cli/Cargo.toml` の version を **1.1.5** へ上げること(リリースは不可変)。
 - migration `20260820000001_deploys_trigger.sql` は本番適用済み。既存 32 行が `'user'` に回填され、
   **既存行を API 経由で読み戻すところまで確認済み**(新規作成の e2e では見えない穴の約束)。
 - **tbm 1.1.4** を Pi へ公開済み(`just release-cli-publish`)+ ローカルも `tbm update` 済み。
@@ -36,36 +40,17 @@
 
 ## 2. まだ終わっていないこと(優先順)
 
-### (A) codex 第 2 巡の深審が**未完** ← 最優先
+### (A) ~~codex 第 2 巡の深審~~ → **完了(2026-08-20 夕)**。残った指摘が下記 (E)
 
-Task 2(`90e9f24`)+ Task 1 のうち審査後に直した部分(`800bec0` の web / CLI)を対象に
-codex ultra を走らせたが、**最終報告を書く前に額度切れで停止**した。
+再走して真バグ 15 件(High 4 / Medium 9 / Low 2)。**7 件を修正して `72d6c60` で出荷準備済み
+(未 ship)**、残り 8 件は判断のうえ (E) へ送った。修正した分の要点は commit message と
+doc §7 に。特に **2 つは自分の設計判断の撤回**なので、次に触る人は逆戻ししないこと:
 
-- 途中で 1 件だけ吐いた指摘(**`deploy_source` が `deploy_lock` の外で `phase='deploying'` を
-  書くので、`CallerRelink` の phase 補償が自分の書いていない marker を消す**)は**修正済み**
-  (`deploy.rs` の補償 UPDATE に「自分以外の非 terminal な deploy 行が無いこと」条件を追加)。
-- 残りの報告は失われた。**もう一度通すこと**。
-
-やり方:
-
-```bash
-brew upgrade codex            # 実行前に必ず最新化
-# 審査範囲:git show 90e9f24 と、800bec0 のうち
-#   crates/cli/src/commands/service.rs / web/src/routes/ServiceOverview.tsx / web/src/lib/services.ts
-codex exec --model gpt-5.6-sol -c model_reasoning_effort=ultra --sandbox read-only \
-  "$(cat <プロンプト>)" < /dev/null > /tmp/codex-out.md 2>&1
-```
-
-**`< /dev/null` を忘れないこと** — 付けないと codex がプロンプトを引数で受け取ったうえで
-stdin も読もうとして無反応のまま止まる(この日 10 分無駄にした)。
-額度切れの扱いは memory `codex-banked-reset` を見る(**`/reset` はもう存在しない** —
-Codex が 5 時間枠を廃止したので、エラー本文の復帰時刻まで待つのが唯一の手)。
-
-疑ってほしい点(前回のプロンプトの要点):`DeployTrigger` の 4 述語が既存の全デプロイ経路
-(hook / start / rollback / reconcile / deploy-source)の意味を変えていないか / phase 補償の
-穴 / no-downgrade 門が正当な再リンクまで弾く経路(未デプロイ = NULL、deploy-source の
-`'pending'`)/ 入場枠 guard の漏れとデッドロック / `relink_callers` の再判定が中途で
-callee 停止した場合 / CLI の json 契約 / web の入れ子 onSuccess と unmount 後の解決。
+- `CallerRelink` は **readiness を探測する**(当初は探測しない設計だった)。再リンクは注入 env が
+  変わった状態で起こし直すので「同じ image」は「今回の env でも ready」を保証しない。
+  v48 の懸念は `damages_phase_on_failure=false` で既に無効化されている。
+- phase 復元に「自分以外の非 terminal な deploy 行が無い」条件を**足してはいけない**
+  (足したら `deploying` 永久固着を産んだ)。理由は `deploy.rs` の当該コメントに全部書いた。
 
 ### (B) web UI を**目視で確認していない** ← 実装は型検査だけ
 
@@ -80,6 +65,9 @@ callee 停止した場合 / CLI の json 契約 / web の入れ子 onSuccess と
 6. `CallerItem` のバッジ(停止中 = 灰 / 直近デプロイ失敗 = 赤)が
    「未反映(要デプロイ)」の琥珀と**別の色**であること(色の意味が衝突していた既存問題)
 7. Deploys タブに `[自動:注入元の改名に追従]` のラベルが出ること
+8. **`72d6c60` で挙動が変わった分**:①入力欄で **Enter**(同値のまま)を押しても何も起きない
+   ②名単の取得を失敗させた状態(server を止める等)でも checkbox が出て、勾選のまま送ると
+   relink POST が飛ぶ ③改名の応答前に画面を離れても relink が送られる(Network タブで 2 本目を確認)
 
 `just db-up` + `just dev` → :5173。検証用の caller/callee ペアの作り方は §3 のレシピ。
 
@@ -92,6 +80,44 @@ dev では端到端で確認済み(断線の実測 → 追従 → 実到達 / �
 (`injections` の service 注入は 1 行あるが、caller・callee ともゴミ箱の中 = 過去の e2e の残骸)。
 やるなら本番にテスト service を 2 つ作る判断が必要 → **ユーザに確認してから**。
 実際の service↔service リンクが生まれたときに自然に検証されるので、急がなくてよい。
+
+### (E) codex 第 2 巡で**採用しなかった 8 件**(理由付き。次スライスの材料)
+
+いずれも「実害はあるが、直すには設計 or migration が要る」もの。**軽い順ではなく、重い順**に
+書く(次に着手するなら上から):
+
+1. **phase の所有者を列で持つ**(High 1 の原理的な解)。`service_details.phase_owner_deploy_id`
+   を足し、phase を書く全経路(`run_digest` / `deploy_source` / `stop_containers` /
+   `commit_success` / `mark_failed` / `recover_interrupted`)が owner を同時に書き、復元は
+   owner 一致でのみ行う。今は「消し得るが実害は小さい方」を選んでいるだけ。
+2. **`commit_success` 後・cutover 前の ship で新旧コンテナが永久併存**(codex 指摘・**対象差分外の
+   既存バグ**)。DB は既に running/succeeded なので `recover_interrupted` の対象外、service は
+   生きているので孤児掃除も無視する ⇒ HTTP は二重、worker は二重実行。reconcile が
+   「直近成功 deploy のコンテナ以外」を deploy_lock 下で掃除する必要がある。**これが一番重い**。
+3. **`deploy_source` と relink の入場が原子的でない**(Medium 5)。両者が別々に「in-flight 無し」を
+   読んで行を作れる ⇒ relink が旧 digest で成功 commit → source が完了時に `running` を見て
+   自分を failed にする。`service_details.image_digest` は旧値なので no-downgrade 門では
+   検出できない。**check・行作成・marker を同じ advisory lock か DB 行で直列化**するのが解。
+4. **relink 中に callee が再改名されると、成功した caller が即座に旧名を持つ**(Medium 7)。
+   世代門が無い(current-digest 門は caller の digest しか見ない)。callee の
+   `subdomain_changed_at` をバッチに持ち、commit 前に照合して skip / retry する。
+5. **docker / DB の一過性失敗を「callee 停止」に潰している**(Medium 8)。`serving_container` が
+   `Option` なので、確認不能と確認済み停止が同じ `None` になり、**全 caller が対象外の 202** に
+   なる(成功したように見えて何もしない)。fallible な lookup を作り、確認不能は 503 にする。
+6. **`run_digest` 冒頭の DB error が INSERT 済み deploy 行を閉じない**(Medium 10)。
+   `.await?` で抜けるので `received` 行がプロセス中ずっと残り、以降の relink は in-flight 扱い・
+   deploy-source は 409(`8d2ad8a` が閉じるのは**次の起動時**)。行作成後の全 Err を 1 つの
+   lifecycle guard で terminal 化する。
+7. **202 バッチの真の結果が観測できない / ship で残りが消える**(Medium 12)。recheck・digest
+   解決・eject で落ちた分は audit にしか残らず、`GET /callers` は前の status を返す。batch id と
+   per-target outcome を永続化し、status 端点で terminal まで poll / resume するのが解。
+   CLI の「開始しました」も「要求時点の候補を受理」に直す。
+8. **fan-out が O(N²)**(Low 14)。target ごとに全 caller を再取得 + docker presence。
+   caller id 指定の単行 fresh verdict にする。今の規模(N=1〜5)では実害なし。
+
+**この 8 件は「今の実装が嘘をつく」類ではなく「並行や中断で壊れる」類**。日常運用では
+まず踏まないが、踏んだときは静かなので、次に service のデプロイ経路を触るときにまとめて
+片付けるのが効率的(特に 1・2・3 は同じ「phase / 入場の所有権」という一つの問題の別の顔)。
 
 ### (D) 意図的に先送りしたもの(忘れないための記録。すぐやる必要はない)
 
