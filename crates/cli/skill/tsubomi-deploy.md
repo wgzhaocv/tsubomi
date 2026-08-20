@@ -12,7 +12,10 @@ tsubomi(蕾)= 社内 PaaS(基礎版 Vercel + Neon)。ユーザ(多くは非エ�
 
 ## 0. 絶対に外さない 3 点
 
-1. **検証は必ず `curl` で 2xx を確認する。`tbm service status` の "running / succeeded" を信用しない。**
+1. **検証は必ず `tbm service verify` で確認する。`tbm service status` の "running / succeeded" を
+   信用しない。**(verify は公開なら根 + 子リソースの 2xx を、**private なら内網 TCP 探活**を見る。
+   `curl` は verify が公開時に内部でやっていること — private な service には公開 URL が無いので
+   `curl` を絶対条件にはできない。持ち込み DB / worker は既定で private = そちら側が多数)
    デプロイ門禁は「`container_port` で TCP を受けた」までしか見ない — listen していても
    HTTP が 500 を返す / assets が 404 で画面が真っ白、は succeeded になる。**真実は curl だけ**
    (`tbm service verify` が子リソースまでまとめて見る)。
@@ -22,7 +25,8 @@ tsubomi(蕾)= 社内 PaaS(基礎版 Vercel + Neon)。ユーザ(多くは非エ�
 3. **外向き・破壊的な操作はユーザに一言断ってから。** GitHub repo の作成、リソース削除など。
 
 CLI の出力は捕捉時(非 TTY)に自動で JSON。`jq` で id を拾える。エラーは `{"error","code"}` を
-stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`conflict`/`validation`/`not_found`/…)、
+stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`forbidden`/`not_found`/`conflict`/
+`validation`/`payload_too_large`/`rate_limited`/`server_error`)、
 メッセージは次の一手を含むので素直に従う。
 
 ## 1. 前提を整える
@@ -71,7 +75,7 @@ stdout に出して非零終了 — `code` で機械分岐(`unauthorized`/`confl
   - 任意フラグ:`--port <PORT>`(listen ポート。既定 8080。**8080 以外を指定すると公開範囲の既定が
     `private` になる** — 非 HTTP コンテナ想定。`--visibility` で上書き可)/ `--stateful`(持ち込み DB 等の
     ステートフルコンテナ。デプロイが stop-first = 数秒瞬断と引き換えにデータディレクトリを保護)/
-    `--memory <MiB>`(上限。既定 1024)/ `--cpus <N>` / `--subdomain <sub>`(公開 URL の
+    `--memory <MiB>`(上限。既定 1024、**範囲 128〜4096**)/ `--cpus <N>` / `--subdomain <sub>`(公開 URL の
     サブドメイン)。**port 以外は作成後にも変更できる**(上の一覧。OOM なら
     `tbm service limits <名前> --memory <MiB>` を上げて再デプロイ — 作り直し不要)。
 - database:`tbm db create <名前>`
@@ -192,12 +196,13 @@ Dockerfile を書いて `tbm deploy --dockerfile ./Dockerfile --service mypg`(�
 app は HTTP リクエストヘッダで**訪問者の実 client IP** を受け取れる(プラットフォームが提供する。
 使う/使わないは app 次第):
 
-- `CF-Connecting-IP` — 正準。Cloudflare が必ず付ける(単一の実 IP)。
-- `X-Forwarded-For` / `X-Real-Ip` — プラットフォームの Traefik が `CF-Connecting-IP` から埋める。
-  標準ライブラリ(多くは XFF を読む)もそのまま実 IP を得る。
+- `X-Forwarded-For` / `X-Real-Ip` — **どの部署形態でも Traefik が埋める**ので、これを読むのが
+  可移植な既定(標準ライブラリの多くは XFF を読むのでそのまま実 IP を得る)。
+- `CF-Connecting-IP` — Cloudflare Tunnel 配下の部署なら在る(単一の実 IP)。**在るかどうかを
+  見て分岐**し、無条件に前提しない — 平台は直 VPS 形態(traefik が :443 を終端)も持つ。
 
-**可信**:入口は Cloudflare Tunnel のみ・直アクセス不可なので、クライアントはこれらを偽造して届かせられない
-(CF が edge で上書きする)。`req.socket.remoteAddr` 等の**生の接続元はプロキシ(内部 IP)**になるので、
+**可信**:入口は平台の Traefik だけで、テナントコンテナへの直アクセス経路は無い(CF 配下なら
+CF が edge で上書きする)。`req.socket.remoteAddr` 等の**生の接続元はプロキシ(内部 IP)**になるので、
 実 IP が要るなら上のヘッダを読むこと(`process.env` の注入値ではない — 実行時のリクエストヘッダ)。
 
 ## 4. デプロイ — 経路を選ぶ
@@ -371,8 +376,7 @@ request body 制限。registry 側では変えられない)。超えると `tbm 
    大結果はアプリのドライバで)。値を安全に束ねるなら **`--param`**(位置バインド $1..$n。手動
    エスケープ不要。型は SQL 側で `$1::int` と明示。NULL は SQL に直書き)。
    注入した値が何に解決されるかは **`tbm env list <service名> --resolved`**(由来付き・秘密は伏せる)
-   で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。反映はデプロイ時なので
-   cache の rotate 後は要再デプロイ(db の rotate は app に無影響 — §「順序:注入 → デプロイ」)。
+   で確認できる — 探针を書かずに「B_URL が何を指すか」等が分かる。
 
 ### 順序:**注入 → デプロイ**(逆にすると env が現れない)
 
@@ -439,17 +443,15 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 ## 6. ライフサイクルと後始末
 
 - 再デプロイ:GitHub 経路は `git push`、ローカルは `tbm deploy --local`。
-- `tbm cache rotate` の後は**再デプロイ**して初めて新しい接続文字列が効く
-  (`tbm db rotate` は human role だけなので実行中の app は無影響)。
 - `tbm service {start,stop,logs,rollback,delete}`。`delete` はゴミ箱(3 日復元可、`tbm trash`)。
+  `--with-repo` の GitHub repo 削除は **best-effort**:repo を消せなくても **service の削除は成功し
+  `tbm` は 0 で終わる**(json の `github_repo.deleted` が false + `error`。text は stderr に一行)。
+  **「repo が消えていない = 削除されていない」と誤読して delete を再試行しないこと**(2 度目は
+  `not_found`)。残った repo は `gh repo delete <その時の subdomain>` で掃除する。
 - **`tbm service rename <名前> <新名>`** — 表示名だけ変わる(subdomain = 公開 URL / GitHub repo は
   不変)。**`tbm service subdomain <名前> <新subdomain>`** — 公開 URL の変更(**旧 URL は即失効** =
-  302 /noservice。GitHub repo 名は旧名のまま — `delete --with-repo` は現 subdomain 名で探すため
-  **見つからずエラーで止まる**(旧名の repo は `gh repo delete` で手動掃除)。
-  この service を注入している呼び出し側は**再デプロイ**で新しい `_URL`/`_HOST` が入る —
-  それまでは status の [未反映:要デプロイ] が出る。**改名の前に `tbm service callers <名前>` で
-  影響範囲を確認**し、改名後は `--redeploy-callers`(または `tbm service redeploy-callers <名前>`)で
-  呼び出し側をまとめて追従させられる)。
+  302 /noservice。GitHub repo 名は旧名のまま = `delete --with-repo` は現 subdomain の名前で探す
+  ので当たらない。**呼び出し側への影響と手順は §「注入元の subdomain を変えたとき」を見る**)。
   **`tbm service limits <名前> [--memory <MiB>] [--cpus <N>|none]`** — リソース上限の変更
   (次のデプロイから反映)。**`tbm service stateful <名前>`** — ステートフル化(false→true のみ。
   次のデプロイから stop-first)。
@@ -480,6 +482,9 @@ docker events 由来なので速い crash-loop でも取れる)とログ末尾�
 | `code: unauthorized` | 未ログイン | `tbm login` |
 | `code: conflict`(create) | 同名の**稼働中**リソースがある(ゴミ箱は名前を占有しない)/ `--subdomain` が使用中(こちらは**ゴミ箱内も占有** — `tbm trash list`) | 別名にするか、稼働中の方を rename / delete。subdomain 409 は別の subdomain を指定 |
 | `code: conflict`(trash restore) | 同名で作り直した稼働中と衝突 | 稼働中を rename / delete してから restore。同名堆積は `tbm trash list` の id で特定 |
+| `code: forbidden`(`tbm db url` / `db rotate`)| その部署は**公開 DB 入口を持たない**(CF Tunnel 等。`TSUBOMI_DB_PUBLIC_ENABLED=false`)| 外部接続文字列は使えない。データ確認は `tbm db query`(web SQL と同じ経路)、app からは注入された内部接続を使う |
+| `code: payload_too_large` | registry / 上流(CF)の単層上限(≈100MB)超過 | §「push が 413」— レイヤを分割するか、`--image` でサーバ側取得に切り替える |
+| `code: rate_limited` | 認証入口の限流(login / token 発行)| 待てば直る。**リトライを詰めない**(一般 API には掛かっていないので、これが出たのは認証系) |
 | `code: conflict`(`deploy --image` / `--dockerfile`) | その service に**進行中のデプロイ**がある(1 service = 同時 1 デプロイ)| `tbm service deploys <名前>` で完了を待つ。**いつまでも 409 のまま**なら、server がデプロイ中に落ちて宙吊りの行が残っている可能性 — 平台の再起動で自動的に閉じられるので owner に連絡 |
 | `code: conflict`(`redeploy-callers`) | 連帯再デプロイは**この platform で同時 1 バッチ**| 完了を待って再実行(`tbm service callers <名前>` で各行の直近デプロイ状態が見える)|
 | OOM で落ちる(exit=137) | メモリ上限不足 | `tbm service limits <名前> --memory <MiB>` → 再デプロイ |

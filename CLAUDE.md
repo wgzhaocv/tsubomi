@@ -350,7 +350,8 @@ catch-all → 302。**凍結しない** = 解放即再利用可は受容)、M6 �
 `_URL`/`_HOST` は起動時解決の旧値のまま = **caller 再デプロイまで断線**し得るのは背骨どおりで、
 `list_injections` の GREATEST に `subdomain_changed_at` を足し(cache rotate と同型)未反映バッジが
 零改修で点く(同値変更は時刻を動かさない = 偽未反映なし)。受容:GitHub repo 名は旧名のまま
-(`--with-repo` は現 subdomain 名で探すため見つからずエラー — `TSUBOMI_SERVICE_ID` 照合で誤削除はしない)・既存注入の
+(`--with-repo` は現 subdomain 名で探すため当たらない。**ただし repo 削除は best-effort** =
+service の削除は成功し `tbm` は 0 で終わる。`TSUBOMI_SERVICE_ID` 照合で誤削除はしない)・既存注入の
 env 名は不変(値だけ新しくなる)。実装級・受容表は **`doc/paas-service-subdomain-design.md`**。
 
 **subdomain 後の追加(マイルストーン外):改名の影響名単(2026-08-20、tbm 1.1.4。server は次版 — **まだ ship していない**)**。
