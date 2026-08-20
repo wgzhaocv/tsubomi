@@ -321,19 +321,23 @@ pub async fn run(
             let svc = api::service_set_subdomain(&c, &server_url, &token, &id, &new_subdomain).await?;
             // 連帯再デプロイは**改名が変化を伴ったときだけ**(同値なら注入値も変わらない)。
             // json モードでも実行する(`--redeploy-callers` は明示的な意思表示なので)。
-            // 同値の再実行では注入値も変わらないので連帯再デプロイは走らせない(サーバも
-            // `subdomain_changed_at` を動かさず realias もしない)。ただし **黙って無視しない** —
-            // ユーザは `--redeploy-callers` を明示している(旧サーバの静默無視をエラー化したのと
-            // 同じ約束。審査指摘)。
-            let plan = if redeploy_callers && changed {
+            // `--redeploy-callers` が明示されたら**同値でも必ず**端点を呼ぶ。
+            // 以前は CLI 側で `changed` を見て短絡していたが撤回した(codex 審査):
+            // 「改名は保存されたが route 反映が 503」→ 同じコマンドを再試行 という**部分失敗の
+            // 回復**で、事前 GET はもう新しい値を返すので `changed=false` になり、まさにその
+            // 再試行で relink が飛ばされて caller が断線したままになる。同値かどうかで判断する
+            // 規則の家はサーバ側(`set_subdomain` は同値でも収束段を再実行する)であって、
+            // CLI に 2 つ目の家を作るとこうなる。無駄な再デプロイは判定(純関数)が弾く。
+            let plan = if redeploy_callers {
                 Some(api::service_redeploy_callers(&c, &server_url, &token, &id).await?)
             } else {
                 None
             };
-            let unchanged_note = redeploy_callers && !changed;
             if json {
                 // **1 コマンド 1 JSON** の契約を守る:2 つの DTO を続けて出すと jq / JSON.parse が
                 // 単一値として読めない。多段の出力は `service status` と同じ包み方に揃える。
+                // flag 付きは**常に** envelope(`{service,relink}`)。状態次第で bare/envelope が
+                // 入れ替わると、同じコマンドの出力形が実行時に変わる(codex 審査)。
                 match &plan {
                     Some(p) => print_json(&json!({ "service": svc, "relink": p }))?,
                     None => print_json(&svc)?,
@@ -385,10 +389,6 @@ pub async fn run(
                 }
                 if let Some(p) = &plan {
                     print_relink_plan(p, &name);
-                } else if unchanged_note {
-                    println!(
-                        "※ サブドメインは変わっていないため、呼び出し側の再デプロイは不要です(注入値も同じままです)"
-                    );
                 }
             }
         }

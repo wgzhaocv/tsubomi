@@ -1317,6 +1317,14 @@ fn caller_relink_verdict(r: &inject::CallerRow, callee_serving: bool) -> Result<
     if r.desired_state != "running" {
         return Err("停止中のため対象外(自動では起こしません。起動すると新しい値が入ります)");
     }
+    // `run_digest` のロック後再確認門は `desired='running' AND phase='running'` を要求するので、
+    // phase が running でない caller は**計画しても必ず abort される**。ここで弾かないと
+    // 「対象」と言ったのに何も起きない(しかも abort は Ok を返すので完走 audit が "ok" になる)。
+    if r.phase != "running" {
+        return Err(
+            "直近のデプロイが失敗しているため対象外(先に手動でデプロイして復旧してください)",
+        );
+    }
     // 進行中の deploy にキューで積むと、こちらが解決した digest が陳腐化し得るし swap も重なる。
     // なお改名**前**に starting へ入っていた caller は旧値で env が凍結され得る = 未反映バッジが
     // 立つので、完了後の再実行で回収できる。
@@ -2403,6 +2411,7 @@ mod tests {
             display_name: "a".into(),
             env_vars: vec!["B_URL".into()],
             desired_state: desired.into(),
+            phase: if desired == "running" { "running".into() } else { "stopped".into() },
             last_deploy_status: None,
             last_deploy_error: None,
             stateful,

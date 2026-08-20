@@ -55,12 +55,20 @@ impl DeployTrigger {
     fn rechecks_state(self) -> bool {
         !matches!(self, Self::User)
     }
-    /// commit 前に readiness(container_port の listen)を探測するか。
-    /// **user 契機のみ**:reconcile の復活と caller 再リンクの対象は一度 succeeded した版で、
-    /// readiness は初回デプロイで検証済み。ここで failed にすると phase=failed で
-    /// converge_running の候補から永久に外れる(健全な app のサイレント停止 = v48 の穴)。
+    /// commit 前に readiness(container_port の listen)を探測するか。**Reconcile 以外**。
+    /// 復活(Reconcile)は「消えたコンテナを同じ版で建て直す」だけなので readiness は初回
+    /// デプロイで検証済み、かつ Pi 飽和時の「健全だが遅い」で failed にすると phase=failed で
+    /// converge_running の候補から永久に外れる(v48 の穴)。
+    ///
+    /// **caller 再リンクは探測する**(当初 Reconcile 側に寄せていたのを撤回 — codex 審査):
+    /// 再リンクは**注入 env が変わった**状態で起こし直すので「同じ image」は「今回の env でも
+    /// ready」を保証しない。探測を外すと ①遅起動の健全な app でも存活確認(~1s)だけで route を
+    /// 切り替えて旧を撤去し、残りの起動時間ぶん確実に 502 になる ②新しい接続先で listen できなく
+    /// なってもプロセスが生きていれば恒久的に不達のまま commit される。v48 の懸念は
+    /// `damages_phase_on_failure` が false であることで既に無効化済み(探測失敗でも phase を
+    /// 落とさず、start-first で旧コンテナが残る)= この契機では探測が安全になっている。
     fn probes_readiness(self) -> bool {
-        matches!(self, Self::User)
+        !matches!(self, Self::Reconcile)
     }
     /// 失敗時に `service_details.phase` を failed へ落とすか。
     /// caller 再リンクは**元々健全に走っている** service を相手にするので落とさない
@@ -280,15 +288,15 @@ pub async fn run_digest(
     // 削除済み → 起動しない(削除済み service に孤児コンテナ / route を作らない)。
     // desired / phase / 現役 digest を**1 往復**で読む(no-downgrade 門のために別途 SELECT すると、
     // 同じ行を 2 回読むうえに kind / deleted_at ガードを落とした弱いコピーになる — 審査指摘)。
-    let cur: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT s.desired_state, s.phase, s.image_digest FROM service_details s
+    let cur: Option<(String, String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT s.desired_state, s.phase, s.image_digest, s.stateful FROM service_details s
            JOIN resources r ON r.id = s.resource_id
           WHERE s.resource_id = $1 AND r.kind = 'service' AND r.deleted_at IS NULL",
     )
     .bind(service_id)
     .fetch_optional(&state.db)
     .await?;
-    let Some((desired, phase, current_digest)) = cur else {
+    let Some((desired, phase, current_digest, stateful_now)) = cur else {
         tracing::warn!(%service_id, %deploy_id, "deploy 対象が削除済み — スキップ(孤児防止)");
         abort_deploy(state, deploy_id, "service は削除済みです").await;
         return Ok(());
@@ -305,6 +313,20 @@ pub async fn run_digest(
     // caller 再リンクは「今 serving している版をそのまま起こし直す」だけなので、渡された digest が
     // 現役でなくなっていたら**何もしない**。ロック待ちの間に caller 自身が新版をデプロイし終えた
     // ケースで、旧版へ静默ロールバックさせないため(設計時審査 P0-4)。
+    // stateful は連帯再デプロイの自動対象外(stop-first = 実停機を伴うので時機はユーザが選ぶ)。
+    // 判定はプレビュー時に済んでいるが、その後 `set_stateful`(false→true の一方向)が割り込める
+    // ので**ロックを持っているここで読み直す** — さもないと「stateful は自動対象外」の約束が
+    // TOCTOU で破れ、無承認で旧コンテナを停止する(codex 審査)。
+    if trigger == DeployTrigger::CallerRelink && stateful_now {
+        tracing::info!(%service_id, %deploy_id, "caller 再リンク: この間に stateful 化された — スキップ");
+        abort_deploy(
+            state,
+            deploy_id,
+            "この間に stateful へ変更されたためスキップしました(停止を伴うので手動で再デプロイしてください)",
+        )
+        .await;
+        return Ok(());
+    }
     if trigger.requires_current_digest() && current_digest.as_deref() != Some(image_digest) {
         tracing::info!(%service_id, %deploy_id, "caller 再リンク: この間に新しいデプロイが完了 — スキップ");
         abort_deploy(
@@ -343,23 +365,32 @@ pub async fn run_digest(
             // (審査指摘)。**`phase='deploying'` 条件付き**にするのは、この間に割り込んだ
             // stop / 新デプロイの状態を踏み潰さないため(source.rs::fail_acquire と同じ作法)。
             //
-            // **`phase='deploying'` だけでは足りない**:`deploy_source` は取得(分単位)の開始時に
-            // **deploy_lock の外で** phase='deploying' を立てる(source.rs の「最初に立てる」)。
-            // つまりこの UPDATE は、我々のロック保持中に始まった別経路の marker を消し得る =
-            // 自分が書いていない値を書き戻す所有権違反(codex 審査)。**自分以外の非 terminal な
-            // deploy 行が無いこと**を条件に足して、戻すのは自分の書き込みだけにする。
-            let _ = sqlx::query(
+            // **ここに「自分以外の非 terminal な deploy 行が無い」条件を足してはいけない**
+            // (一度足して撤回した — codex 審査)。`redeploy` は行を作ってからロックを待つので、
+            // 待機中の Reconcile / hook の行が「所有者らしく」見え、**その場合に復元を諦めて
+            // phase が 'deploying' で永久固着**する(= converge_running の候補から静かに外れ、
+            // 手動デプロイまで直らない)。2 つの害を比べる:
+            //   (a) 条件なし = `deploy_source` がロック外で立てた marker を消し得る。あちらは
+            //       取得完了時に `run_digest` で立て直し、途中で落ちても起動時の
+            //       `close_orphan_deploys` が行を閉じ、`fail_acquire` は phase を条件付きで
+            //       しか触らない ⇒ 実害はほぼ無い。
+            //   (b) 条件あり = 上記の永久固着。**静かで、自愈網からの除名**。
+            // (a) < (b) なので条件なしを採る。**原理的な解は「phase の所有者(deploy id)を列で
+            // 持つ」**(全 phase 書き込み点が owner を同時に書き、復元は owner 一致のみ)—
+            // migration を伴うので別スライス(NEXT.md)。
+            let restored = sqlx::query(
                 "UPDATE service_details SET phase=$2, phase_detail=NULL
-                  WHERE resource_id=$1 AND phase='deploying'
-                    AND NOT EXISTS (SELECT 1 FROM deploys d
-                                     WHERE d.service_id = $1 AND d.id <> $3
-                                       AND d.status NOT IN ('succeeded','failed'))",
+                  WHERE resource_id=$1 AND phase='deploying'",
             )
             .bind(service_id)
             .bind(&phase)
-            .bind(deploy_id)
             .execute(&state.db)
             .await;
+            // 握り潰さない:ここが失敗すると phase='deploying' で固着する(= 自愈網から除名)。
+            if let Err(e) = restored {
+                tracing::error!(error = ?e, %service_id, %deploy_id,
+                    "caller 再リンク失敗後の phase 復元に失敗 — 'deploying' 固着の恐れ");
+            }
             Ok(())
         } else {
             mark_failed(state, deploy_id, service_id, &e.to_string()).await

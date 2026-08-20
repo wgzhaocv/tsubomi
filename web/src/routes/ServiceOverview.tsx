@@ -81,23 +81,42 @@ export default function ServiceOverview() {
   // ここでは id 変化時の強制クローズは不要(遷移でコンポーネントごと作り直される)。
   const [subOpen, setSubOpen] = useState(false);
   const [subValue, setSubValue] = useState("");
-  const submitSubdomain = () => {
+  // 2 つの write を **1 つの async 関数の中で await** する(per-call onSuccess ではなく):
+  // observer が消えると per-call コールバックは呼ばれないので、応答前に画面を離れると
+  // 「改名だけ成功して relink が送られない」= 半完成が黙って起きる(codex 審査)。
+  // `mutateAsync` の Promise は observer に紐づかないので unmount しても完走する。
+  const submitSubdomain = async () => {
     const trimmed = subValue.trim();
     // 二重送信を防ぐ + **影響範囲の取得中は待つ**(名単を出せないまま改名させない)。
-    // 取得**失敗**は塞がない — 補助的な読みの不調で主操作を止めるのは行き過ぎなので、
-    // 代わりに modal で「確認できなかった」と明示する(下の警告文)。
-    if (!trimmed || setSub.isPending || callersFetching || relink.isPending) return;
-    setSub.mutate(trimmed, {
-      onSuccess: () => {
-        // 改名は成功した。連帯再デプロイは**別リクエスト**なので、ここで失敗しても改名の
-        // 成否と混ざらない — modal は閉じず専用の文案 + 再試行ボタンを出す(半完成の可視化)。
-        if (!autoRelink || relinkTargets === 0) {
-          setSubOpen(false);
-          return;
-        }
-        relink.mutate(undefined, { onSuccess: () => setSubOpen(false) });
-      },
-    });
+    // **同値ガードはここに置く** — footer のボタンの disabled は form submit の防壁にならず、
+    // 入力欄で Enter を押すと hidden submit 経由でここへ来る(codex 審査)。
+    if (
+      !trimmed ||
+      trimmed === svc?.subdomain ||
+      setSub.isPending ||
+      callersFetching ||
+      relink.isPending
+    ) {
+      return;
+    }
+    try {
+      await setSub.mutateAsync(trimmed);
+    } catch {
+      return; // 改名自体が失敗 — setSub.error が modal に出る
+    }
+    // **件数で発火を決めない**:名単の取得が失敗している / 古い場合に `relinkTargets` は 0 に
+    // なるが、実際には呼び出し側が居るかもしれない。対象の判定はサーバの純関数が真源なので、
+    // 勾選されていれば無条件に投げて server に決めさせる(0 件なら 202 で何もしない)。
+    if (!autoRelink) {
+      setSubOpen(false);
+      return;
+    }
+    try {
+      await relink.mutateAsync();
+      setSubOpen(false);
+    } catch {
+      // 半完成:改名は成功・fan-out の起動は失敗。modal を閉じず専用文案 + 再試行を出す。
+    }
   };
   const { copied, copy } = useCopied();
   // url を局所定数に取り出して narrow する(onClick クロージャ内でも string 確定にする)。
@@ -387,7 +406,7 @@ export default function ServiceOverview() {
               type="primary"
               loading={setSub.isPending || callersFetching}
               disabled={!subValue.trim() || subValue.trim() === svc?.subdomain || callersFetching}
-              onClick={submitSubdomain}
+              onClick={() => void submitSubdomain()}
             >
               変更
             </Button>
@@ -397,7 +416,7 @@ export default function ServiceOverview() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            submitSubdomain();
+            void submitSubdomain();
           }}
           className="flex w-full flex-col gap-3"
         >
@@ -448,14 +467,20 @@ export default function ServiceOverview() {
             </div>
           ) : null}
           {/* 対象が 1 件も無いなら checkbox ごと出さない(押せない選択肢は雑音)。 */}
-          {relinkTargets > 0 && (
+          {/* 名単が**取れているのに 0 件**なら出さない(押せない選択肢は雑音)。名単が
+              **取れていない**(未知)ときは出す — 実行側は件数で発火を決めないので、
+              ここで隠すと「選択肢を見せずに動く」ことになる。件数は分かるときだけ言う。 */}
+          {(callers === undefined || relinkTargets > 0) && (
             <Checkbox
               aria-label="変更後に呼び出し側を自動で再デプロイする"
               value={autoRelink ? ["relink"] : []}
               disabled={setSub.isPending || relink.isPending}
               options={[
                 {
-                  label: `変更後、対象の呼び出し側 ${relinkTargets} 件を自動で再デプロイする`,
+                  label:
+                    callers === undefined
+                      ? "変更後、対象の呼び出し側を自動で再デプロイする"
+                      : `変更後、対象の呼び出し側 ${relinkTargets} 件を自動で再デプロイする`,
                   value: "relink",
                 },
               ]}

@@ -170,6 +170,10 @@ pub(crate) struct CallerRow {
     /// この callee を指している env 名(昇順)。
     pub env_vars: Vec<String>,
     pub desired_state: String,
+    /// 観測された段階。`desired='running'` でも `phase='failed'`(直近の user デプロイが失敗し、
+    /// 旧コンテナは生きている状態)だと `run_digest` のロック後再確認門が必ず abort するので、
+    /// プレビューでも対象外にしないと「対象と言ったのに必ず失敗する」= 嘘になる。
+    pub phase: String,
     pub last_deploy_status: Option<String>,
     pub last_deploy_error: Option<String>,
     pub stateful: bool,
@@ -206,7 +210,7 @@ pub(crate) async fn service_caller_rows(
                 ARRAY(SELECT i.env_var FROM injections i
                        WHERE i.service_id = caller.id AND i.resource_id = $1
                        ORDER BY i.env_var) AS env_vars,
-                cs.desired_state, cs.stateful,
+                cs.desired_state, cs.phase, cs.stateful,
                 ld.status AS last_deploy_status, ld.error AS last_deploy_error,
                 EXISTS(SELECT 1 FROM deploys d
                         WHERE d.service_id = caller.id AND d.status = 'succeeded') AS deployed,
