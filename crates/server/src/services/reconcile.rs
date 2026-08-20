@@ -63,6 +63,7 @@ pub fn spawn(state: AppState) {
 ///   - それ以外(desired='stopped' = ユーザの stop / 初回未起動、または成功版なし)→ 全コンテナと
 ///     route を掃除し phase を stopped / failed に落とす(**止めたい意図を絶対に覆さない**)。
 async fn recover_interrupted(state: &AppState) {
+    close_orphan_deploys(state).await;
     let stuck: Vec<(Uuid,)> = match sqlx::query_as(
         "SELECT s.resource_id FROM service_details s
            JOIN resources r ON r.id = s.resource_id
@@ -219,6 +220,39 @@ async fn reconcile_pass(state: &AppState) {
     // 増減)毎 tick 追従する。network 収束の**後**に呼ぶ — 同桥 RETURN 例外に最新の subnet を反映。
     egress::reconcile(state).await;
 }
+
+/// 起動時に一度だけ、非 terminal な `deploys` 行を全部 failed で閉じる。起動直後は
+/// 「進行中の deploy」を所有していた task がプロセスごと消えているので、残っている
+/// `received` / `pulling` / `starting` は定義上すべて孤児。
+///
+/// これが無いと `redeploy` の「行を INSERT → deploy_lock を待つ」窓でプロセスが落ちた行が
+/// **永久に残る**:その時点の `phase` はまだ `'deploying'` ではない(phase を書くのはロック取得後)
+/// ので、下の `recover_interrupted` の候補集(`phase='deploying'`)に入らず、
+/// `gc::sweep_old_deploys` は terminal 行しか消さない。結果:
+///   - `deploy_source` の入場門(`status IN ('received','pulling','starting')` の EXISTS)が
+///     **その service に対して永久 409** = `tbm deploy --image/--dockerfile` が使えなくなる。
+///   - registry GC がその digest を永久 in-flight 扱いして回収しない。
+///
+/// `phase` は触らない(`abort_deploy` と同じ流儀 — 走っている現実を尊重する。走るべきコンテナの
+/// 収束は下の loop と `converge_running` の職務)。
+async fn close_orphan_deploys(state: &AppState) {
+    match sqlx::query(
+        "UPDATE deploys SET status='failed',
+                error='server の再起動で中断されました(進行中の記録を閉じました)', finished_at=now()
+          WHERE status NOT IN ('succeeded','failed')",
+    )
+    .execute(&state.db)
+    .await
+    {
+        Ok(r) if r.rows_affected() > 0 => tracing::info!(
+            count = r.rows_affected(),
+            "reconcile: 孤児の進行中 deploy 行を閉じました"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = ?e, "reconcile: 孤児 deploy 行の掃除に失敗"),
+    }
+}
+
 
 /// running 収束:`phase=running`(= DB が走っていると信じる)かつ未削除・digest 持ちの service を
 /// **1 service あたり 1 回の docker 問い合わせ**(`docker::presence`)で点検し、(a) コンテナが消えて
