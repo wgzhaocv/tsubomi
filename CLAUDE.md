@@ -353,6 +353,41 @@ catch-all → 302。**凍結しない** = 解放即再利用可は受容)、M6 �
 (`--with-repo` は現 subdomain 名で探すため見つからずエラー — `TSUBOMI_SERVICE_ID` 照合で誤削除はしない)・既存注入の
 env 名は不変(値だけ新しくなる)。実装級・受容表は **`doc/paas-service-subdomain-design.md`**。
 
+**subdomain 後の追加(マイルストーン外):改名の影響名単(2026-08-20、server v61 / tbm 1.1.3)**。
+改名の案内が「caller が 1 件も無くても無条件に脅し文を出し、居るときも誰なのか言わない」形だった
+のを、実際の呼び出し側を出すようにした(読み取りのみ・migration なし)。`GET /services/{id}/callers`。
+**逆引きの述語の家は `inject.rs`**(`injections` の正向解決の対偶)で、`network::service_callers`
+(網操作。id だけ要る)はその薄い投影 — 別々の SQL にすると「名単に出た集合」と
+「`realias_as_callee` が実際に触る集合」がドリフトし**プレビューが嘘になる**。SQL は
+`GROUP BY` を使わず `resources` 主表 + `EXISTS` + `ARRAY(SELECT …)` にした:「1 行 1 caller」が
+構造的に自明になる(行が増えると網操作が 2 回走り、連帯再デプロイは同じ service を 2 度デプロイ)+
+`array_agg` の NULL(= `Vec<String>` の decode panic 経路)が原理的に消える。**caller の所有者では
+絞らない** — 絞ると跨 owner の注入が生まれた日に**この端点だけが realias より少なく見せる** =
+影響範囲が嘘になるので、担保は注入作成時に置く(`is_linked_callee` が同じ述語の 3 つめの写しで、
+readiness 門禁を重くしないため軽い EXISTS のまま = 定義を変えるときは両方直す)。入口:web 概要の
+常設「呼び出し側」セクション(0 件ならセクションごと出さない)+ 変更 modal の案内を
+「無条件の 2 文」と「caller が居るときだけの名単」に分割 + `tbm service callers`(**改名する前に**
+影響範囲を引ける = AI 向け)。バッジの色語彙は `phase-badge.tsx` の `Badge`(tone)に集約
+(直書きの琥珀が「未反映(要デプロイ)」と同色で、停止中の caller が未反映に見えていた)。
+**併せて修正**:`DatabaseOverview` の rotate 文案「注入済みのサービスは再デプロイするまで古い
+文字列のまま」は**嘘**(db rotate は human role だけを回し、注入されるのは app role。だから
+`list_injections` の GREATEST に `database_details.rotated_at` を入れていない)。出所が設計 doc
+だったので `paas-tech-design.md` / `paas-m5-design.md` の根も直した — 直さないと次に rotate 文案を
+書く人が再生産する。品質検証 = 設計時に Plan agent 対抗審査で P0 4 件(うち 2 件は既存バグ。
+いずれも状態を変える次スライス側の穴)+ 実装後に 4 simplify agents(最大の指摘 =「判定一族に
+このスライスの消費者が居ない」→ 次スライスへ移送)+ codex ultra で**真バグ 4 件**を出荷前回収。
+**その 4 件の教訓が一般形として効く**:①**無条件の警告を条件付きにすると、条件が「未知」の
+ときに旧実装より警告が減る** — `callers === undefined`(取得前 / 500 / 再取得中)を 0 件扱いに
+すると実リンクがあるのに警告なしで改名が通る(取得中は待たせ、失敗は「確認できませんでした」と
+言い、modal を開いた瞬間に refetch)②**注入の作成 / 削除は注入元(callee)の逆引き名単も変える**
+ので `serviceKeys.all` を落とす(狭いキーだけでは callee 側が古い `[]` を staleTime 分使う)
+③**「注入関係」を「今切れているリンク」と断定しない** — 停止中 / 未デプロイの caller には凍結
+env も生きたリンクも無く、そこで再デプロイを促すと `commit_success` が `desired_state='running'`
+を書いて**ユーザが止めた service を起こす**(断定は稼働中の相手だけ。同値の再実行では
+`resolve_service_row` で改名前の値を持って何も言わない)④`env_vars` は `injections.env_var` の
+**保存名だけ**で派生 `_HOST`/`_PORT` は含まない(文言は「注入名」)。実装級は
+**`doc/paas-service-subdomain-design.md` §6**。
+
 **AI フィードバック第 4 弾(2026-07-26、server v53 / tbm 1.0.32):`sslmode` の駆動系差を仕組みで消す**。
 発端は「注入された `DATABASE_URL` が Go では繋がるのに Node で落ちる」。**`sslmode=require` の意味が
 駆動系で割れている**(libpq = 暗号化するが証書を検証しない / node-postgres = **厳格に検証**)ため、

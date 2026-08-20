@@ -672,6 +672,32 @@ pub struct InjectionDto {
     pub needs_redeploy: bool,
 }
 
+/// `GET /api/services/:id/callers` の各要素:**この service を注入している別の service**
+/// (M6 内部リンクの caller)。用途は **subdomain 変更の影響範囲**:改名するとこの caller の
+/// コンテナ内に凍結された `_URL`/`_HOST` が旧 subdomain のまま残り、内部リンクが切れる。
+///
+/// 直近 deploy の状態を併載するのは**改名前の事前確認**のため — 「この呼び出し側はそもそも
+/// 既に壊れている」を、リンクを切る前に知りたい。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceCallerDto {
+    pub id: Uuid,
+    pub display_name: String,
+    /// この service を指している注入の **env 名(バインディング名)**。
+    /// `injections.env_var` に保存されている名前そのもので、そこから派生する `_HOST` / `_PORT`
+    /// は**含まない**(派生名の単一真源は `inject::derived_env_keys`。ここで展開すると静的 env に
+    /// 譲った分の考慮も要るので、一覧は保存名だけに留める)。
+    /// 同一 caller が複数の名前で注入していても **1 要素 1 caller**(行は集約済み)。
+    pub env_vars: Vec<String>,
+    /// 期望状態(running / stopped)。停止中の呼び出し側は再デプロイの相手が居ない。
+    pub desired_state: String,
+    /// 直近 deploy の状態(`succeeded` / `failed` / 進行中の段階)。未デプロイなら None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deploy_status: Option<String>,
+    /// 直近 deploy のエラー(失敗時のみ値が入る列なので、そのまま載せる)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deploy_error: Option<String>,
+}
+
 /// `POST /api/services/:id/injections` のリクエスト。env_var / mount_path 省略時は kind 既定。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateInjectionReq {

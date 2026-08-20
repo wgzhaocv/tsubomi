@@ -404,9 +404,16 @@ function ConnectionStringSection() {
           </>
         }
       >
+        {/* rotate が回すのは **human role のみ**(サーバ側 databases::rotate は
+            role_kind='human' だけを UPDATE する)。サービスに注入されるのは app role なので
+            注入済みのサービスは影響を受けない — かつて「再デプロイするまで古いまま」と書いて
+            いたが事実に反していた(サーバの list_injections が database の rotated_at を
+            未反映判定に入れていないのと同じ理由)。cache の rotate は注入値そのものが変わる
+            ので、あちらの同じ文言は正しい。 */}
         <p>
-          新しいパスワードを発行し、<strong>古い接続文字列は即座に失効</strong>
-          します。注入済みのサービスは再デプロイするまで古い文字列のままです。続けますか?
+          この画面とツールで使う接続文字列(human)の新しいパスワードを発行し、
+          <strong>古い接続文字列は即座に失効</strong>
+          します。サービスに注入されている接続文字列は別の資格情報なので影響を受けません。続けますか?
         </p>
       </Modal>
     </>

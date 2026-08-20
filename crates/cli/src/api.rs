@@ -8,8 +8,8 @@ use tsubomi_shared::{
     DeployConfig, DeployDto, ExecReq, ExecResult, ForkDatabaseReq, Health, InjectionDto,
     ListDirResp, LogsResp, Me,
     MoveReq, QueryReq, QueryResp, RenameCacheReq, RenameDatabaseReq, RenameServiceReq,
-    RenameVolumeReq, RollbackReq, ServiceDto, SetEnvReq, SetEnvResp, SetServiceLimitsReq,
-    SetServiceVisibilityReq, TrashItemDto, VolumeDto,
+    RenameVolumeReq, RollbackReq, ServiceCallerDto, ServiceDto, SetEnvReq, SetEnvResp,
+    SetServiceLimitsReq, SetServiceVisibilityReq, TrashItemDto, VolumeDto,
 };
 
 pub const ME_PATH: &str = "/api/auth/me";
@@ -1024,6 +1024,23 @@ pub async fn service_set_subdomain(
     resp.json()
         .await
         .context("failed to parse subdomain response")
+}
+
+/// この service を注入している別 service の一覧(GET /services/{id}/callers)。
+/// 改名の影響範囲(改名の瞬間に caller の `_URL`/`_HOST` が旧値で残り内部リンクが切れる)を
+/// **改名する前に**引くのが主用途。
+pub async fn service_callers(
+    c: &reqwest::Client,
+    server_url: &str,
+    token: &str,
+    id: &str,
+) -> Result<Vec<ServiceCallerDto>> {
+    let resp = send_ok(
+        c.get(format!("{server_url}/api/services/{id}/callers"))
+            .bearer_auth(token),
+    )
+    .await?;
+    resp.json().await.context("failed to parse callers response")
 }
 
 // ============ M3 注入 / 静的 env ============

@@ -224,6 +224,7 @@ pub fn routes() -> Router<AppState> {
         .route("/services/{id}/deploys", get(deploys))
         .route("/services/{id}/deploy-config", get(deploy_config))
         .route("/services/{id}/deploy-source", post(source::deploy_source))
+        .route("/services/{id}/callers", get(list_callers))
         .route(
             "/services/{id}/injections",
             get(list_injections).post(create_injection),
@@ -1277,6 +1278,32 @@ fn injection_row_to_dto(r: InjectionRow, serving_since: Option<DateTime<Utc>>) -
         // 居ないので false。既存行の created_at は epoch(20260726000002)なので誤報しない。
         needs_redeploy: serving_since.is_some_and(|since| r.7 > since),
     }
+}
+
+/// `GET /api/services/:id/callers`:**この service を注入している別の service** の一覧。
+/// 改名(`set_subdomain`)の影響範囲を出す入口 — 改名した瞬間、caller のコンテナ内に凍結された
+/// `_URL`/`_HOST` は旧 subdomain のままなので内部リンクが切れる。逆引きの述語は
+/// `inject::service_caller_rows` = 網操作(realias)と同一なので、「名単に出た集合」と
+/// 「実際に触られる集合」がドリフトしない。
+pub async fn list_callers(
+    auth: AuthCtx,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<tsubomi_shared::ServiceCallerDto>>> {
+    ensure_owned(&state, auth.user_id, id).await?;
+    let rows = inject::service_caller_rows(&state, id).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| tsubomi_shared::ServiceCallerDto {
+                id: r.id,
+                display_name: r.display_name,
+                env_vars: r.env_vars,
+                desired_state: r.desired_state,
+                last_deploy_status: r.last_deploy_status,
+                last_deploy_error: r.last_deploy_error,
+            })
+            .collect(),
+    ))
 }
 
 /// `GET /api/services/:id/injections`:注入一覧(失効 = valid:false も含む)。

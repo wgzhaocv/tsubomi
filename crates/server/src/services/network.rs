@@ -301,22 +301,15 @@ async fn fresh_subdomain(state: &AppState, callee_id: Uuid) -> Option<String> {
 }
 
 /// この callee を注入している**生存 caller** の id 一覧(attach_as_callee / realias_as_callee 共用)。
-/// DISTINCT — 同一 caller が同じ callee を複数の env 名で注入していても網操作は 1 回でよい。
-/// soft-delete 済み caller を除くのは、網撤去に失敗して残った孤児網へ客人を入れ直さないため(codex 監査)。
+/// 述語の家は `inject::service_caller_rows`(injections 関係の正向解決と同居)。ここはその薄い
+/// 投影 — 網操作は id しか要らないが、述語を二重に持つと `GET /services/:id/callers` の名単と
+/// 「realias が実際に触る集合」がドリフトする。
 async fn service_callers(state: &AppState, callee_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows: Vec<(Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT i.service_id
-           FROM injections i
-           JOIN resources caller ON caller.id = i.service_id
-           JOIN resources src    ON src.id = i.resource_id
-          WHERE i.resource_id = $1
-            AND src.kind = 'service'
-            AND caller.deleted_at IS NULL",
-    )
-    .bind(callee_id)
-    .fetch_all(&state.db)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
+    Ok(super::inject::service_caller_rows(state, callee_id)
+        .await?
+        .into_iter()
+        .map(|r| r.id)
+        .collect())
 }
 
 /// disconnect → 別名付き connect → 閉環確認、の 3 手をまとめる(付け替えの唯一のレシピ)。

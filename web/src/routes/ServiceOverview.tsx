@@ -10,8 +10,9 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { useNavigate, useParams } from "react-router";
+import { Link, useNavigate, useParams } from "react-router";
 
+import { Badge } from "@/components/phase-badge";
 import { Button } from "@/components/ui/button";
 import { Divider } from "@/components/ui/divider";
 import { Input } from "@/components/ui/input";
@@ -20,14 +21,17 @@ import { Radio } from "@/components/ui/radio";
 import { MetricRow } from "@/components/usage-metric";
 import { formatBytesPair, formatRelative } from "@/lib/format";
 import {
+  deployStatusLabel,
   desiredLabel,
   phaseLabel,
+  type ServiceCaller,
   type ServiceMetrics,
   serviceVisibility,
   type SetLimitsInput,
   shortDigest,
   useDeleteService,
   useService,
+  useServiceCallers,
   useServiceMetrics,
   useSetServiceLimits,
   useSetServiceVisibility,
@@ -50,6 +54,18 @@ export default function ServiceOverview() {
   const del = useDeleteService(id);
   const setVis = useSetServiceVisibility(id);
   const setSub = useSetSubdomain(id);
+  // 「誰が私を注入しているか」= 改名の影響範囲。常設セクションと変更 modal が同じ配列を読む。
+  // **未知(取得前 / 失敗)を 0 件と同一視しない** — 改名 modal は影響範囲を言えないまま
+  // 通してはいけないので、状態も持つ(codex 審査)。
+  const {
+    data: callers,
+    isFetching: callersFetching,
+    error: callersError,
+    refetch: refetchCallers,
+  } = useServiceCallers(id);
+  // 稼働中の呼び出し側だけが「今の値が凍結されている」= 改名で内部リンクが切れる相手。
+  // 停止中 / 未デプロイは凍結 env も生きたリンクも無いので、次の起動で新しい値が入るだけ。
+  const runningCallers = callers?.filter((c) => c.desired_state === "running").length ?? 0;
 
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
@@ -59,7 +75,10 @@ export default function ServiceOverview() {
   const [subValue, setSubValue] = useState("");
   const submitSubdomain = () => {
     const trimmed = subValue.trim();
-    if (!trimmed || setSub.isPending) return; // 二重送信を防ぐ
+    // 二重送信を防ぐ + **影響範囲の取得中は待つ**(名単を出せないまま改名させない)。
+    // 取得**失敗**は塞がない — 補助的な読みの不調で主操作を止めるのは行き過ぎなので、
+    // 代わりに modal で「確認できなかった」と明示する(下の警告文)。
+    if (!trimmed || setSub.isPending || callersFetching) return;
     setSub.mutate(trimmed, { onSuccess: () => setSubOpen(false) });
   };
   const { copied, copy } = useCopied();
@@ -155,6 +174,9 @@ export default function ServiceOverview() {
                 onClick={() => {
                   setSubValue(svc?.subdomain ?? "");
                   setSub.reset();
+                  // 影響範囲は**開いた瞬間に取り直す**:別タブ / CLI で注入された分を
+                  // 取りこぼした古い名単のまま改名させない(codex 審査)。
+                  void refetchCallers();
                   setSubOpen(true);
                 }}
               />
@@ -239,6 +261,28 @@ export default function ServiceOverview() {
         )}
       </section>
 
+      {/* ===== 呼び出し側(このサービスを注入している別のサービス)=====
+          0 件なら**セクションごと出さない** — 大半のサービスには呼び出し側が居ないので、
+          常設の空セクションは雑音になる。 */}
+      {callers && callers.length > 0 && (
+        <>
+          <Divider type="line-brown" />
+          <section className="flex flex-col gap-3">
+            <h2 className="text-lg font-bold text-foreground">呼び出し側</h2>
+            <p className="text-sm font-medium text-muted-foreground">
+              このサービスを注入している(内部リンクで呼んでいる)サービスです。サブドメインを変えると、
+              これらのコンテナ内に凍結された接続先は旧サブドメインのままになるため、再デプロイするまで
+              内部リンクが切れます。
+            </p>
+            <ul className="flex flex-col gap-2">
+              {callers.map((c) => (
+                <CallerItem key={c.id} caller={c} />
+              ))}
+            </ul>
+          </section>
+        </>
+      )}
+
       <Divider type="line-brown" />
 
       {/* ===== 危険ゾーン ===== */}
@@ -320,8 +364,8 @@ export default function ServiceOverview() {
             </Button>
             <Button
               type="primary"
-              loading={setSub.isPending}
-              disabled={!subValue.trim() || subValue.trim() === svc?.subdomain}
+              loading={setSub.isPending || callersFetching}
+              disabled={!subValue.trim() || subValue.trim() === svc?.subdomain || callersFetching}
               onClick={submitSubdomain}
             >
               変更
@@ -344,15 +388,86 @@ export default function ServiceOverview() {
             description="小文字英数と「-」・英字始まり・「-」終わり不可・50 字以内(予約語と tsubomi- 始まりは不可)。公開 URL が新しいサブドメインに変わります。"
           />
           <p className="text-sm font-medium text-muted-foreground">
-            旧 URL は即座に無効になります。GitHub
-            リポジトリ名は変わりません。このサービスを注入している他のサービスは再デプロイで新しい値が入ります(それまで環境変数タブに「未反映」が出ます)。
+            旧 URL は即座に無効になります。GitHub リポジトリ名は変わりません。
           </p>
+          {/* 影響範囲は**実際に注入している呼び出し側が居るときだけ**言う。0 件で出すと
+              大半のサービスで無関係な脅し文になる(この modal の主目的)。ただし
+              **「未知」を「0 件」と同一視しない** — 取得できていないときは黙るのではなく
+              確認できなかったと言う(黙ると警告なしで改名が通る = 旧実装より悪い)。 */}
+          {callersError ? (
+            <p className="text-sm font-semibold text-[#b5862a]">
+              呼び出し側(このサービスを注入しているサービス)を確認できませんでした:
+              {callersError.message}
+              <br />
+              注入している呼び出し側がある場合、改名後に再デプロイするまで旧サブドメインを参照し続けます。
+            </p>
+          ) : callersFetching && !callers ? (
+            <p className="text-sm font-medium text-muted-foreground">
+              呼び出し側への影響を確認しています…
+            </p>
+          ) : callers && callers.length > 0 ? (
+            <div className="flex flex-col gap-2 bg-card px-3 py-2">
+              <p className="text-sm font-bold text-foreground">
+                このサービスを注入している呼び出し側 {callers.length} 件
+              </p>
+              <ul className="flex flex-col gap-2">
+                {callers.map((c) => (
+                  <CallerItem key={c.id} caller={c} />
+                ))}
+              </ul>
+              {/* 断定を稼働中の相手だけに絞る:停止中 / 未デプロイの呼び出し側には凍結された
+                  接続先も生きたリンクも無いので「切れる」は嘘になる(codex 審査)。 */}
+              <p className="text-xs font-medium text-muted-foreground">
+                {runningCallers > 0
+                  ? `稼働中の ${runningCallers} 件は、再デプロイするまで旧サブドメインを参照し続けます(内部リンクが切れます)。停止中の呼び出し側は次に起動したときに新しい値が入ります。`
+                  : "いずれも稼働していないので、次に起動したときに新しい値が入ります。"}
+              </p>
+            </div>
+          ) : null}
           {setSub.error && (
             <p className="text-sm font-semibold text-[#e05a5a]">{setSub.error.message}</p>
           )}
         </form>
       </Modal>
     </div>
+  );
+}
+
+// 呼び出し側 1 件(常設セクションと subdomain 変更 modal が共有)。env 名は集約済み =
+// 1 行 1 サービス。裸の値を置かず「環境変数 …」と名詞を付ける。
+// 状態の文言は lib の単一真源(desiredLabel / deployStatusLabel)を引く — ここで直書きすると
+// 同じ wire 値がページ内で 2 通りの日本語になる。
+function CallerItem({ caller }: { caller: ServiceCaller }) {
+  return (
+    <li className="flex flex-col gap-0.5">
+      <div className="flex flex-wrap items-baseline gap-x-2">
+        {/* このセクションの用途は「ここへ行って再デプロイする」なので名前はリンクにする
+            (ServiceEnv の注入元リンクと同じ作法)。 */}
+        <Link
+          to={`/services/${caller.id}`}
+          className="text-sm font-bold text-[#11a89b] underline-offset-2 outline-none hover:underline focus-visible:[outline:2px_solid_#19c8b9] focus-visible:outline-offset-2"
+        >
+          {caller.display_name}
+        </Link>
+        <span className="text-xs font-medium text-muted-foreground">
+          注入名 {caller.env_vars.join(", ")}
+        </span>
+        {/* リンクを切る前に知りたい情報 — 停止中 / 既に直近のデプロイが失敗している呼び出し側。 */}
+        {caller.desired_state === "stopped" && (
+          <Badge tone="muted" size="sm">
+            {desiredLabel(caller.desired_state)}
+          </Badge>
+        )}
+        {caller.last_deploy_status === "failed" && (
+          <Badge tone="danger" size="sm">
+            直近デプロイ{deployStatusLabel(caller.last_deploy_status)}
+          </Badge>
+        )}
+      </div>
+      {caller.last_deploy_error && (
+        <span className="text-xs font-semibold text-[#e05a5a]">{caller.last_deploy_error}</span>
+      )}
+    </li>
   );
 }
 

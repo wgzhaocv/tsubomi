@@ -40,7 +40,7 @@ export default function ServiceEnv() {
   const { data: vols } = useVolumes();
   const { data: svcs } = useServices();
   const create = useCreateInjection(id);
-  const eject = useEjectInjection(id);
+  const eject = useEjectInjection();
   const setEnv = useSetEnv(id);
   const unset = useUnsetEnv(id);
 

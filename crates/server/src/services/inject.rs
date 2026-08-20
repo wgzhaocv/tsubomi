@@ -153,6 +153,70 @@ pub async fn resolve(
 
 /// REDIS_URL の env 名から REDIS_KEY_PREFIX の env 名を導く:末尾 `_URL` を `_KEY_PREFIX` に
 /// 置換、無ければ `_KEY_PREFIX` を付加(REDIS_URL→REDIS_KEY_PREFIX / CACHE_URL→CACHE_KEY_PREFIX。§5)。
+/// この service(callee)を注入している**生存 caller** の 1 行。
+///
+/// 逆引きは `injections` 関係を caller 側から辿るだけなので、正向の解決(`resolve`)と同じ
+/// この module が持つ。網操作(`network::service_callers` = id だけ要る)と
+/// `GET /services/:id/callers`(表示に要る)が**同じ述語**を共有するための形 — 別々の SQL に
+/// すると「名単に出た集合」と「realias が実際に触る集合」がドリフトし、プレビューが嘘になる。
+///
+/// **同じ述語の 3 つめの写しが `deploy::is_linked_callee` にある**(EXISTS 版。readiness 門禁と
+/// probe が使う)。あちらは真偽 1 個で足りるので軽い問い合わせのままにしてある —
+/// 「生存 caller」の定義を変えるときは**両方**直すこと。
+#[derive(sqlx::FromRow)]
+pub(crate) struct CallerRow {
+    pub id: Uuid,
+    pub display_name: String,
+    /// この callee を指している env 名(昇順)。
+    pub env_vars: Vec<String>,
+    pub desired_state: String,
+    pub last_deploy_status: Option<String>,
+    pub last_deploy_error: Option<String>,
+}
+
+/// この callee を注入している**生存 caller** の一覧(`network::service_callers` と
+/// `services::list_callers` の共通母体)。
+///
+/// **1 行 1 caller が構造的に自明**な形にしてある:`resources` を主表に `EXISTS` で絞り、env 名は
+/// 相関副問い合わせの `ARRAY(...)` で集める。`GROUP BY` + `array_agg` だと「同一 caller が同じ
+/// callee を複数の env 名で注入している」場合に集約の網羅性を読者が検算しないと 1 行性が保証
+/// できず、行が増えれば網操作が 2 回走り連帯再デプロイは同じ service を 2 度デプロイする。
+///
+/// soft-delete 済み caller を除くのは、網撤去に失敗して残った孤児網へ客人を入れ直さないため
+/// (codex 監査)。`resource_id` が service を指す行しか当たらないので注入元の kind 条件は要らない
+/// (`injections.resource_id` は resources の PK 参照 = $1 が service なら相手は必ず service)。
+///
+/// **caller の所有者で絞らない**:同一 owner は注入作成時に担保されている(M6 の境界は租户)。
+/// ここで絞ると、万一跨 owner の注入が生まれたときに**この端点だけが realias が触る集合より
+/// 少なく見せる** = 影響範囲の提示が嘘になる(黙って隠すより、担保を作成時に置く方が正しい)。
+pub(crate) async fn service_caller_rows(
+    state: &AppState,
+    callee_id: Uuid,
+) -> Result<Vec<CallerRow>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT caller.id, caller.display_name,
+                ARRAY(SELECT i.env_var FROM injections i
+                       WHERE i.service_id = caller.id AND i.resource_id = $1
+                       ORDER BY i.env_var) AS env_vars,
+                cs.desired_state,
+                ld.status AS last_deploy_status, ld.error AS last_deploy_error
+           FROM resources caller
+           JOIN service_details cs ON cs.resource_id = caller.id
+           LEFT JOIN LATERAL (
+                SELECT d.status, d.error FROM deploys d
+                 WHERE d.service_id = caller.id
+                 ORDER BY d.created_at DESC LIMIT 1
+           ) ld ON TRUE
+          WHERE caller.deleted_at IS NULL
+            AND EXISTS(SELECT 1 FROM injections i
+                        WHERE i.service_id = caller.id AND i.resource_id = $1)
+          ORDER BY caller.anon_seq",
+    )
+    .bind(callee_id)
+    .fetch_all(&state.db)
+    .await
+}
+
 fn key_prefix_env(env_var: &str) -> String {
     format!("{}_KEY_PREFIX", host_port_base(env_var))
 }

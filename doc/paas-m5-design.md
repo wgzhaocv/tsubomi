@@ -249,7 +249,8 @@ ACL SETUSER <acl_user> on >password         # ★ パスワード追加は単一
 ### 7.1 rotate
 `POST /api/caches/:id/rotate`:新 password 生成 → **`password_enc` / `rotated_at` を先に更新(DB=真実源)**
 → `valkey::set_user`(reset → 新パスで再構築。旧パス即死、key 規則は維持)。
-**再デプロイで新文字列が効く**(database rotate と同じ意味論)。
+**再デプロイで新文字列が効く**(注入値そのものが変わるため。**database rotate とは違う** —
+あちらは human role だけを回し、注入される app role は不変なので再デプロイは要らない)。
 **順序(DB 先 → valkey)が肝**:背骨どおり DB が期望状態で valkey はそこへ収束する。set_user が落ちても
 周期収束が DB の新パスへ**前向きに**貼り直す(旧パスは復活しない)。逆順だと DB 更新失敗時に収束が旧パスへ
 revert し、rotate 済みの旧資格が蘇る(S3 codex review で是正)。

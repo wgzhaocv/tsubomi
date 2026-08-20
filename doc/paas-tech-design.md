@@ -141,7 +141,9 @@ create table database_details (
 --   app   = 内部。デプロイ済み service に注入(M3)、内部路径、既定では rotate しない
 --           → 「外部 key の rotate が走っている service を切らない」を成立させる。
 --   human = 外部。ローカル開発 / DBeaver / `tbm db connect` / web SQL が使う。pgbouncer の
---           外部入口(会社 CIDR)経由、rotate 可(rotate = 旧文字列即死、再デプロイで反映)。
+--           外部入口(会社 CIDR)経由、rotate 可(rotate = 旧文字列即死。**注入済み service には
+--           無影響** — 注入されるのは app role なので、再デプロイは要らない。ここを「再デプロイで
+--           反映」と書いていたのが web の誤った rotate 文案の出所だった)。
 -- 隔離しているのは「漏洩の被害面 + rotate が service を切らないこと」であって権限ではない
 -- (漏れた human key は rotate するまで当該 DB に全権 — だから rotate は human を既定にする)。
 create table database_roles (

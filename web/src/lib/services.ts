@@ -182,6 +182,18 @@ export type Injection = {
   needs_redeploy?: boolean;
 };
 
+// この service を注入している別の service(ServiceCallerDto 鏡)= 改名の影響範囲。
+// 行は caller 単位に集約済み(env_vars が複数になる)。
+export type ServiceCaller = {
+  id: string;
+  display_name: string;
+  /** 注入名(バインディング名)。派生する _HOST / _PORT は含まない。 */
+  env_vars: string[];
+  desired_state: string;
+  last_deploy_status?: string | null;
+  last_deploy_error?: string | null;
+};
+
 // detail(id) = ["services", id] は deploys/injections/env/logs の prefix なので、
 // detail(id) を無効化するとその service の全 tab が取り直される(prefix マッチ)。
 export const serviceKeys = {
@@ -193,6 +205,7 @@ export const serviceKeys = {
   logs: (id: string) => ["services", id, "logs"] as const,
   metrics: (id: string) => ["services", id, "metrics"] as const,
   stats: (id: string, days: number) => ["services", id, "stats", days] as const,
+  callers: (id: string) => ["services", id, "callers"] as const,
 };
 
 // エラー本文(サーバは AppError の日本語メッセージを text で返す)を投げる。
@@ -305,6 +318,17 @@ export function useServiceInjections(id: string) {
   return useQuery({
     queryKey: serviceKeys.injections(id),
     queryFn: () => getJson<Injection[]>(`/api/services/${id}/injections`),
+  });
+}
+
+// 「誰が私を注入しているか」= 改名の影響範囲。概要の常設セクションと subdomain 変更 modal が
+// 同じ配列を読む。輪詢はしない(集合が変わるのは inject / eject のときで、そちらが
+// serviceKeys.all を落とす)が、**呼び出し側は「未知」と「0 件」を区別しなければならない** —
+// 取得前 / 失敗を空配列扱いすると、改名 modal が警告なしで通ってしまう(codex 審査)。
+export function useServiceCallers(id: string) {
+  return useQuery({
+    queryKey: serviceKeys.callers(id),
+    queryFn: () => getJson<ServiceCaller[]>(`/api/services/${id}/callers`),
   });
 }
 
@@ -449,14 +473,20 @@ export function useCreateInjection(id: string) {
       if (!res.ok) return failBody(res);
       return res.json();
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.injections(id) }),
+    // **serviceKeys.all で広く落とす**:注入の作成は自分の injections だけでなく
+    // **注入元(callee)の逆引き名単**(serviceKeys.callers)も変える。狭いキーだけ落とすと、
+    // callee の概要が古い `[]` を最大 staleTime 分そのまま使い、改名時に「呼び出し側なし」と
+    // 嘘をつく(codex 審査)。注入は稀な操作なので広く落とす方の代償は小さい。
+    onSuccess: () => qc.invalidateQueries({ queryKey: serviceKeys.all }),
   });
 }
 
-export function useEjectInjection(id: string) {
+// eject は injection id だけで引ける(端点が `/api/injections/{id}`)ので service id を取らない。
+export function useEjectInjection() {
   return useServiceAction<string>(
     (injectionId) => ({ url: `/api/injections/${injectionId}`, method: "DELETE" }),
-    () => serviceKeys.injections(id),
+    // 作成と同じ理由で広く落とす(注入元の逆引き名単も変わる — codex 審査)。
+    () => serviceKeys.all,
   );
 }
 

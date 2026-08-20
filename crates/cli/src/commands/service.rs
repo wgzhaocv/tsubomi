@@ -77,6 +77,13 @@ pub enum ServiceCmd {
         /// 予約語(`www`/`api`/`db` 等・`tsubomi-` 始まり)は不可。使用中なら 409)
         new_subdomain: String,
     },
+    /// この service を注入している別の service(呼び出し側)を一覧する。
+    /// **改名する前に影響範囲を確かめる**のが主用途 — 改名した瞬間、呼び出し側のコンテナ内に
+    /// 凍結された `_URL`/`_HOST` は旧 subdomain のままなので内部リンクが切れる
+    Callers {
+        /// 対象サービスの表示名(`tbm service list` で確認)
+        name: String,
+    },
     /// メモリ / CPU 上限を変更する(次のデプロイから反映 — 実行中のコンテナには影響しない)
     Limits {
         /// 対象サービスの表示名
@@ -292,7 +299,12 @@ pub async fn run(
             name,
             new_subdomain,
         } => {
-            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            // 行そのものを引く(id 解決と同じ 1 リクエスト)。**改名前の subdomain** が要る —
+            // 同値の再実行では影響警告を出さないため(サーバも時刻を動かさず別名も剥がさない
+            // ので、そこで「切れます」と言うのは嘘。codex 審査)。
+            let before = resolve_service_row(&c, &server_url, &token, &name).await?;
+            let id = before.id.to_string();
+            let changed = before.subdomain != new_subdomain;
             let svc = api::service_set_subdomain(&c, &server_url, &token, &id, &new_subdomain).await?;
             if json {
                 print_json(&svc)?;
@@ -306,9 +318,51 @@ pub async fn run(
                     }
                     println!("※ 旧 URL は即座に無効になります(302 /noservice)。GitHub repo 名は変わりません");
                 }
-                println!(
-                    "※ このサービスを注入している呼び出し側は再デプロイで新しい値が入ります(`tbm service status <呼び出し側>` の [未反映:要デプロイ] で確認)"
-                );
+                // 影響範囲は**実際の呼び出し側**を引いてから言う(無条件の脅し文をやめる)。
+                // 改名自体は既に成功しているので、ここの取得失敗でコマンドを失敗させない。
+                // 同値の再実行(changed=false)では何も変わっていないので影響も言わない。
+                if changed {
+                    match api::service_callers(&c, &server_url, &token, &id).await {
+                        Ok(callers) if !callers.is_empty() => {
+                            // 断定は**稼働中の相手だけ**に絞る:停止中 / 未デプロイの呼び出し側には
+                            // 凍結された接続先も生きたリンクも無いので「切れた」は嘘になる。
+                            let running = callers
+                                .iter()
+                                .filter(|c| c.desired_state == "running")
+                                .count();
+                            println!(
+                                "※ このサービスを注入している呼び出し側 {} 件:",
+                                callers.len()
+                            );
+                            print_callers(&callers);
+                            if running > 0 {
+                                println!(
+                                    "   稼働中の {running} 件は再デプロイするまで旧サブドメインを参照し続けます(内部リンクが切れます)。停止中の呼び出し側は次の起動で新しい値が入ります"
+                                );
+                            } else {
+                                println!(
+                                    "   いずれも稼働していないので、次に起動したときに新しい値が入ります"
+                                );
+                            }
+                        }
+                        Ok(_) => {} // 呼び出し側なし = 言うことはない
+                        Err(e) => println!(
+                            "(呼び出し側の一覧を取得できませんでした:{e}。`tbm service callers {name}` で確認してください)"
+                        ),
+                    }
+                }
+            }
+        }
+        ServiceCmd::Callers { name } => {
+            let id = resolve_service_id(&c, &server_url, &token, &name).await?;
+            let callers = api::service_callers(&c, &server_url, &token, &id).await?;
+            if json {
+                print_json(&callers)?;
+            } else if callers.is_empty() {
+                println!("このサービスを注入している呼び出し側はありません");
+            } else {
+                println!("呼び出し側 {} 件:", callers.len());
+                print_callers(&callers);
             }
         }
         ServiceCmd::Limits { name, memory, cpus } => {
@@ -692,6 +746,33 @@ fn emit_exec_result(result: &tsubomi_shared::ExecResult, json: bool) -> Result<(
         _ => 1,
     };
     std::process::exit(code);
+}
+
+/// 呼び出し側名単の text 表示(`service callers` と `service subdomain` の回显が共有)。
+/// 1 行 1 caller — env 名は集約済み(同一 caller が複数名で注入していても 1 行)。
+/// マーカーと エラー行の形は `print_status` のデプロイ履歴と揃える。
+fn print_callers(callers: &[tsubomi_shared::ServiceCallerDto]) {
+    for cl in callers {
+        // リンクを切る前に知りたい情報 — 停止中 / 既に直近のデプロイが失敗している呼び出し側。
+        let stopped = if cl.desired_state == "stopped" {
+            "  [停止中]"
+        } else {
+            ""
+        };
+        let failed = if cl.last_deploy_status.as_deref() == Some("failed") {
+            "  [直近デプロイ失敗]"
+        } else {
+            ""
+        };
+        println!(
+            "  {} (注入名 {}){stopped}{failed}",
+            cl.display_name,
+            cl.env_vars.join(", ")
+        );
+        if let Some(err) = &cl.last_deploy_error {
+            println!("    — {err}");
+        }
+    }
 }
 
 /// status の text 表示(phase / desired / digest / 注入 / env keys / 直近のデプロイ履歴)。
