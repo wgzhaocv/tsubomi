@@ -371,3 +371,20 @@ CLI の履歴と web の Deploys タブが `reconcile` / `caller_relink` にだ�
   保たれ旧コンテナが無傷**(= P0-2 回帰。この検証で「'deploying' で固着」バグを発見)。
   provenance が `caller_relink` で焼かれ CLI 履歴にラベルが出る。migration の**既存行読み戻し**。
   検証用に作った service は全て削除 + purge し、網・コンテナ・token の残留ゼロを確認。
+- **本番 e2e(2026-08-22、server v63 / tbm 1.1.5)**:dev と同じ筋を**本番の香橙派で**通した
+  (`--port 80` の private service 2 本 = 公開 URL を持たないので外部影響なし)。確認できたもの:
+  ① 注入直後は `will_redeploy=false` + 「自身が稼働していない」skip_reason(**停止中を叩き
+  起こさない**)② 両者デプロイ後は `will_redeploy=true` ③ **改名で実際に断線**(caller の凍結 env は
+  `http://t63-callee:80` のまま / callee の網別名だけ新名へ / 旧名は `bad address`・新名は実体を返す)
+  ④ 独立端点 `redeploy-callers` で env が新名へ追従し到達 ⑤ `--redeploy-callers` の一発でも同じ
+  ⑥ **同値で再実行しても端点が呼ばれ relink が走る**(72d6c60 の撤回の回帰 — 部分失敗の再試行が
+  救われる)⑦ **停止中 caller は skip され、実行後も `desired=stopped` / deploys 件数不変**
+  ⑧ 起動しただけで新しい値が入る ⑨ `subdomain_changed_at` による未反映バッジが改名で点き
+  relink で消える ⑩ **並行 2 発で片方が同期 409**(嘘の 202 が出ない)⑪ 同一 service への並行
+  デプロイも 409 ⑫ **`phase=failed` の caller は正直に skip**(理由 + 底層エラーを併載。start-first で
+  旧コンテナは無傷 = 72d6c60 の修正の回帰)⑬ eject で別名が即剥がれ名単が空になり、改名の案内が
+  何も言わなくなる ⑭ 対象ゼロで幽霊 409 も空 audit も出ない。
+  エラー面は `validation`(予約語 / `tsubomi-` 前綴 / 大文字・記号 / 数字始まり / `-` 終わり / 51 字)、
+  `conflict`(使用中 subdomain・並行)、`not_found`、clap 使用法は exit 2 を実測。
+  終了後は 2 本とも delete → purge し、コンテナ・網・route ファイルの残留ゼロ + 既存 4 app が
+  ship 前と同一応答(200/200/200/403。403 は会社 IP 許可リスト)を確認。

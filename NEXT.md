@@ -1,4 +1,4 @@
-# NEXT.md — 作業の引き継ぎ(2026-08-20 時点)
+# NEXT.md — 作業の引き継ぎ(2026-08-22 時点)
 
 > **これは一時ファイル**。ここの TODO が片付いたら**削除する**
 > (根に残すのは `CLAUDE.md` / `README.md` だけ、が本来の約束 — 設計・調査・障害記録は `doc/`)。
@@ -9,34 +9,25 @@
 
 ## 1. 現在地(全部 push 済み・本番稼働中)
 
-直近 6 commit(古い順):
+**出荷済み(2026-08-22)**:
+
+- **server `tsubomi:v63`**(本番 = 香橙派)。`72d6c60`(codex 修正 7 件)+ web の 2 件を含む。
+  展開は `HOST=opi TAG=v63 just ship`(infra `--no-recreate` + server 単換 = 無瞬断。
+  ship 前後で既存 4 app の応答が同一 200/200/200/403 — 403 は会社 IP 許可リストで無関係)。
+- **tbm 1.1.5** を Pi へ公開済み(`just release-cli-publish`)+ ローカルも `tbm update` 済み。
+  1.1.4 のままだと `72d6c60` の CLI 修正(`--redeploy-callers` の client-side 同値判定の撤回)が
+  誰にも届かなかった。
+- migration は v62 時点から増えていない(`20260820000001_deploys_trigger.sql` が最後)。
+
+直近の commit(古い順):`72d6c60`(codex 7 件)→ `d68481b`(NEXT.md)→ `1528d29`(subdomain の
+Enter)→ `c372576`(CLI 1.1.5)→ `b82ec8f`(一覧行の truncate)。
+
+**このセッションで足した web の 2 件**:
 
 | commit | 内容 |
 |---|---|
-| `800bec0` | **改名の影響名単** `GET /services/{id}/callers`(+ `tbm service callers` / web 概要の常設セクション / modal の案内を条件化)。併せて `DatabaseOverview` の誤った rotate 文案と、その出所の doc 2 箇所を修正 |
-| `8d2ad8a` | **既存バグ修正**:孤児の進行中 `deploys` 行で `deploy-source` が永久 409 になる穴(起動時に非 terminal 行を閉じる) |
-| `90e9f24` | **連帯再デプロイ** `POST /services/{id}/redeploy-callers`(+ `DeployTrigger::CallerRelink` / 実行枠の入場制限 / `deploys.trigger` migration / CLI 双入口 / web の checkbox と半完成エラー) |
-| `eb4aee5` `8389586` `3abf4ca` | skill(AI 面)の追記と、外部審査で出た**事実誤り・矛盾**の修正 |
-| `b4323ef` | この NEXT.md + CLAUDE.md からのポインタ |
-| `72d6c60` | **codex 深審の真バグ 7 件を修正(未 ship)** — 詳細は (A) |
-
-**出荷済み**:
-
-- **server `tsubomi:v62`**(本番 = 香橙派)。`HOST=opi TAG=v62 just ship` で展開。
-  **⚠ v62 は `90e9f24` 時点のサーバコード**。`72d6c60`(codex 修正 7 件)は**まだ本番に無い** —
-  次は `HOST=opi TAG=v63 just ship`。CLI 側の変更も含むので `just release-cli-publish` の前に
-  `crates/cli/Cargo.toml` の version を **1.1.5** へ上げること(リリースは不可変)。
-- migration `20260820000001_deploys_trigger.sql` は本番適用済み。既存 32 行が `'user'` に回填され、
-  **既存行を API 経由で読み戻すところまで確認済み**(新規作成の e2e では見えない穴の約束)。
-- **tbm 1.1.4** を Pi へ公開済み(`just release-cli-publish`)+ ローカルも `tbm update` 済み。
-  skill の投影(`~/.claude/skills/` と共有庫 `~/.agents/skills/`)も更新済み。
-- ship 前後で本番の全テナント app の公開 URL が**同一の応答**(403/200/200/200)。403 は会社 IP
-  許可リストによるもので、この変更とは無関係。
-
-**旧 CLI(1.1.1)は v62 に対して壊れない**ことを確認済み(serde が未知の `trigger` を無視)。
-強制アップグレードの窓は無い。
-
----
+| `1528d29` | **subdomain の Enter を「同値 / 不正値なら何も起きない」に固める**。`lib/subdomain.ts` に形式検証の純関数(サーバ `validate_subdomain` の写し・**権威はサーバのまま**)を切り出し改名 modal と作成フォームで共有。送信可否を 1 か所で導出し、**隠し submit を `disabled`**(HTML の暗黙送信は default button が disabled なら発火しない = Enter で action すら呼ばれない)。`onSubmit`+`preventDefault` → **React 19 の `<form action>`**。`useActionState` は不採用(pending / error は 2 つの mutation が持っており、**半完成**を state に写すと真源が二重になる) |
+| `b82ec8f` | **長い件名で「ボタンが次の行へ落ちる」を truncate に**。flex の行分割は左列の **max-content 幅**で決まるので `min-w-0` だけでは足りず `flex-1`(basis 0)が要る。デプロイ履歴 + 環境変数タブの 2 行(同型)を修正。ヘッダ系の `flex-wrap` は意図的なので不変 |
 
 ## 2. まだ終わっていないこと(優先順)
 
@@ -52,34 +43,36 @@ doc §7 に。特に **2 つは自分の設計判断の撤回**なので、次�
 - phase 復元に「自分以外の非 terminal な deploy 行が無い」条件を**足してはいけない**
   (足したら `deploying` 永久固着を産んだ)。理由は `deploy.rs` の当該コメントに全部書いた。
 
-### (B) web UI を**目視で確認していない** ← 実装は型検査だけ
+### (B) web UI の**ブラウザ目視は未実施**(ユーザ判断で今回は見送り)
 
-`tsc -b` と `vp lint` は通っているが、**ブラウザで一度も見ていない**。確認すべきもの:
+`tsc -b` / `vp lint` / `vp build` は通り、`1528d29` の入力検証はサーバ規則との**逐条一致を
+機械照合済み**(24 ケース:予約語 7 語 + `tsubomi-` 前綴 / 大文字・記号 / 数字始まり / `-` 終わり /
+51 字 / 境界の 50 字 / 空文字 — うち 8 ケースは本番 API の実応答と突き合わせた)。
+残るのは**ブラウザでしか見えない分**だけ:
 
 1. 概要の常設「呼び出し側」セクション(0 件でセクションごと消えるか)
-2. subdomain 変更 modal の **4 状態**:取得中「確認しています…」/ 取得失敗「確認できません
-   でした」+ 一般注意 / 0 件(何も出ない)/ N 件(名単 + 影響文)
-3. 既定チェック済みの checkbox(対象 0 件で出ないこと・全 skip で disabled)
-4. **半完成**:改名は成功したが relink が失敗した場合、modal が閉じず専用文案 + 再試行ボタン
-5. modal を開き直したとき前回の失敗バナーが残らないこと(`relink.reset()`)
-6. `CallerItem` のバッジ(停止中 = 灰 / 直近デプロイ失敗 = 赤)が
-   「未反映(要デプロイ)」の琥珀と**別の色**であること(色の意味が衝突していた既存問題)
-7. Deploys タブに `[自動:注入元の改名に追従]` のラベルが出ること
-8. **`72d6c60` で挙動が変わった分**:①入力欄で **Enter**(同値のまま)を押しても何も起きない
-   ②名単の取得を失敗させた状態(server を止める等)でも checkbox が出て、勾選のまま送ると
-   relink POST が飛ぶ ③改名の応答前に画面を離れても relink が送られる(Network タブで 2 本目を確認)
+2. 変更 modal の 4 状態(取得中 / 取得失敗 / 0 件 / N 件)
+3. 既定チェック済み checkbox(対象 0 件で出ない・名単未知でも出る)
+4. **半完成**(改名は成功・relink 失敗)で modal が閉じず専用文案 + 再試行
+5. modal を開き直して前回の失敗バナーが残らないこと(`relink.reset()`)
+6. `CallerItem` のバッジ色が「未反映(要デプロイ)」の琥珀と衝突しないこと
+7. Deploys タブの `[自動:注入元の改名に追従]` ラベル
+8. `1528d29`:不正値を打つと入力欄の下に赤字が出て **Enter で何も起きない** /
+   同値では淡色で「現在のサブドメインと同じです」/ `b82ec8f`:長い件名で
+   **ボタンが右端に残り件名が `…` で切れる**
 
-`just db-up` + `just dev` → :5173。検証用の caller/callee ペアの作り方は §3 のレシピ。
+`just db-up` + `just dev` → :5173。caller/callee ペアの作り方は §3 のレシピ。
 
-### (C) 本番 e2e は**未実施**(意図的)
+### (C) 本番 e2e ~~未実施~~ → **完了(2026-08-22、server v63 / tbm 1.1.5)**
 
-dev では端到端で確認済み(断線の実測 → 追従 → 実到達 / 護欄の回帰)。本番では
-**読み取りのみ**確認した(新端点が 200 で `[]`、migration の読み戻し、全 app 無変化)。
+`--port 80` = private(公開 URL を持たない)のテスト service 2 本で、dev と同じ筋を本番の
+香橙派で通した。**14 項目の確認内容と実測値は `doc/paas-service-subdomain-design.md` §7.8**
+(恒久記録)。要点だけ:改名で**実際に断線する**ところ(凍結 env は旧名 / 網別名は新名 /
+旧名は `bad address`)を実測してから連帯再デプロイで追従を確認、**同値再実行でも relink が
+飛ぶ**(72d6c60 の撤回)/ **停止中・failed の caller は叩き起こさない** / 並行 2 発は同期 409。
+終了後に delete → purge し、コンテナ・網・route ファイルの残留ゼロと既存 4 app の無変化を確認。
 
-本番で書き込み e2e をやっていない理由:**本番に生きた M6 リンクが 1 本も無い**
-(`injections` の service 注入は 1 行あるが、caller・callee ともゴミ箱の中 = 過去の e2e の残骸)。
-やるなら本番にテスト service を 2 つ作る判断が必要 → **ユーザに確認してから**。
-実際の service↔service リンクが生まれたときに自然に検証されるので、急がなくてよい。
+**残りの本番未検証**:`deploy --watch`(GitHub Actions 経路)は今回触っていない。
 
 ### (E) codex 第 2 巡で**採用しなかった 8 件**(理由付き。次スライスの材料)
 
@@ -205,6 +198,16 @@ T deploy --image traefik/whoami:latest --service t-caller   # 注入後に再デ
 - **migration の回填値は既存行を読み戻すまで検証が終わらない**(新規作成の e2e では見えない)。
 - **dev の実測でしか出ない穴がある**:phase 固着も「registry を止めて pull を失敗させる」
   という**失敗路径の実測**で初めて出た。門禁・正常路径だけ試して終わりにしない。
+- **本番でも「壊してから直す」順で測る**(2026-08-22 の本番 e2e)。改名 → **断線を実測**
+  (旧名が `bad address`)→ relink → 追従、の順にすると「元から繋がっていただけ」を
+  追従と誤読しない。テスト service は **`--port 80`(= visibility 推導が private)**にすれば
+  公開 URL が生えないので本番でも外部影響なく作れる。
+- **flex で truncate させたいなら `min-w-0` だけでは足りない**(`b82ec8f`)。行分割の判定は
+  左列の **max-content 幅**なので、`flex-1`(basis 0)にしないと縮む前に折り返す
+  = 「ボタンが次の行の先頭へ落ちる」。`flex-wrap` を親に付けたままだと truncate は一生効かない。
+- **HTML の暗黙送信は default button が disabled なら発火しない**(`1528d29`)。form の隠し
+  submit を `disabled` にするのが「Enter で何も起きない」の最短路(関数側のガードは二重の防壁
+  として残す — footer のボタンの disabled は form submit の防壁にはならない)。
 
 ---
 
