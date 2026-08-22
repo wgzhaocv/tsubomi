@@ -42,6 +42,7 @@ import {
   useStopService,
   VISIBILITY_OPTIONS,
 } from "@/lib/services";
+import { subdomainProblem } from "@/lib/subdomain";
 import { useCopied } from "@/lib/use-copied";
 import { cn } from "@/lib/utils";
 
@@ -81,24 +82,36 @@ export default function ServiceOverview() {
   // ここでは id 変化時の強制クローズは不要(遷移でコンポーネントごと作り直される)。
   const [subOpen, setSubOpen] = useState(false);
   const [subValue, setSubValue] = useState("");
+  // 送信可否は**1 箇所で導出**して、footer のボタン・隠し submit・関数内のガードが同じ述語を
+  // 読む(3 箇所で別々に条件を書くと、Enter とクリックで挙動が割れる — 実際に割れていた)。
+  const subTrimmed = subValue.trim();
+  // 形式の問題(クライアント側の前置門。権威はサーバ)。入力中に赤字で理由を出す。
+  const subProblem = subdomainProblem(subTrimmed);
+  // 同値は「形式の問題」ではなく「変更するものが無い」— 赤字にせず淡色で言う。
+  const subUnchanged = subTrimmed !== "" && subTrimmed === svc?.subdomain;
+  // **影響範囲の取得中は待つ**(名単を出せないまま改名させない)+ 二重送信を防ぐ。
+  const canSubmitSub =
+    subTrimmed !== "" &&
+    subProblem === null &&
+    !subUnchanged &&
+    !setSub.isPending &&
+    !callersFetching &&
+    !relink.isPending;
   // 2 つの write を **1 つの async 関数の中で await** する(per-call onSuccess ではなく):
   // observer が消えると per-call コールバックは呼ばれないので、応答前に画面を離れると
   // 「改名だけ成功して relink が送られない」= 半完成が黙って起きる(codex 審査)。
   // `mutateAsync` の Promise は observer に紐づかないので unmount しても完走する。
+  //
+  // React 19 の `<form action>` に渡す(第一引数の FormData は使わない — 値は controlled な
+  // state が真源)。`onSubmit` + `preventDefault` の定型が消えるのが利点。`useActionState` は
+  // 使わない:pending と error は 2 つの mutation(改名 / fan-out)が既に持っており、**半完成**
+  // (改名は成功・fan-out は失敗)という 2 者の組を state に写すと真源が二重になる。
   const submitSubdomain = async () => {
-    const trimmed = subValue.trim();
-    // 二重送信を防ぐ + **影響範囲の取得中は待つ**(名単を出せないまま改名させない)。
-    // **同値ガードはここに置く** — footer のボタンの disabled は form submit の防壁にならず、
-    // 入力欄で Enter を押すと hidden submit 経由でここへ来る(codex 審査)。
-    if (
-      !trimmed ||
-      trimmed === svc?.subdomain ||
-      setSub.isPending ||
-      callersFetching ||
-      relink.isPending
-    ) {
-      return;
-    }
+    // **ガードは関数自身に置く** — footer のボタンの disabled は form submit の防壁にならず、
+    // 入力欄で Enter を押すと hidden submit 経由でここへ来る(codex 審査)。隠し submit も
+    // disabled にしてあるので Enter は本来ここへ来ないが、防壁は二重に持つ。
+    if (!canSubmitSub) return;
+    const trimmed = subTrimmed;
     try {
       await setSub.mutateAsync(trimmed);
     } catch {
@@ -405,7 +418,7 @@ export default function ServiceOverview() {
             <Button
               type="primary"
               loading={setSub.isPending || callersFetching}
-              disabled={!subValue.trim() || subValue.trim() === svc?.subdomain || callersFetching}
+              disabled={!canSubmitSub}
               onClick={() => void submitSubdomain()}
             >
               変更
@@ -413,20 +426,24 @@ export default function ServiceOverview() {
           </>
         }
       >
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void submitSubdomain();
-          }}
-          className="flex w-full flex-col gap-3"
-        >
+        {/* React 19 の form action(関数を渡すと submit は自動で preventDefault される)。 */}
+        <form action={submitSubdomain} className="flex w-full flex-col gap-3">
           <Input
             label="サブドメイン"
             value={subValue}
             autoFocus
             onChange={(e) => setSubValue(e.target.value)}
+            status={subProblem ? "error" : undefined}
+            errorMessage={subProblem}
             description="小文字英数と「-」・英字始まり・「-」終わり不可・50 字以内(予約語と tsubomi- 始まりは不可)。公開 URL が新しいサブドメインに変わります。"
           />
+          {/* 同値は形式の問題ではないので赤字にしない。ボタンが押せない理由だけ言う
+              (無言で disabled にすると「壊れている」と読まれる)。 */}
+          {subUnchanged && (
+            <p className="text-sm font-medium text-muted-foreground">
+              現在のサブドメインと同じです。
+            </p>
+          )}
           <p className="text-sm font-medium text-muted-foreground">
             旧 URL は即座に無効になります。GitHub リポジトリ名は変わりません。
           </p>
@@ -507,9 +524,17 @@ export default function ServiceOverview() {
               </Button>
             </div>
           )}
-          {/* Modal の footer は form の外なので、入力欄が 2 個になると Enter の暗黙送信が
-              効かなくなる(ServiceEnv と同じイディオムで隠し submit を置く)。 */}
-          <button type="submit" className="hidden" aria-hidden tabIndex={-1} />
+          {/* Modal の footer は form の外なので、Enter の暗黙送信のために隠し submit を置く
+              (ServiceEnv と同じイディオム)。**disabled にしておくのが要点** — HTML の暗黙送信は
+              default button が disabled なら発火しないので、同値 / 不正値のときは
+              action すら呼ばれずに「何も起きない」になる。 */}
+          <button
+            type="submit"
+            className="hidden"
+            aria-hidden
+            tabIndex={-1}
+            disabled={!canSubmitSub}
+          />
         </form>
       </Modal>
     </div>

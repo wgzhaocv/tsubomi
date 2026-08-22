@@ -24,6 +24,7 @@ import {
   useServices,
   VISIBILITY_OPTIONS,
 } from "@/lib/services";
+import { subdomainProblem } from "@/lib/subdomain";
 
 // サービス一覧 + 作成導線。サービスは GitHub repo と 1:1 のデプロイ単位。
 // プラットフォームは GitHub に触れないので、作成後は「次の一手」(setup_commands + workflow)を
@@ -53,6 +54,9 @@ export default function Services() {
   const [memory, setMemory] = useState("");
   const [subdomain, setSubdomain] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  // subdomain の形式は入力しながら見せる(サーバへ往復させてから 400 を読むのではなく)。
+  // 権威はサーバ — ここは前置門。詳細は `lib/subdomain.ts` の頭注釈。
+  const subProblem = subdomainProblem(subdomain.trim());
 
   const submit = () => {
     const trimmed = name.trim();
@@ -69,6 +73,8 @@ export default function Services() {
       setFormError("メモリ上限は 128〜4096 の整数で入力してください");
       return;
     }
+    // 形式が不正なら**送らない**(Enter の暗黙送信もここへ来る)。理由は入力欄の下に出ている。
+    if (subProblem) return;
     setFormError(null);
     create.mutate(
       {
@@ -288,6 +294,8 @@ export default function Services() {
                   placeholder="省略 = 名前から自動生成"
                   value={subdomain}
                   onChange={(e) => setSubdomain(e.target.value)}
+                  status={subProblem ? "error" : undefined}
+                  errorMessage={subProblem}
                   description="公開 URL のサブドメイン(小文字英数と「-」・英字始まり・「-」終わり不可・50 字以内。www / api / db 等の予約語と tsubomi- 始まりは不可)。GitHub リポジトリ名にもこの値を使います。"
                 />
               </div>
