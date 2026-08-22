@@ -166,9 +166,10 @@ export default function ServiceEnv() {
           {injs.map((inj) => (
             <li
               key={`inj-${inj.id}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
+              className="flex items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
             >
-              <div className="flex min-w-0 flex-col gap-1">
+              {/* `flex-1` + `min-w-0` = truncate の前提(ServiceDeploys と同じ理由)。 */}
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
                 {/* 1 行目:環境変数名(これがコンテナに渡る名前)+「注入」バッジ。 */}
                 <div className="flex min-w-0 items-center gap-2">
                   <code className="min-w-0 truncate font-mono text-sm font-bold text-foreground">
@@ -235,10 +236,13 @@ export default function ServiceEnv() {
           {staticKeys.map((k) => (
             <li
               key={`env-${k}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
+              className="flex items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
             >
-              <code className="min-w-0 truncate font-mono font-bold text-foreground">{k}</code>
+              <code className="min-w-0 flex-1 truncate font-mono font-bold text-foreground">
+                {k}
+              </code>
               <Button
+                className="shrink-0"
                 type="text"
                 size="small"
                 danger

@@ -53,9 +53,12 @@ export default function ServiceDeploys() {
           {deploys.map((d) => (
             <li
               key={d.id}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
+              className="flex items-center justify-between gap-3 rounded-2xl border-2 border-[#e8e2d6] bg-card px-4 py-3"
             >
-              <div className="flex min-w-0 flex-col gap-0.5">
+              {/* `flex-1` + `min-w-0` が truncate の前提:これが無いと flex の行分割は左列の
+                  max-content 幅で判定するので、**長い commit 件名は truncate ではなく
+                  「ボタンが次の行の先頭へ落ちる」**という壊れ方をする(親の flex-wrap も外した)。 */}
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <span className="truncate font-bold text-foreground">
                   <StatusDot status={d.status} />
                   {/* 「稼働中」は行の状態なので左のステータス側に置く。右をボタン専用にしないと
@@ -79,6 +82,7 @@ export default function ServiceDeploys() {
               </div>
               {d.status === "succeeded" && (
                 <Button
+                  className="shrink-0"
                   type="default"
                   size="small"
                   loading={rollback.isPending}
